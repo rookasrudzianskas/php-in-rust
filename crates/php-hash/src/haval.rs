@@ -1,0 +1,296 @@
+//! HAVAL (3, 4 and 5 passes; 128, 160, 192, 224 and 256-bit digests).
+
+use crate::hasher::{Engine, load_le32, rsa_update};
+use crate::state::{StateResult, Visitor};
+
+const D0: [u32; 8] = [
+    0x243F_6A88,
+    0x85A3_08D3,
+    0x1319_8A2E,
+    0x0370_7344,
+    0xA409_3822,
+    0x299F_31D0,
+    0x082E_FA98,
+    0xEC4E_6C89,
+];
+
+const HAVAL_VERSION: u8 = 0x01;
+
+/// HAVAL's padding starts with a 0x01 byte (not 0x80).
+const PADDING: [u8; 128] = {
+    let mut p = [0u8; 128];
+    p[0] = 1;
+    p
+};
+
+/// One pass: (boolean function number, M-indices of the arguments x6..x0,
+/// word-order table `I<n>` (0 = identity), constant table `K<n>` (0 = none)).
+type Round = (u8, [usize; 7], usize, usize);
+
+const ROUNDS_3: [Round; 3] = [
+    (1, [1, 0, 3, 5, 6, 2, 4], 0, 0),
+    (2, [4, 2, 1, 0, 5, 3, 6], 2, 2),
+    (3, [6, 1, 2, 3, 4, 5, 0], 3, 3),
+];
+
+const ROUNDS_4: [Round; 4] = [
+    (1, [2, 6, 1, 4, 5, 3, 0], 0, 0),
+    (2, [3, 5, 2, 0, 1, 6, 4], 2, 2),
+    (3, [1, 4, 3, 6, 0, 2, 5], 3, 3),
+    (4, [6, 4, 0, 5, 2, 1, 3], 4, 4),
+];
+
+const ROUNDS_5: [Round; 5] = [
+    (1, [3, 4, 1, 0, 5, 2, 6], 0, 0),
+    (2, [6, 2, 1, 0, 3, 4, 5], 2, 2),
+    (3, [2, 6, 0, 4, 3, 1, 5], 3, 3),
+    (4, [1, 5, 3, 2, 0, 4, 6], 4, 4),
+    (5, [2, 5, 0, 6, 4, 3, 1], 5, 5),
+];
+
+const K2: [u32; 32] = [
+    0x452821e6, 0x38d01377, 0xbe5466cf, 0x34e90c6c, 0xc0ac29b7, 0xc97c50dd, 0x3f84d5b5, 0xb5470917,
+    0x9216d5d9, 0x8979fb1b, 0xd1310ba6, 0x98dfb5ac, 0x2ffd72db, 0xd01adfb7, 0xb8e1afed, 0x6a267e96,
+    0xba7c9045, 0xf12c7f99, 0x24a19947, 0xb3916cf7, 0x0801f2e2, 0x858efc16, 0x636920d8, 0x71574e69,
+    0xa458fea3, 0xf4933d7e, 0x0d95748f, 0x728eb658, 0x718bcd58, 0x82154aee, 0x7b54a41d, 0xc25a59b5,
+];
+const I2: [usize; 32] = [
+    5, 14, 26, 18, 11, 28, 7, 16, 0, 23, 20, 22, 1, 10, 4, 8, 30, 3, 21, 9, 17, 24, 29, 6, 19, 12,
+    15, 13, 2, 25, 31, 27,
+];
+const K3: [u32; 32] = [
+    0x9c30d539, 0x2af26013, 0xc5d1b023, 0x286085f0, 0xca417918, 0xb8db38ef, 0x8e79dcb0, 0x603a180e,
+    0x6c9e0e8b, 0xb01e8a3e, 0xd71577c1, 0xbd314b27, 0x78af2fda, 0x55605c60, 0xe65525f3, 0xaa55ab94,
+    0x57489862, 0x63e81440, 0x55ca396a, 0x2aab10b6, 0xb4cc5c34, 0x1141e8ce, 0xa15486af, 0x7c72e993,
+    0xb3ee1411, 0x636fbc2a, 0x2ba9c55d, 0x741831f6, 0xce5c3e16, 0x9b87931e, 0xafd6ba33, 0x6c24cf5c,
+];
+const I3: [usize; 32] = [
+    19, 9, 4, 20, 28, 17, 8, 22, 29, 14, 25, 12, 24, 30, 16, 26, 31, 15, 7, 3, 1, 0, 18, 27, 13, 6,
+    21, 10, 23, 11, 5, 2,
+];
+const K4: [u32; 32] = [
+    0x7a325381, 0x28958677, 0x3b8f4898, 0x6b4bb9af, 0xc4bfe81b, 0x66282193, 0x61d809cc, 0xfb21a991,
+    0x487cac60, 0x5dec8032, 0xef845d5d, 0xe98575b1, 0xdc262302, 0xeb651b88, 0x23893e81, 0xd396acc5,
+    0x0f6d6ff3, 0x83f44239, 0x2e0b4482, 0xa4842004, 0x69c8f04a, 0x9e1f9b5e, 0x21c66842, 0xf6e96c9a,
+    0x670c9c61, 0xabd388f0, 0x6a51a0d2, 0xd8542f68, 0x960fa728, 0xab5133a3, 0x6eef0b6c, 0x137a3be4,
+];
+const I4: [usize; 32] = [
+    24, 4, 0, 14, 2, 7, 28, 23, 26, 6, 30, 20, 18, 25, 19, 3, 22, 11, 31, 21, 8, 27, 12, 9, 1, 29,
+    5, 15, 17, 10, 16, 13,
+];
+const K5: [u32; 32] = [
+    0xba3bf050, 0x7efb2a98, 0xa1f1651d, 0x39af0176, 0x66ca593e, 0x82430e88, 0x8cee8619, 0x456f9fb4,
+    0x7d84a5c3, 0x3b8b5ebe, 0xe06f75d8, 0x85c12073, 0x401a449f, 0x56c16aa6, 0x4ed3aa62, 0x363f7706,
+    0x1bfedf72, 0x429b023d, 0x37d0d724, 0xd00a1248, 0xdb0fead3, 0x49f1c09b, 0x075372c9, 0x80991b7b,
+    0x25d479d8, 0xf6e8def7, 0xe3fe501a, 0xb6794c3b, 0x976ce0bd, 0x04c006ba, 0xc1a94fb6, 0x409f60c4,
+];
+const I5: [usize; 32] = [
+    27, 3, 21, 26, 17, 11, 20, 29, 19, 0, 12, 7, 13, 8, 31, 10, 5, 9, 14, 30, 18, 6, 28, 24, 2, 23,
+    16, 22, 4, 1, 25, 15,
+];
+
+/// The boolean functions F1..F5; `x` holds the arguments x6, x5, ..., x0.
+fn f(func: u8, x: [u32; 7]) -> u32 {
+    let [x6, x5, x4, x3, x2, x1, x0] = x;
+    match func {
+        1 => (x1 & x4) ^ (x2 & x5) ^ (x3 & x6) ^ (x0 & x1) ^ x0,
+        2 => {
+            (x1 & x2 & x3)
+                ^ (x2 & x4 & x5)
+                ^ (x1 & x2)
+                ^ (x1 & x4)
+                ^ (x2 & x6)
+                ^ (x3 & x5)
+                ^ (x4 & x5)
+                ^ (x0 & x2)
+                ^ x0
+        }
+        3 => (x1 & x2 & x3) ^ (x1 & x4) ^ (x2 & x5) ^ (x3 & x6) ^ (x0 & x3) ^ x0,
+        4 => {
+            (x1 & x2 & x3)
+                ^ (x2 & x4 & x5)
+                ^ (x3 & x4 & x6)
+                ^ (x1 & x4)
+                ^ (x2 & x6)
+                ^ (x3 & x4)
+                ^ (x3 & x5)
+                ^ (x3 & x6)
+                ^ (x4 & x5)
+                ^ (x4 & x6)
+                ^ (x0 & x4)
+                ^ x0
+        }
+        _ => (x1 & x4) ^ (x2 & x5) ^ (x3 & x6) ^ (x0 & x1 & x2 & x3) ^ (x0 & x5) ^ x0,
+    }
+}
+
+fn word_order(table: usize) -> Option<&'static [usize; 32]> {
+    match table {
+        2 => Some(&I2),
+        3 => Some(&I3),
+        4 => Some(&I4),
+        5 => Some(&I5),
+        _ => None,
+    }
+}
+
+fn constants(table: usize) -> Option<&'static [u32; 32]> {
+    match table {
+        2 => Some(&K2),
+        3 => Some(&K3),
+        4 => Some(&K4),
+        5 => Some(&K5),
+        _ => None,
+    }
+}
+
+fn transform(passes: u8, state: &mut [u32; 8], block: &[u8; 128]) {
+    let rounds: &[Round] = match passes {
+        3 => &ROUNDS_3,
+        4 => &ROUNDS_4,
+        _ => &ROUNDS_5,
+    };
+    let x = load_le32::<32>(block);
+    let mut e = *state;
+    for &(func, m, idx_table, k_table) in rounds {
+        let order = word_order(idx_table);
+        let consts = constants(k_table);
+        for i in 0..32 {
+            let at = |k: usize| e[(k + 8 - i % 8) % 8];
+            let mixed = f(func, m.map(at));
+            let word = x[order.map_or(i, |o| o[i])];
+            let mut value = mixed
+                .rotate_right(7)
+                .wrapping_add(at(7).rotate_right(11))
+                .wrapping_add(word);
+            if let Some(c) = consts {
+                value = value.wrapping_add(c[i]);
+            }
+            e[7 - (i % 8)] = value;
+        }
+    }
+    for (s, v) in state.iter_mut().zip(e) {
+        *s = s.wrapping_add(v);
+    }
+}
+
+/// HAVAL engine; the layout mirrors `PHP_HAVAL_CTX`.
+#[derive(Clone)]
+pub(crate) struct Haval {
+    state: [u32; 8],
+    count: u64,
+    buffer: [u8; 128],
+    passes: u8,
+    output: u16,
+}
+
+impl Haval {
+    pub(crate) fn new(passes: u8, output_bits: u16) -> Self {
+        Self {
+            state: D0,
+            count: 0,
+            buffer: [0; 128],
+            passes,
+            output: output_bits,
+        }
+    }
+}
+
+impl Engine for Haval {
+    fn update(&mut self, data: &[u8]) {
+        let index = ((self.count >> 3) & 0x7f) as usize;
+        self.count = self.count.wrapping_add((data.len() as u64) << 3);
+        let passes = self.passes;
+        let state = &mut self.state;
+        rsa_update(&mut self.buffer, index, data, |b| {
+            transform(passes, state, b);
+        });
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        let mut bits = [0u8; 10];
+        bits[0] = (HAVAL_VERSION & 0x07)
+            | ((self.passes & 0x07) << 3)
+            | (((self.output & 0x03) as u8) << 6);
+        bits[1] = (self.output >> 2) as u8;
+        bits[2..].copy_from_slice(&self.count.to_le_bytes());
+        // Pad out to 118 mod 128.
+        let index = ((self.count >> 3) & 0x7f) as usize;
+        let pad_len = if index < 118 {
+            118 - index
+        } else {
+            246 - index
+        };
+        self.update(&PADDING[..pad_len]);
+        self.update(&bits);
+
+        let s = &mut self.state;
+        let (s7, s6, s5, s4) = (s[7], s[6], s[5], s[4]);
+        match self.output {
+            128 => {
+                s[3] = s[3].wrapping_add(
+                    (s7 & 0xFF00_0000)
+                        | (s6 & 0x00FF_0000)
+                        | (s5 & 0x0000_FF00)
+                        | (s4 & 0x0000_00FF),
+                );
+                s[2] = s[2].wrapping_add(
+                    (((s7 & 0x00FF_0000) | (s6 & 0x0000_FF00) | (s5 & 0x0000_00FF)) << 8)
+                        | ((s4 & 0xFF00_0000) >> 24),
+                );
+                s[1] = s[1].wrapping_add(
+                    (((s7 & 0x0000_FF00) | (s6 & 0x0000_00FF)) << 16)
+                        | (((s5 & 0xFF00_0000) | (s4 & 0x00FF_0000)) >> 16),
+                );
+                s[0] = s[0].wrapping_add(
+                    ((s7 & 0x0000_00FF) << 24)
+                        | (((s6 & 0xFF00_0000) | (s5 & 0x00FF_0000) | (s4 & 0x0000_FF00)) >> 8),
+                );
+            }
+            160 => {
+                s[4] = s[4].wrapping_add(
+                    ((s7 & 0xFE00_0000) | (s6 & 0x01F8_0000) | (s5 & 0x0007_F000)) >> 12,
+                );
+                s[3] = s[3].wrapping_add(
+                    ((s7 & 0x01F8_0000) | (s6 & 0x0007_F000) | (s5 & 0x0000_0FC0)) >> 6,
+                );
+                s[2] =
+                    s[2].wrapping_add((s7 & 0x0007_F000) | (s6 & 0x0000_0FC0) | (s5 & 0x0000_003F));
+                s[1] = s[1].wrapping_add(
+                    ((s7 & 0x0000_0FC0) | (s6 & 0x0000_003F) | (s5 & 0xFE00_0000)).rotate_right(25),
+                );
+                s[0] = s[0].wrapping_add(
+                    ((s7 & 0x0000_003F) | (s6 & 0xFE00_0000) | (s5 & 0x01F8_0000)).rotate_right(19),
+                );
+            }
+            192 => {
+                s[5] = s[5].wrapping_add(((s7 & 0xFC00_0000) | (s6 & 0x03E0_0000)) >> 21);
+                s[4] = s[4].wrapping_add(((s7 & 0x03E0_0000) | (s6 & 0x001F_0000)) >> 16);
+                s[3] = s[3].wrapping_add(((s7 & 0x001F_0000) | (s6 & 0x0000_FC00)) >> 10);
+                s[2] = s[2].wrapping_add(((s7 & 0x0000_FC00) | (s6 & 0x0000_03E0)) >> 5);
+                s[1] = s[1].wrapping_add((s7 & 0x0000_03E0) | (s6 & 0x0000_001F));
+                s[0] =
+                    s[0].wrapping_add(((s7 & 0x0000_001F) | (s6 & 0xFC00_0000)).rotate_right(26));
+            }
+            224 => {
+                s[6] = s[6].wrapping_add(s7 & 0x0000_000F);
+                s[5] = s[5].wrapping_add((s7 >> 4) & 0x0000_001F);
+                s[4] = s[4].wrapping_add((s7 >> 9) & 0x0000_000F);
+                s[3] = s[3].wrapping_add((s7 >> 13) & 0x0000_001F);
+                s[2] = s[2].wrapping_add((s7 >> 18) & 0x0000_000F);
+                s[1] = s[1].wrapping_add((s7 >> 22) & 0x0000_001F);
+                s[0] = s[0].wrapping_add((s7 >> 27) & 0x0000_001F);
+            }
+            _ => {}
+        }
+        let mut out: Vec<u8> = s.iter().flat_map(|w| w.to_le_bytes()).collect();
+        out.truncate(usize::from(self.output) / 8);
+        out
+    }
+
+    fn visit(&mut self, v: &mut dyn Visitor) -> StateResult {
+        v.u32s(&mut self.state)?;
+        v.count32(&mut self.count)?;
+        v.bytes(&mut self.buffer)
+    }
+}
