@@ -4,6 +4,7 @@
 //! (e.g. `fprintf`, `md5_file`, `hash_file`). The streams work package owns
 //! this module and must keep these signatures.
 
+pub mod glob;
 use php_runtime::{PResult, Registry, Value, Vm};
 
 /// `fwrite()` semantics on a stream resource: returns the number of bytes
