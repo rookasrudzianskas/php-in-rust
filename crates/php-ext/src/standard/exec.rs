@@ -643,3 +643,581 @@ pub fn register(r: &mut Registry) {
     #[cfg(unix)]
     r.function(&PROC_NICE);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{TestVm, thrown};
+    use php_runtime::output::ob;
+    use php_runtime::{ArrayKey, PhpArray};
+
+    fn bytes(v: &Value) -> Vec<u8> {
+        match v {
+            Value::String(s) => s.to_vec(),
+            other => panic!("expected string, got {other:?}"),
+        }
+    }
+
+    fn lines(v: &Value) -> Vec<Vec<u8>> {
+        match v {
+            Value::Array(a) => a.values().map(bytes).collect(),
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    fn by_ref() -> PhpRef {
+        PhpRef::new(Value::Null)
+    }
+
+    fn err(class: &str, msg: &str) -> (String, String) {
+        (class.to_string(), msg.to_string())
+    }
+
+    fn escapeshellarg(t: &mut TestVm, arg: &[u8]) -> Vec<u8> {
+        bytes(&t.call("escapeshellarg", vec![Value::from(arg)]).unwrap())
+    }
+
+    fn escapeshellcmd(t: &mut TestVm, cmd: &[u8]) -> Vec<u8> {
+        bytes(&t.call("escapeshellcmd", vec![Value::from(cmd)]).unwrap())
+    }
+
+    /// `exec($cmd, $output, $result_code)`: (return value, $output, $result_code).
+    fn exec3(t: &mut TestVm, cmd: &str, output: Value) -> (Value, Value, Value) {
+        let (out, code) = (PhpRef::new(output), by_ref());
+        let args = vec![
+            cmd.into(),
+            Value::Ref(out.clone()),
+            Value::Ref(code.clone()),
+        ];
+        let ret = t.call("exec", args).unwrap();
+        (ret, out.get(), code.get())
+    }
+
+    // --- escapeshellarg ---------------------------------------------------
+
+    #[test]
+    fn escapeshellarg_basic() {
+        // escapeshellarg_basic.phpt
+        let mut t = TestVm::new();
+        assert_eq!(escapeshellarg(&mut t, b"Mr O'Neil"), b"'Mr O'\\''Neil'");
+        assert_eq!(escapeshellarg(&mut t, b"Mr O\\'Neil"), b"'Mr O\\'\\''Neil'");
+        assert_eq!(escapeshellarg(&mut t, b"%FILENAME"), b"'%FILENAME'");
+        assert_eq!(escapeshellarg(&mut t, b""), b"''");
+    }
+
+    #[test]
+    fn escapeshellarg_variations() {
+        let mut t = TestVm::new();
+        assert_eq!(escapeshellarg(&mut t, b"'"), b"''\\'''");
+        assert_eq!(escapeshellarg(&mut t, b"''"), b"''\\'''\\'''");
+        assert_eq!(escapeshellarg(&mut t, b"a b"), b"'a b'");
+        assert_eq!(
+            escapeshellarg(&mut t, b"$HOME `id` \"x\" \\"),
+            b"'$HOME `id` \"x\" \\'"
+        );
+        assert_eq!(escapeshellarg(&mut t, b"line1\nline2"), b"'line1\nline2'");
+        assert_eq!(escapeshellarg(&mut t, b"-rf; rm *"), b"'-rf; rm *'");
+        // Weak-mode coercion from int.
+        let r = t.call("escapeshellarg", vec![Value::Int(123)]).unwrap();
+        assert_eq!(bytes(&r), b"'123'");
+    }
+
+    #[test]
+    fn escapeshellarg_multibyte() {
+        // UTF-8 sequences are kept, ill-formed bytes dropped (C.UTF-8 mblen).
+        let mut t = TestVm::new();
+        assert_eq!(
+            escapeshellarg(&mut t, "héllo".as_bytes()),
+            "'héllo'".as_bytes()
+        );
+        assert_eq!(
+            escapeshellarg(&mut t, "日本'語".as_bytes()),
+            "'日本'\\''語'".as_bytes()
+        );
+        assert_eq!(escapeshellarg(&mut t, "😀".as_bytes()), "'😀'".as_bytes());
+        assert_eq!(escapeshellarg(&mut t, b"caf\xe9"), b"'caf'");
+        assert_eq!(escapeshellarg(&mut t, b"a\x80b\xffc"), b"'abc'");
+        // Truncated, overlong, surrogate and out-of-range sequences.
+        assert_eq!(escapeshellarg(&mut t, b"x\xe2\x82"), b"'x'");
+        assert_eq!(escapeshellarg(&mut t, b"\xc0\xaf'"), b"''\\'''");
+        assert_eq!(escapeshellarg(&mut t, b"\xed\xa0\x80z"), b"'z'");
+        assert_eq!(escapeshellarg(&mut t, b"\xf4\x90\x80\x80"), b"''");
+        // An invalid lead byte does not swallow the quote after it.
+        assert_eq!(escapeshellarg(&mut t, b"\xe2'"), b"''\\'''");
+    }
+
+    #[test]
+    fn escapeshellarg_null_bytes() {
+        // escapeshellarg_bug71039.phpt
+        let mut t = TestVm::new();
+        let r = t.call("escapeshellarg", vec![Value::from(&b"hello\0world"[..])]);
+        assert_eq!(
+            thrown(r),
+            err(
+                "ValueError",
+                "escapeshellarg(): Argument #1 ($arg) must not contain any null bytes"
+            )
+        );
+    }
+
+    #[test]
+    fn escapeshellarg_length_limits() {
+        // escapeshellarg_bug71270.phpt
+        let mut t = TestVm::new();
+        let max = cmd_max_len();
+        let r = t.call("escapeshellarg", vec![Value::from("A".repeat(max - 2))]);
+        let msg = format!("Argument exceeds the allowed length of {max} bytes");
+        assert_eq!(thrown(r), err("ValueError", &msg));
+        // The longest accepted argument.
+        let r = t.call("escapeshellarg", vec![Value::from("A".repeat(max - 3))]);
+        assert_eq!(bytes(&r.unwrap()).len(), max - 1);
+        // Escaping can push it over the limit.
+        let r = t.call("escapeshellarg", vec![Value::from("'".repeat(max / 2))]);
+        let msg = format!("Escaped argument exceeds the allowed length of {max} bytes");
+        assert_eq!(thrown(r), err("ValueError", &msg));
+    }
+
+    // --- escapeshellcmd ---------------------------------------------------
+
+    #[test]
+    fn escapeshellcmd_metacharacters() {
+        let mut t = TestVm::new();
+        assert_eq!(
+            escapeshellcmd(&mut t, b"#&;`|*?~<>^()[]{}$\\\n"),
+            b"\\#\\&\\;\\`\\|\\*\\?\\~\\<\\>\\^\\(\\)\\[\\]\\{\\}\\$\\\\\\\n"
+        );
+        assert_eq!(
+            escapeshellcmd(&mut t, b"ls -l 'foo bar' && rm *"),
+            b"ls -l 'foo bar' \\&\\& rm \\*"
+        );
+        assert_eq!(
+            escapeshellcmd(&mut t, b"%PATH% !x @=+,.:/-_"),
+            b"%PATH% !x @=+,.:/-_"
+        );
+        assert_eq!(escapeshellcmd(&mut t, b"echo $(id)"), b"echo \\$\\(id\\)");
+        assert_eq!(escapeshellcmd(&mut t, b""), b"");
+    }
+
+    #[test]
+    fn escapeshellcmd_quote_pairing() {
+        let mut t = TestVm::new();
+        // Paired quotes stay, unpaired ones are escaped.
+        assert_eq!(escapeshellcmd(&mut t, b"\"a\""), b"\"a\"");
+        assert_eq!(escapeshellcmd(&mut t, b"'a'"), b"'a'");
+        assert_eq!(escapeshellcmd(&mut t, b"'a"), b"\\'a");
+        assert_eq!(escapeshellcmd(&mut t, b"a\""), b"a\\\"");
+        assert_eq!(escapeshellcmd(&mut t, b"'a'b'"), b"'a'b\\'");
+        // A different quote inside an open quote is escaped.
+        assert_eq!(escapeshellcmd(&mut t, b"'a\"b'"), b"'a\\\"b'");
+        assert_eq!(escapeshellcmd(&mut t, b"\"it's\""), b"\"it\\'s\"");
+        assert_eq!(escapeshellcmd(&mut t, b"'a\"b'\"c\""), b"'a\\\"b'\"c\"");
+        assert_eq!(escapeshellcmd(&mut t, b"\"'\"'"), b"\"\\'\"\\'");
+        assert_eq!(escapeshellcmd(&mut t, b"''''"), b"''''");
+        assert_eq!(escapeshellcmd(&mut t, b"'''"), b"''\\'");
+        // Metacharacters inside quotes are still escaped.
+        assert_eq!(escapeshellcmd(&mut t, b"echo 'a;b'"), b"echo 'a\\;b'");
+    }
+
+    #[test]
+    fn escapeshellcmd_multibyte() {
+        let mut t = TestVm::new();
+        assert_eq!(
+            escapeshellcmd(&mut t, "écho «x»".as_bytes()),
+            "écho «x»".as_bytes()
+        );
+        assert_eq!(
+            escapeshellcmd(&mut t, "日;本".as_bytes()),
+            "日\\;本".as_bytes()
+        );
+        // 0xff is ill-formed UTF-8, so it is dropped rather than escaped.
+        assert_eq!(escapeshellcmd(&mut t, b"a\xffb"), b"ab");
+        assert_eq!(escapeshellcmd(&mut t, b"\x80;\xc3"), b"\\;");
+    }
+
+    #[test]
+    fn escapeshellcmd_null_bytes() {
+        // escapeshellcmd_bug71039.phpt
+        let mut t = TestVm::new();
+        let r = t.call("escapeshellcmd", vec![Value::from(&b"hello\0world"[..])]);
+        assert_eq!(
+            thrown(r),
+            err(
+                "ValueError",
+                "escapeshellcmd(): Argument #1 ($command) must not contain any null bytes"
+            )
+        );
+    }
+
+    #[test]
+    fn escapeshellcmd_length_limits() {
+        // escapeshellcmd_bug71270.phpt
+        let mut t = TestVm::new();
+        let max = cmd_max_len();
+        let r = t.call("escapeshellcmd", vec![Value::from("A".repeat(max - 2))]);
+        let msg = format!("Command exceeds the allowed length of {max} bytes");
+        assert_eq!(thrown(r), err("ValueError", &msg));
+        let r = t.call("escapeshellcmd", vec![Value::from("A".repeat(max - 3))]);
+        assert_eq!(bytes(&r.unwrap()).len(), max - 3);
+        let r = t.call("escapeshellcmd", vec![Value::from("#".repeat(max - 3))]);
+        let msg = format!("Escaped command exceeds the allowed length of {max} bytes");
+        assert_eq!(thrown(r), err("ValueError", &msg));
+    }
+
+    // --- exec -------------------------------------------------------------
+
+    #[test]
+    fn exec_output_array() {
+        // bug50732.phpt
+        let mut t = TestVm::new();
+        let (ret, out, code) = exec3(&mut t, "echo x", Value::Null);
+        assert_eq!(bytes(&ret), b"x");
+        assert_eq!(lines(&out), [b"x"]);
+        assert!(matches!(code, Value::Int(0)));
+        assert_eq!(t.output(), "");
+    }
+
+    #[test]
+    fn exec_long_lines() {
+        // bug49847.phpt: lines longer than EXEC_INPUT_BUF are not split.
+        let mut t = TestVm::new();
+        let (_, out, _) = exec3(&mut t, "printf %4098d 1", Value::Null);
+        let out = lines(&out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].len(), 4098);
+        assert!(out[0].ends_with(b" 1"));
+        let (ret, out, _) = exec3(&mut t, "printf %9000d 7; echo; echo end", Value::Null);
+        let lens: Vec<usize> = lines(&out).iter().map(Vec::len).collect();
+        assert_eq!(lens, [9000, 3]);
+        assert_eq!(bytes(&ret), b"end");
+    }
+
+    #[test]
+    fn exec_strips_trailing_whitespace() {
+        // bug70018.phpt
+        let mut t = TestVm::new();
+        let (ret, out, _) = exec3(&mut t, r"printf 'abc\f\n \n'", Value::Null);
+        assert_eq!(lines(&out), [&b"abc"[..], b""]);
+        assert_eq!(bytes(&ret), b"");
+        let (ret, out, _) = exec3(&mut t, r"printf '  a b \t\v\r\nlast \r'", Value::Null);
+        assert_eq!(lines(&out), [&b"  a b"[..], b"last"]);
+        assert_eq!(bytes(&ret), b"last");
+        // Leading whitespace and blank lines are kept.
+        let (_, out, _) = exec3(&mut t, r"printf '\n\n x\n'", Value::Null);
+        assert_eq!(lines(&out), [&b""[..], b"", b" x"]);
+    }
+
+    #[test]
+    fn exec_returns_last_line() {
+        let mut t = TestVm::new();
+        let r = t.call("exec", vec![r"printf 'a\nb\n'".into()]).unwrap();
+        assert_eq!(bytes(&r), b"b");
+        let r = t.call("exec", vec![r"printf 'a\nlast'".into()]).unwrap();
+        assert_eq!(bytes(&r), b"last");
+        let r = t.call("exec", vec![r"printf 'a\n\n'".into()]).unwrap();
+        assert_eq!(bytes(&r), b"");
+        // No output: "" rather than null.
+        let r = t.call("exec", vec!["true".into()]).unwrap();
+        assert_eq!(bytes(&r), b"");
+        // argv[0] is "sh", as with popen().
+        let r = t.call("exec", vec!["echo $0".into()]).unwrap();
+        assert_eq!(bytes(&r), b"sh");
+        assert_eq!(t.output(), "");
+    }
+
+    #[test]
+    fn exec_appends_to_existing_array() {
+        let mut t = TestVm::new();
+        let mut a = PhpArray::new();
+        a.insert_str("k", "v");
+        a.append("pre").unwrap();
+        let (_, out, _) = exec3(&mut t, r"printf 'x\ny\n'", Value::array(a));
+        assert_eq!(lines(&out), [&b"v"[..], b"pre", b"x", b"y"]);
+        let Value::Array(out) = out else {
+            unreachable!()
+        };
+        assert!(out.get(&ArrayKey::Int(2)).is_some());
+
+        // A shared array is separated, not modified in place.
+        let shared = Rc::new(PhpArray::from_iter([Value::from("a")]));
+        let (_, out, _) = exec3(&mut t, "echo b", Value::Array(shared.clone()));
+        assert_eq!(lines(&out), [b"a", b"b"]);
+        assert_eq!(shared.len(), 1);
+
+        // Anything else is replaced by a new array.
+        let (_, out, _) = exec3(&mut t, "echo z", Value::from("string"));
+        assert_eq!(lines(&out), [b"z"]);
+        let (_, out, _) = exec3(&mut t, "true", Value::Int(5));
+        assert!(lines(&out).is_empty());
+    }
+
+    #[test]
+    fn exec_result_codes() {
+        let mut t = TestVm::new();
+        let (ret, out, code) = exec3(&mut t, "exit 3", Value::Null);
+        assert_eq!(bytes(&ret), b"");
+        assert!(lines(&out).is_empty());
+        assert!(matches!(code, Value::Int(3)));
+        let (ret, _, code) = exec3(&mut t, "echo out; exit 255", Value::Null);
+        assert_eq!(bytes(&ret), b"out");
+        assert!(matches!(code, Value::Int(255)));
+        let (_, _, code) = exec3(&mut t, "nonexistent-command-xyz 2>/dev/null", Value::Null);
+        assert!(matches!(code, Value::Int(127)));
+
+        // Named argument without $output.
+        let code = by_ref();
+        let r =
+            t.vm.call_native_named(
+                "exec",
+                vec!["echo hi; exit 4".into()],
+                vec![("result_code", Value::Ref(code.clone()))],
+            )
+            .unwrap();
+        assert_eq!(bytes(&r), b"hi");
+        assert!(matches!(code.get(), Value::Int(4)));
+
+        // $output and $result_code may be the same variable.
+        let same = by_ref();
+        let args = vec![
+            "echo x".into(),
+            Value::Ref(same.clone()),
+            Value::Ref(same.clone()),
+        ];
+        t.call("exec", args).unwrap();
+        assert!(matches!(same.get(), Value::Int(0)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exec_signal_status() {
+        // pclose() + WIFEXITED: a signalled shell yields the raw wait status.
+        let mut t = TestVm::new();
+        let (_, _, code) = exec3(&mut t, "kill -TERM $$", Value::Null);
+        assert!(matches!(code, Value::Int(15)), "{code:?}");
+        let (_, _, code) = exec3(&mut t, "kill -KILL $$", Value::Null);
+        assert!(matches!(code, Value::Int(9)), "{code:?}");
+        // SIGPIPE is ignored in the child, as under the PHP CLI.
+        let (ret, _, code) = exec3(&mut t, "kill -PIPE $$; echo alive", Value::Null);
+        assert_eq!(bytes(&ret), b"alive");
+        assert!(matches!(code, Value::Int(0)));
+    }
+
+    #[test]
+    fn exec_argument_errors() {
+        // exec_basic1.phpt
+        let mut t = TestVm::new();
+        for f in ["exec", "system", "passthru"] {
+            let cmd = Value::from(&b"echo abc\n\0command"[..]);
+            let r = t.call(f, vec![cmd, by_ref().into()]);
+            let msg = format!("{f}(): Argument #1 ($command) must not contain any null bytes");
+            assert_eq!(thrown(r), err("ValueError", &msg));
+            let r = t.call(f, vec!["".into()]);
+            let msg = format!("{f}(): Argument #1 ($command) must not be empty");
+            assert_eq!(thrown(r), err("ValueError", &msg));
+        }
+        let r = t.call("exec", vec![Value::empty_array()]);
+        assert_eq!(
+            thrown(r),
+            err(
+                "TypeError",
+                "exec(): Argument #1 ($command) must be of type string, array given"
+            )
+        );
+        let r = t.call("exec", vec![]);
+        assert_eq!(
+            thrown(r),
+            err(
+                "ArgumentCountError",
+                "exec() expects at least 1 argument, 0 given"
+            )
+        );
+        let r = t.call(
+            "system",
+            vec!["true".into(), by_ref().into(), by_ref().into()],
+        );
+        assert_eq!(
+            thrown(r),
+            err(
+                "ArgumentCountError",
+                "system() expects at most 2 arguments, 3 given"
+            )
+        );
+        // $output is left alone when validation fails.
+        let out = PhpRef::new(Value::from("keep"));
+        thrown(t.call("exec", vec!["".into(), Value::Ref(out.clone())]));
+        assert_eq!(bytes(&out.get()), b"keep");
+    }
+
+    // --- system -----------------------------------------------------------
+
+    #[test]
+    fn system_echoes_lines() {
+        let mut t = TestVm::new();
+        let r = t.call("system", vec!["echo hello".into()]).unwrap();
+        assert_eq!(bytes(&r), b"hello");
+        assert_eq!(t.output(), "hello\n");
+
+        let code = by_ref();
+        let args = vec![r"printf 'a  \nb\t'".into(), Value::Ref(code.clone())];
+        let r = t.call("system", args).unwrap();
+        assert_eq!(bytes(&r), b"b");
+        assert_eq!(t.output(), "a  \nb\t");
+        assert!(matches!(code.get(), Value::Int(0)));
+
+        let args = vec!["exit 5".into(), Value::Ref(code.clone())];
+        let r = t.call("system", args).unwrap();
+        assert_eq!(bytes(&r), b"");
+        assert_eq!(t.output(), "");
+        assert!(matches!(code.get(), Value::Int(5)));
+    }
+
+    #[test]
+    fn system_output_buffering() {
+        // bug79410.phpt: a last chunk of exactly 4095 bytes is not lost.
+        let mut t = TestVm::new();
+        t.vm.ob_start(None, 0, ob::STDFLAGS).unwrap();
+        let cmd = "printf '%4095s' '' | tr ' ' .";
+        let r = t.call("system", vec![cmd.into()]).unwrap();
+        let buffered = t.vm.ob_get_clean().unwrap().unwrap();
+        assert_eq!(buffered.len(), 4095);
+        assert!(buffered.iter().all(|&b| b == b'.'));
+        assert_eq!(bytes(&r).len(), 4095);
+        assert_eq!(t.output(), "");
+    }
+
+    // --- passthru ---------------------------------------------------------
+
+    #[test]
+    fn passthru_binary_output() {
+        let mut t = TestVm::new();
+        let r = t.call("passthru", vec![r"printf 'a\0b\377\n\n  '".into()]);
+        assert!(matches!(r, Ok(Value::Null)));
+        assert_eq!(t.out.take(), b"a\0b\xff\n\n  ");
+
+        let code = by_ref();
+        let cmd = "head -c 100000 /dev/zero; exit 2";
+        let r = t.call("passthru", vec![cmd.into(), Value::Ref(code.clone())]);
+        assert!(matches!(r, Ok(Value::Null)));
+        let out = t.out.take();
+        assert_eq!(out.len(), 100000);
+        assert!(out.iter().all(|&b| b == 0));
+        assert!(matches!(code.get(), Value::Int(2)));
+    }
+
+    // --- shell_exec -------------------------------------------------------
+
+    #[test]
+    fn shell_exec_output() {
+        let mut t = TestVm::new();
+        let r = t.call("shell_exec", vec!["echo hi".into()]).unwrap();
+        assert_eq!(bytes(&r), b"hi\n");
+        let r = t.call("shell_exec", vec![r"printf 'a\0b\n\n'".into()]);
+        assert_eq!(bytes(&r.unwrap()), b"a\0b\n\n");
+        // Empty output is null, whatever the exit status.
+        let r = t.call("shell_exec", vec!["true".into()]);
+        assert!(matches!(r, Ok(Value::Null)));
+        let r = t.call("shell_exec", vec!["printf ''; exit 1".into()]);
+        assert!(matches!(r, Ok(Value::Null)));
+        let r = t.call("shell_exec", vec!["echo err 2>/dev/null >&2".into()]);
+        assert!(matches!(r, Ok(Value::Null)));
+        assert_eq!(t.output(), "");
+    }
+
+    #[test]
+    fn shell_exec_argument_errors() {
+        let mut t = TestVm::new();
+        let r = t.call("shell_exec", vec!["".into()]);
+        assert_eq!(
+            thrown(r),
+            err(
+                "ValueError",
+                "shell_exec(): Argument #1 ($command) must not be empty"
+            )
+        );
+        let r = t.call("shell_exec", vec![Value::from(&b"echo\0"[..])]);
+        assert_eq!(
+            thrown(r),
+            err(
+                "ValueError",
+                "shell_exec(): Argument #1 ($command) must not contain any null bytes"
+            )
+        );
+    }
+
+    #[test]
+    fn backtick_operator() {
+        let mut t = TestVm::new();
+        let r = shell_exec_bytes(&mut t.vm, b"echo `echo nested`").unwrap();
+        assert_eq!(bytes(&r), b"nested\n");
+        let r = shell_exec_bytes(&mut t.vm, b"exit 0");
+        assert!(matches!(r, Ok(Value::Null)));
+        let r = shell_exec_bytes(&mut t.vm, b"");
+        assert_eq!(
+            thrown(r),
+            err(
+                "ValueError",
+                "shell_exec(): Argument #1 ($command) must not be empty"
+            )
+        );
+    }
+
+    // --- proc_nice --------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn proc_nice_basic() {
+        // proc_nice_variation2.phpt / proc_nice_variation5.phpt, limited to
+        // calls that leave the test process's priority alone.
+        let mut t = TestVm::new();
+        let r = t.call("proc_nice", vec![Value::Int(0)]);
+        assert!(matches!(r, Ok(Value::Bool(true))));
+        let r = t.call("proc_nice", vec![Value::Bool(false)]);
+        assert!(matches!(r, Ok(Value::Bool(true))));
+        let uid = t.call("shell_exec", vec!["id -u".into()]).unwrap();
+        if bytes(&uid) != b"0\n" {
+            let r = t.call("proc_nice", vec![Value::Int(-1)]);
+            assert!(matches!(r, Ok(Value::Bool(false))));
+            assert_eq!(
+                t.output(),
+                "\nWarning: proc_nice(): Only a super user may attempt to increase the \
+                 priority of a process in /t.php on line 3\n"
+            );
+        }
+        let r = t.call("proc_nice", vec![Value::from("abc")]);
+        assert_eq!(
+            thrown(r),
+            err(
+                "TypeError",
+                "proc_nice(): Argument #1 ($priority) must be of type int, string given"
+            )
+        );
+    }
+
+    #[test]
+    fn mblen_is_utf8() {
+        assert_eq!(php_mblen(b"a"), Some(1));
+        assert_eq!(php_mblen("é!".as_bytes()), Some(2));
+        assert_eq!(php_mblen("€".as_bytes()), Some(3));
+        assert_eq!(php_mblen("😀".as_bytes()), Some(4));
+        assert_eq!(php_mblen(b"\xe2\x82"), None);
+        assert_eq!(php_mblen(b"\xc1\xbf"), None);
+        assert_eq!(php_mblen(b"\xe0\x80\xaf"), None);
+        assert_eq!(php_mblen(b"\xbf"), None);
+        assert_eq!(php_mblen(b"\xf8\x88\x80\x80\x80"), None);
+    }
+
+    #[test]
+    fn functions_registered() {
+        let t = TestVm::new();
+        for f in [
+            "exec",
+            "system",
+            "passthru",
+            "escapeshellcmd",
+            "escapeshellarg",
+            "shell_exec",
+        ] {
+            assert!(t.vm.find_function(f).is_some(), "{f}");
+        }
+        assert_eq!(t.vm.find_function("proc_nice").is_some(), cfg!(unix));
+    }
+}
