@@ -1,0 +1,15 @@
+[package]
+name = "php-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "php"
+path = "src/main.rs"
+
+[dependencies]
+php-syntax.workspace = true
+php-runtime.workspace = true
+php-ext.workspace = true
