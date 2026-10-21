@@ -48,6 +48,9 @@ pub mod uuencode;
 pub mod var;
 pub mod var_serialize;
 pub mod versioning;
+pub mod scanf;
+pub mod hrtime;
+pub mod ftok;
 pub mod streams;
 
 use php_runtime::Registry;
@@ -101,5 +104,8 @@ pub fn register(r: &mut Registry) {
     var::register(r);
     var_serialize::register(r);
     versioning::register(r);
+    scanf::register(r);
+    hrtime::register(r);
+    ftok::register(r);
     streams::register(r);
 }
