@@ -13,6 +13,9 @@ rust-version = "1.85"
 php-syntax = { path = "crates/php-syntax" }
 php-runtime = { path = "crates/php-runtime" }
 php-ext = { path = "crates/php-ext" }
+php-regex = { path = "crates/php-regex" }
+php-timelib = { path = "crates/php-timelib" }
+php-hash = { path = "crates/php-hash" }
 
 [profile.dev]
 debug = "line-tables-only"

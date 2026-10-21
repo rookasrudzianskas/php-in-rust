@@ -1,0 +1,11 @@
+[package]
+name = "php-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+php-syntax.workspace = true
+hashbrown = { version = "0.15", default-features = false, features = ["inline-more"] }
