@@ -1,0 +1,18 @@
+[package]
+name = "php-phpt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rust port of php-src's run-tests.php: executes .phpt conformance tests against a PHP binary"
+
+[lib]
+name = "php_phpt"
+path = "src/lib.rs"
+
+[[bin]]
+name = "php-run-tests"
+path = "src/main.rs"
+
+[dependencies]
+regex = "1"
