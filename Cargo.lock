@@ -36,8 +36,11 @@ dependencies = [
 name = "php-ext"
 version = "0.1.0"
 dependencies = [
+ "php-hash",
+ "php-regex",
  "php-runtime",
  "php-syntax",
+ "php-timelib",
 ]
 
 [[package]]
