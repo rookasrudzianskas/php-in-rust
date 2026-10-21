@@ -1,0 +1,668 @@
+TOKENS END T_THROW PREC_ARROW_FUNCTION T_INCLUDE T_INCLUDE_ONCE T_REQUIRE T_REQUIRE_ONCE T_LOGICAL_OR T_LOGICAL_XOR T_LOGICAL_AND T_PRINT T_YIELD T_DOUBLE_ARROW T_YIELD_FROM '=' T_PLUS_EQUAL T_MINUS_EQUAL T_MUL_EQUAL T_DIV_EQUAL T_CONCAT_EQUAL T_MOD_EQUAL T_AND_EQUAL T_OR_EQUAL T_XOR_EQUAL T_SL_EQUAL T_SR_EQUAL T_POW_EQUAL T_COALESCE_EQUAL '?' ':' T_COALESCE T_BOOLEAN_OR T_BOOLEAN_AND '|' '^' T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG T_IS_EQUAL T_IS_NOT_EQUAL T_IS_IDENTICAL T_IS_NOT_IDENTICAL T_SPACESHIP '<' T_IS_SMALLER_OR_EQUAL '>' T_IS_GREATER_OR_EQUAL T_PIPE '.' T_SL T_SR '+' '-' '*' '/' '%' '!' T_INSTANCEOF '~' T_INT_CAST T_DOUBLE_CAST T_STRING_CAST T_ARRAY_CAST T_OBJECT_CAST T_BOOL_CAST T_UNSET_CAST '@' T_POW T_CLONE T_NOELSE T_ELSEIF T_ELSE T_LNUMBER T_DNUMBER T_STRING T_NAME_FULLY_QUALIFIED T_NAME_RELATIVE T_NAME_QUALIFIED T_VARIABLE T_INLINE_HTML T_ENCAPSED_AND_WHITESPACE T_CONSTANT_ENCAPSED_STRING T_STRING_VARNAME T_NUM_STRING T_EVAL T_NEW T_EXIT T_IF T_ENDIF T_ECHO T_DO T_WHILE T_ENDWHILE T_FOR T_ENDFOR T_FOREACH T_ENDFOREACH T_DECLARE T_ENDDECLARE T_AS T_SWITCH T_ENDSWITCH T_CASE T_DEFAULT T_MATCH T_BREAK T_CONTINUE T_GOTO T_FUNCTION T_FN T_CONST T_RETURN T_TRY T_CATCH T_FINALLY T_USE T_INSTEADOF T_GLOBAL T_STATIC T_ABSTRACT T_FINAL T_PRIVATE T_PROTECTED T_PUBLIC T_PRIVATE_SET T_PROTECTED_SET T_PUBLIC_SET T_READONLY T_VAR T_UNSET T_ISSET T_EMPTY T_HALT_COMPILER T_CLASS T_TRAIT T_INTERFACE T_ENUM T_EXTENDS T_IMPLEMENTS T_NAMESPACE T_LIST T_ARRAY T_CALLABLE T_LINE T_FILE T_DIR T_CLASS_C T_TRAIT_C T_METHOD_C T_FUNC_C T_PROPERTY_C T_NS_C T_ATTRIBUTE T_INC T_DEC T_VOID_CAST T_OBJECT_OPERATOR T_NULLSAFE_OBJECT_OPERATOR T_COMMENT T_DOC_COMMENT T_OPEN_TAG T_OPEN_TAG_WITH_ECHO T_CLOSE_TAG T_WHITESPACE T_START_HEREDOC T_END_HEREDOC T_DOLLAR_OPEN_CURLY_BRACES T_CURLY_OPEN T_PAAMAYIM_NEKUDOTAYIM T_NS_SEPARATOR T_ELLIPSIS T_BAD_CHARACTER T_ERROR ',' ']' ';' '(' ')' '{' '}' '[' '`' '"' '$'
+PREC precedence T_THROW
+PREC precedence PREC_ARROW_FUNCTION
+PREC precedence T_INCLUDE T_INCLUDE_ONCE T_REQUIRE T_REQUIRE_ONCE
+PREC left T_LOGICAL_OR
+PREC left T_LOGICAL_XOR
+PREC left T_LOGICAL_AND
+PREC precedence T_PRINT
+PREC precedence T_YIELD
+PREC precedence T_DOUBLE_ARROW
+PREC precedence T_YIELD_FROM
+PREC precedence '=' T_PLUS_EQUAL T_MINUS_EQUAL T_MUL_EQUAL T_DIV_EQUAL T_CONCAT_EQUAL T_MOD_EQUAL T_AND_EQUAL T_OR_EQUAL T_XOR_EQUAL T_SL_EQUAL T_SR_EQUAL T_POW_EQUAL T_COALESCE_EQUAL
+PREC left '?' ':'
+PREC right T_COALESCE
+PREC left T_BOOLEAN_OR
+PREC left T_BOOLEAN_AND
+PREC left '|'
+PREC left '^'
+PREC left T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG
+PREC nonassoc T_IS_EQUAL T_IS_NOT_EQUAL T_IS_IDENTICAL T_IS_NOT_IDENTICAL T_SPACESHIP
+PREC nonassoc '<' T_IS_SMALLER_OR_EQUAL '>' T_IS_GREATER_OR_EQUAL
+PREC left T_PIPE
+PREC left '.'
+PREC left T_SL T_SR
+PREC left '+' '-'
+PREC left '*' '/' '%'
+PREC precedence '!'
+PREC precedence T_INSTANCEOF
+PREC precedence '~' T_INT_CAST T_DOUBLE_CAST T_STRING_CAST T_ARRAY_CAST T_OBJECT_CAST T_BOOL_CAST T_UNSET_CAST '@'
+PREC right T_POW
+PREC precedence T_CLONE
+PREC precedence T_NOELSE
+PREC precedence T_ELSEIF
+PREC precedence T_ELSE
+RULE start top_statement_list
+RULE reserved_non_modifiers T_INCLUDE
+RULE reserved_non_modifiers T_INCLUDE_ONCE
+RULE reserved_non_modifiers T_EVAL
+RULE reserved_non_modifiers T_REQUIRE
+RULE reserved_non_modifiers T_REQUIRE_ONCE
+RULE reserved_non_modifiers T_LOGICAL_OR
+RULE reserved_non_modifiers T_LOGICAL_XOR
+RULE reserved_non_modifiers T_LOGICAL_AND
+RULE reserved_non_modifiers T_INSTANCEOF
+RULE reserved_non_modifiers T_NEW
+RULE reserved_non_modifiers T_CLONE
+RULE reserved_non_modifiers T_EXIT
+RULE reserved_non_modifiers T_IF
+RULE reserved_non_modifiers T_ELSEIF
+RULE reserved_non_modifiers T_ELSE
+RULE reserved_non_modifiers T_ENDIF
+RULE reserved_non_modifiers T_ECHO
+RULE reserved_non_modifiers T_DO
+RULE reserved_non_modifiers T_WHILE
+RULE reserved_non_modifiers T_ENDWHILE
+RULE reserved_non_modifiers T_FOR
+RULE reserved_non_modifiers T_ENDFOR
+RULE reserved_non_modifiers T_FOREACH
+RULE reserved_non_modifiers T_ENDFOREACH
+RULE reserved_non_modifiers T_DECLARE
+RULE reserved_non_modifiers T_ENDDECLARE
+RULE reserved_non_modifiers T_AS
+RULE reserved_non_modifiers T_TRY
+RULE reserved_non_modifiers T_CATCH
+RULE reserved_non_modifiers T_FINALLY
+RULE reserved_non_modifiers T_THROW
+RULE reserved_non_modifiers T_USE
+RULE reserved_non_modifiers T_INSTEADOF
+RULE reserved_non_modifiers T_GLOBAL
+RULE reserved_non_modifiers T_VAR
+RULE reserved_non_modifiers T_UNSET
+RULE reserved_non_modifiers T_ISSET
+RULE reserved_non_modifiers T_EMPTY
+RULE reserved_non_modifiers T_CONTINUE
+RULE reserved_non_modifiers T_GOTO
+RULE reserved_non_modifiers T_FUNCTION
+RULE reserved_non_modifiers T_CONST
+RULE reserved_non_modifiers T_RETURN
+RULE reserved_non_modifiers T_PRINT
+RULE reserved_non_modifiers T_YIELD
+RULE reserved_non_modifiers T_LIST
+RULE reserved_non_modifiers T_SWITCH
+RULE reserved_non_modifiers T_ENDSWITCH
+RULE reserved_non_modifiers T_CASE
+RULE reserved_non_modifiers T_DEFAULT
+RULE reserved_non_modifiers T_BREAK
+RULE reserved_non_modifiers T_ARRAY
+RULE reserved_non_modifiers T_CALLABLE
+RULE reserved_non_modifiers T_EXTENDS
+RULE reserved_non_modifiers T_IMPLEMENTS
+RULE reserved_non_modifiers T_NAMESPACE
+RULE reserved_non_modifiers T_TRAIT
+RULE reserved_non_modifiers T_INTERFACE
+RULE reserved_non_modifiers T_CLASS
+RULE reserved_non_modifiers T_CLASS_C
+RULE reserved_non_modifiers T_TRAIT_C
+RULE reserved_non_modifiers T_FUNC_C
+RULE reserved_non_modifiers T_METHOD_C
+RULE reserved_non_modifiers T_LINE
+RULE reserved_non_modifiers T_FILE
+RULE reserved_non_modifiers T_DIR
+RULE reserved_non_modifiers T_NS_C
+RULE reserved_non_modifiers T_FN
+RULE reserved_non_modifiers T_MATCH
+RULE reserved_non_modifiers T_ENUM
+RULE reserved_non_modifiers T_PROPERTY_C
+RULE semi_reserved reserved_non_modifiers
+RULE semi_reserved T_STATIC
+RULE semi_reserved T_ABSTRACT
+RULE semi_reserved T_FINAL
+RULE semi_reserved T_PRIVATE
+RULE semi_reserved T_PROTECTED
+RULE semi_reserved T_PUBLIC
+RULE semi_reserved T_READONLY
+RULE ampersand T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG
+RULE ampersand T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG
+RULE identifier T_STRING
+RULE identifier semi_reserved
+RULE top_statement_list top_statement_list top_statement
+RULE top_statement_list
+RULE namespace_declaration_name identifier
+RULE namespace_declaration_name T_NAME_QUALIFIED
+RULE namespace_name T_STRING
+RULE namespace_name T_NAME_QUALIFIED
+RULE legacy_namespace_name namespace_name
+RULE legacy_namespace_name T_NAME_FULLY_QUALIFIED
+RULE name T_STRING
+RULE name T_NAME_QUALIFIED
+RULE name T_NAME_FULLY_QUALIFIED
+RULE name T_NAME_RELATIVE
+RULE attribute_decl class_name
+RULE attribute_decl class_name argument_list
+RULE attribute_group attribute_decl
+RULE attribute_group attribute_group ',' attribute_decl
+RULE attribute T_ATTRIBUTE backup_doc_comment attribute_group possible_comma ']'
+RULE attributes attribute
+RULE attributes attributes attribute
+RULE attributed_statement function_declaration_statement
+RULE attributed_statement class_declaration_statement
+RULE attributed_statement trait_declaration_statement
+RULE attributed_statement interface_declaration_statement
+RULE attributed_statement enum_declaration_statement
+RULE attributed_top_statement attributed_statement
+RULE attributed_top_statement T_CONST const_list ';'
+RULE top_statement statement
+RULE top_statement attributed_top_statement
+RULE top_statement attributes attributed_top_statement
+RULE top_statement T_HALT_COMPILER '(' ')' ';'
+RULE top_statement T_NAMESPACE namespace_declaration_name ';'
+RULE @1
+RULE top_statement T_NAMESPACE namespace_declaration_name @1 '{' top_statement_list '}'
+RULE @2
+RULE top_statement T_NAMESPACE @2 '{' top_statement_list '}'
+RULE top_statement T_USE mixed_group_use_declaration ';'
+RULE top_statement T_USE use_type group_use_declaration ';'
+RULE top_statement T_USE use_declarations ';'
+RULE top_statement T_USE use_type use_declarations ';'
+RULE use_type T_FUNCTION
+RULE use_type T_CONST
+RULE group_use_declaration legacy_namespace_name T_NS_SEPARATOR '{' unprefixed_use_declarations possible_comma '}'
+RULE mixed_group_use_declaration legacy_namespace_name T_NS_SEPARATOR '{' inline_use_declarations possible_comma '}'
+RULE possible_comma
+RULE possible_comma ','
+RULE inline_use_declarations inline_use_declarations ',' inline_use_declaration
+RULE inline_use_declarations inline_use_declaration
+RULE unprefixed_use_declarations unprefixed_use_declarations ',' unprefixed_use_declaration
+RULE unprefixed_use_declarations unprefixed_use_declaration
+RULE use_declarations use_declarations ',' use_declaration
+RULE use_declarations use_declaration
+RULE inline_use_declaration unprefixed_use_declaration
+RULE inline_use_declaration use_type unprefixed_use_declaration
+RULE unprefixed_use_declaration namespace_name
+RULE unprefixed_use_declaration namespace_name T_AS T_STRING
+RULE use_declaration legacy_namespace_name
+RULE use_declaration legacy_namespace_name T_AS T_STRING
+RULE const_list const_list ',' const_decl
+RULE const_list const_decl
+RULE inner_statement_list inner_statement_list inner_statement
+RULE inner_statement_list
+RULE inner_statement statement
+RULE inner_statement attributed_statement
+RULE inner_statement attributes attributed_statement
+RULE inner_statement T_HALT_COMPILER '(' ')' ';'
+RULE statement '{' inner_statement_list '}'
+RULE statement if_stmt
+RULE statement alt_if_stmt
+RULE statement T_WHILE '(' expr ')' while_statement
+RULE statement T_DO statement T_WHILE '(' expr ')' ';'
+RULE statement T_FOR '(' for_exprs ';' for_cond_exprs ';' for_exprs ')' for_statement
+RULE statement T_SWITCH '(' expr ')' switch_case_list
+RULE statement T_BREAK optional_expr ';'
+RULE statement T_CONTINUE optional_expr ';'
+RULE statement T_RETURN optional_expr ';'
+RULE statement T_GLOBAL global_var_list ';'
+RULE statement T_STATIC static_var_list ';'
+RULE statement T_ECHO echo_expr_list ';'
+RULE statement T_INLINE_HTML
+RULE statement expr ';'
+RULE statement T_UNSET '(' unset_variables possible_comma ')' ';'
+RULE statement T_FOREACH '(' expr T_AS foreach_variable ')' foreach_statement
+RULE statement T_FOREACH '(' expr T_AS foreach_variable T_DOUBLE_ARROW foreach_variable ')' foreach_statement
+RULE @3
+RULE statement T_DECLARE '(' const_list ')' @3 declare_statement
+RULE statement ';'
+RULE statement T_TRY '{' inner_statement_list '}' catch_list finally_statement
+RULE statement T_GOTO T_STRING ';'
+RULE statement T_STRING ':'
+RULE statement T_VOID_CAST expr ';'
+RULE catch_list
+RULE catch_list catch_list T_CATCH '(' catch_name_list optional_variable ')' '{' inner_statement_list '}'
+RULE catch_name_list class_name
+RULE catch_name_list catch_name_list '|' class_name
+RULE optional_variable
+RULE optional_variable T_VARIABLE
+RULE finally_statement
+RULE finally_statement T_FINALLY '{' inner_statement_list '}'
+RULE unset_variables unset_variable
+RULE unset_variables unset_variables ',' unset_variable
+RULE unset_variable variable
+RULE function_name T_STRING
+RULE function_name T_READONLY
+RULE function_declaration_statement function returns_ref function_name backup_doc_comment '(' parameter_list ')' return_type backup_fn_flags '{' inner_statement_list '}' backup_fn_flags
+RULE is_reference
+RULE is_reference T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG
+RULE is_variadic
+RULE is_variadic T_ELLIPSIS
+RULE @4
+RULE class_declaration_statement class_modifiers T_CLASS @4 T_STRING extends_from implements_list backup_doc_comment '{' class_statement_list '}'
+RULE @5
+RULE class_declaration_statement T_CLASS @5 T_STRING extends_from implements_list backup_doc_comment '{' class_statement_list '}'
+RULE class_modifiers class_modifier
+RULE class_modifiers class_modifiers class_modifier
+RULE anonymous_class_modifiers class_modifier
+RULE anonymous_class_modifiers anonymous_class_modifiers class_modifier
+RULE anonymous_class_modifiers_optional
+RULE anonymous_class_modifiers_optional anonymous_class_modifiers
+RULE class_modifier T_ABSTRACT
+RULE class_modifier T_FINAL
+RULE class_modifier T_READONLY
+RULE @6
+RULE trait_declaration_statement T_TRAIT @6 T_STRING backup_doc_comment '{' class_statement_list '}'
+RULE @7
+RULE interface_declaration_statement T_INTERFACE @7 T_STRING interface_extends_list backup_doc_comment '{' class_statement_list '}'
+RULE @8
+RULE enum_declaration_statement T_ENUM @8 T_STRING enum_backing_type implements_list backup_doc_comment '{' class_statement_list '}'
+RULE enum_backing_type
+RULE enum_backing_type ':' type_expr
+RULE enum_case T_CASE backup_doc_comment identifier enum_case_expr ';'
+RULE enum_case_expr
+RULE enum_case_expr '=' expr
+RULE extends_from
+RULE extends_from T_EXTENDS class_name
+RULE interface_extends_list
+RULE interface_extends_list T_EXTENDS class_name_list
+RULE implements_list
+RULE implements_list T_IMPLEMENTS class_name_list
+RULE foreach_variable variable
+RULE foreach_variable ampersand variable
+RULE foreach_variable T_LIST '(' array_pair_list ')'
+RULE foreach_variable '[' array_pair_list ']'
+RULE for_statement statement
+RULE for_statement ':' inner_statement_list T_ENDFOR ';'
+RULE foreach_statement statement
+RULE foreach_statement ':' inner_statement_list T_ENDFOREACH ';'
+RULE declare_statement statement
+RULE declare_statement ':' inner_statement_list T_ENDDECLARE ';'
+RULE switch_case_list '{' case_list '}'
+RULE switch_case_list '{' ';' case_list '}'
+RULE switch_case_list ':' case_list T_ENDSWITCH ';'
+RULE switch_case_list ':' ';' case_list T_ENDSWITCH ';'
+RULE case_list
+RULE case_list case_list T_CASE expr ':' inner_statement_list
+RULE case_list case_list T_CASE expr ';' inner_statement_list
+RULE case_list case_list T_DEFAULT ':' inner_statement_list
+RULE case_list case_list T_DEFAULT ';' inner_statement_list
+RULE match T_MATCH '(' expr ')' '{' match_arm_list '}'
+RULE match_arm_list
+RULE match_arm_list non_empty_match_arm_list possible_comma
+RULE non_empty_match_arm_list match_arm
+RULE non_empty_match_arm_list non_empty_match_arm_list ',' match_arm
+RULE match_arm match_arm_cond_list possible_comma T_DOUBLE_ARROW expr
+RULE match_arm T_DEFAULT possible_comma T_DOUBLE_ARROW expr
+RULE match_arm_cond_list expr
+RULE match_arm_cond_list match_arm_cond_list ',' expr
+RULE while_statement statement
+RULE while_statement ':' inner_statement_list T_ENDWHILE ';'
+RULE if_stmt_without_else T_IF '(' expr ')' statement
+RULE if_stmt_without_else if_stmt_without_else T_ELSEIF '(' expr ')' statement
+RULE if_stmt if_stmt_without_else %prec T_NOELSE
+RULE if_stmt if_stmt_without_else T_ELSE statement
+RULE alt_if_stmt_without_else T_IF '(' expr ')' ':' inner_statement_list
+RULE alt_if_stmt_without_else alt_if_stmt_without_else T_ELSEIF '(' expr ')' ':' inner_statement_list
+RULE alt_if_stmt alt_if_stmt_without_else T_ENDIF ';'
+RULE alt_if_stmt alt_if_stmt_without_else T_ELSE ':' inner_statement_list T_ENDIF ';'
+RULE parameter_list non_empty_parameter_list possible_comma
+RULE parameter_list
+RULE non_empty_parameter_list attributed_parameter
+RULE non_empty_parameter_list non_empty_parameter_list ',' attributed_parameter
+RULE attributed_parameter attributes parameter
+RULE attributed_parameter parameter
+RULE optional_cpp_modifiers
+RULE optional_cpp_modifiers non_empty_member_modifiers
+RULE parameter optional_cpp_modifiers optional_type_without_static is_reference is_variadic T_VARIABLE backup_doc_comment optional_property_hook_list
+RULE parameter optional_cpp_modifiers optional_type_without_static is_reference is_variadic T_VARIABLE '=' expr backup_doc_comment optional_property_hook_list
+RULE optional_type_without_static
+RULE optional_type_without_static type_expr_without_static
+RULE type_expr type
+RULE type_expr '?' type
+RULE type_expr union_type
+RULE type_expr intersection_type
+RULE type type_without_static
+RULE type T_STATIC
+RULE union_type_element type
+RULE union_type_element '(' intersection_type ')'
+RULE union_type union_type_element '|' union_type_element
+RULE union_type union_type '|' union_type_element
+RULE intersection_type type T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG type
+RULE intersection_type intersection_type T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG type
+RULE type_expr_without_static type_without_static
+RULE type_expr_without_static '?' type_without_static
+RULE type_expr_without_static union_type_without_static
+RULE type_expr_without_static intersection_type_without_static
+RULE type_without_static T_ARRAY
+RULE type_without_static T_CALLABLE
+RULE type_without_static name
+RULE union_type_without_static_element type_without_static
+RULE union_type_without_static_element '(' intersection_type_without_static ')'
+RULE union_type_without_static union_type_without_static_element '|' union_type_without_static_element
+RULE union_type_without_static union_type_without_static '|' union_type_without_static_element
+RULE intersection_type_without_static type_without_static T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG type_without_static
+RULE intersection_type_without_static intersection_type_without_static T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG type_without_static
+RULE return_type
+RULE return_type ':' type_expr
+RULE argument_list '(' ')'
+RULE argument_list '(' non_empty_argument_list possible_comma ')'
+RULE non_empty_argument_list argument
+RULE non_empty_argument_list non_empty_argument_list ',' argument
+RULE clone_argument_list '(' ')'
+RULE clone_argument_list '(' non_empty_clone_argument_list possible_comma ')'
+RULE clone_argument_list '(' expr ',' ')'
+RULE non_empty_clone_argument_list expr ',' argument
+RULE non_empty_clone_argument_list argument_no_expr
+RULE non_empty_clone_argument_list non_empty_clone_argument_list ',' argument
+RULE argument_no_expr identifier ':' expr
+RULE argument_no_expr T_ELLIPSIS
+RULE argument_no_expr '?'
+RULE argument_no_expr identifier ':' '?'
+RULE argument_no_expr T_ELLIPSIS expr
+RULE argument expr
+RULE argument argument_no_expr
+RULE global_var_list global_var_list ',' global_var
+RULE global_var_list global_var
+RULE global_var simple_variable
+RULE static_var_list static_var_list ',' static_var
+RULE static_var_list static_var
+RULE static_var T_VARIABLE
+RULE static_var T_VARIABLE '=' expr
+RULE class_statement_list class_statement_list class_statement
+RULE class_statement_list
+RULE attributed_class_statement property_modifiers optional_type_without_static property_list ';'
+RULE attributed_class_statement property_modifiers optional_type_without_static hooked_property
+RULE attributed_class_statement class_const_modifiers T_CONST class_const_list ';'
+RULE attributed_class_statement class_const_modifiers T_CONST type_expr class_const_list ';'
+RULE attributed_class_statement method_modifiers function returns_ref identifier backup_doc_comment '(' parameter_list ')' return_type backup_fn_flags method_body backup_fn_flags
+RULE attributed_class_statement enum_case
+RULE class_statement attributed_class_statement
+RULE class_statement attributes attributed_class_statement
+RULE class_statement T_USE class_name_list trait_adaptations
+RULE class_name_list class_name
+RULE class_name_list class_name_list ',' class_name
+RULE trait_adaptations ';'
+RULE trait_adaptations '{' '}'
+RULE trait_adaptations '{' trait_adaptation_list '}'
+RULE trait_adaptation_list trait_adaptation
+RULE trait_adaptation_list trait_adaptation_list trait_adaptation
+RULE trait_adaptation trait_precedence ';'
+RULE trait_adaptation trait_alias ';'
+RULE trait_precedence absolute_trait_method_reference T_INSTEADOF class_name_list
+RULE trait_alias trait_method_reference T_AS T_STRING
+RULE trait_alias trait_method_reference T_AS reserved_non_modifiers
+RULE trait_alias trait_method_reference T_AS member_modifier identifier
+RULE trait_alias trait_method_reference T_AS member_modifier
+RULE trait_method_reference identifier
+RULE trait_method_reference absolute_trait_method_reference
+RULE absolute_trait_method_reference class_name T_PAAMAYIM_NEKUDOTAYIM identifier
+RULE method_body ';'
+RULE method_body '{' inner_statement_list '}'
+RULE property_modifiers non_empty_member_modifiers
+RULE property_modifiers T_VAR
+RULE method_modifiers
+RULE method_modifiers non_empty_member_modifiers
+RULE class_const_modifiers
+RULE class_const_modifiers non_empty_member_modifiers
+RULE non_empty_member_modifiers member_modifier
+RULE non_empty_member_modifiers non_empty_member_modifiers member_modifier
+RULE member_modifier T_PUBLIC
+RULE member_modifier T_PROTECTED
+RULE member_modifier T_PRIVATE
+RULE member_modifier T_PUBLIC_SET
+RULE member_modifier T_PROTECTED_SET
+RULE member_modifier T_PRIVATE_SET
+RULE member_modifier T_STATIC
+RULE member_modifier T_ABSTRACT
+RULE member_modifier T_FINAL
+RULE member_modifier T_READONLY
+RULE property_list property_list ',' property
+RULE property_list property
+RULE property T_VARIABLE backup_doc_comment
+RULE property T_VARIABLE '=' expr backup_doc_comment
+RULE hooked_property T_VARIABLE backup_doc_comment '{' property_hook_list '}'
+RULE hooked_property T_VARIABLE '=' expr backup_doc_comment '{' property_hook_list '}'
+RULE property_hook_list
+RULE property_hook_list property_hook_list property_hook
+RULE property_hook_list property_hook_list attributes property_hook
+RULE optional_property_hook_list
+RULE optional_property_hook_list '{' property_hook_list '}'
+RULE property_hook_modifiers
+RULE property_hook_modifiers non_empty_member_modifiers
+RULE @9
+RULE property_hook property_hook_modifiers returns_ref T_STRING backup_doc_comment @9 optional_parameter_list backup_fn_flags property_hook_body backup_fn_flags
+RULE property_hook_body ';'
+RULE property_hook_body '{' inner_statement_list '}'
+RULE property_hook_body T_DOUBLE_ARROW expr ';'
+RULE optional_parameter_list
+RULE optional_parameter_list '(' parameter_list ')'
+RULE class_const_list class_const_list ',' class_const_decl
+RULE class_const_list class_const_decl
+RULE class_const_decl T_STRING '=' expr backup_doc_comment
+RULE class_const_decl semi_reserved '=' expr backup_doc_comment
+RULE const_decl T_STRING '=' expr backup_doc_comment
+RULE echo_expr_list echo_expr_list ',' echo_expr
+RULE echo_expr_list echo_expr
+RULE echo_expr expr
+RULE for_cond_exprs
+RULE for_cond_exprs non_empty_for_exprs ',' expr
+RULE for_cond_exprs expr
+RULE for_exprs
+RULE for_exprs non_empty_for_exprs
+RULE non_empty_for_exprs non_empty_for_exprs ',' expr
+RULE non_empty_for_exprs non_empty_for_exprs ',' T_VOID_CAST expr
+RULE non_empty_for_exprs T_VOID_CAST expr
+RULE non_empty_for_exprs expr
+RULE @10
+RULE anonymous_class anonymous_class_modifiers_optional T_CLASS @10 ctor_arguments extends_from implements_list backup_doc_comment '{' class_statement_list '}'
+RULE new_dereferenceable T_NEW class_name_reference argument_list
+RULE new_dereferenceable T_NEW anonymous_class
+RULE new_dereferenceable T_NEW attributes anonymous_class
+RULE new_non_dereferenceable T_NEW class_name_reference
+RULE expr variable
+RULE expr T_LIST '(' array_pair_list ')' '=' expr
+RULE expr '[' array_pair_list ']' '=' expr
+RULE expr variable '=' expr
+RULE expr variable '=' ampersand variable
+RULE expr T_CLONE clone_argument_list
+RULE expr T_CLONE expr
+RULE expr variable T_PLUS_EQUAL expr
+RULE expr variable T_MINUS_EQUAL expr
+RULE expr variable T_MUL_EQUAL expr
+RULE expr variable T_POW_EQUAL expr
+RULE expr variable T_DIV_EQUAL expr
+RULE expr variable T_CONCAT_EQUAL expr
+RULE expr variable T_MOD_EQUAL expr
+RULE expr variable T_AND_EQUAL expr
+RULE expr variable T_OR_EQUAL expr
+RULE expr variable T_XOR_EQUAL expr
+RULE expr variable T_SL_EQUAL expr
+RULE expr variable T_SR_EQUAL expr
+RULE expr variable T_COALESCE_EQUAL expr
+RULE expr variable T_INC
+RULE expr T_INC variable
+RULE expr variable T_DEC
+RULE expr T_DEC variable
+RULE expr expr T_BOOLEAN_OR expr
+RULE expr expr T_BOOLEAN_AND expr
+RULE expr expr T_LOGICAL_OR expr
+RULE expr expr T_LOGICAL_AND expr
+RULE expr expr T_LOGICAL_XOR expr
+RULE expr expr '|' expr
+RULE expr expr T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG expr
+RULE expr expr T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG expr
+RULE expr expr '^' expr
+RULE expr expr '.' expr
+RULE expr expr '+' expr
+RULE expr expr '-' expr
+RULE expr expr '*' expr
+RULE expr expr T_POW expr
+RULE expr expr '/' expr
+RULE expr expr '%' expr
+RULE expr expr T_SL expr
+RULE expr expr T_SR expr
+RULE expr '+' expr %prec '~'
+RULE expr '-' expr %prec '~'
+RULE expr '!' expr
+RULE expr '~' expr
+RULE expr expr T_IS_IDENTICAL expr
+RULE expr expr T_IS_NOT_IDENTICAL expr
+RULE expr expr T_IS_EQUAL expr
+RULE expr expr T_IS_NOT_EQUAL expr
+RULE expr expr T_PIPE expr
+RULE expr expr '<' expr
+RULE expr expr T_IS_SMALLER_OR_EQUAL expr
+RULE expr expr '>' expr
+RULE expr expr T_IS_GREATER_OR_EQUAL expr
+RULE expr expr T_SPACESHIP expr
+RULE expr expr T_INSTANCEOF class_name_reference
+RULE expr '(' expr ')'
+RULE expr new_dereferenceable
+RULE expr new_non_dereferenceable
+RULE expr expr '?' expr ':' expr
+RULE expr expr '?' ':' expr
+RULE expr expr T_COALESCE expr
+RULE expr internal_functions_in_yacc
+RULE expr T_INT_CAST expr
+RULE expr T_DOUBLE_CAST expr
+RULE expr T_STRING_CAST expr
+RULE expr T_ARRAY_CAST expr
+RULE expr T_OBJECT_CAST expr
+RULE expr T_BOOL_CAST expr
+RULE expr T_UNSET_CAST expr
+RULE expr T_EXIT ctor_arguments
+RULE expr '@' expr
+RULE expr scalar
+RULE expr '`' backticks_expr '`'
+RULE expr T_PRINT expr
+RULE expr T_YIELD
+RULE expr T_YIELD expr
+RULE expr T_YIELD expr T_DOUBLE_ARROW expr
+RULE expr T_YIELD_FROM expr
+RULE expr T_THROW expr
+RULE expr inline_function
+RULE expr attributes inline_function
+RULE expr T_STATIC inline_function
+RULE expr attributes T_STATIC inline_function
+RULE expr match
+RULE inline_function function returns_ref backup_doc_comment '(' parameter_list ')' lexical_vars return_type backup_fn_flags '{' inner_statement_list '}' backup_fn_flags
+RULE inline_function fn returns_ref backup_doc_comment '(' parameter_list ')' return_type T_DOUBLE_ARROW backup_fn_flags expr backup_fn_flags
+RULE fn T_FN
+RULE function T_FUNCTION
+RULE backup_doc_comment
+RULE backup_fn_flags  %prec PREC_ARROW_FUNCTION
+RULE returns_ref
+RULE returns_ref ampersand
+RULE lexical_vars
+RULE lexical_vars T_USE '(' lexical_var_list possible_comma ')'
+RULE lexical_var_list lexical_var_list ',' lexical_var
+RULE lexical_var_list lexical_var
+RULE lexical_var T_VARIABLE
+RULE lexical_var ampersand T_VARIABLE
+RULE function_call name argument_list
+RULE function_call T_READONLY argument_list
+RULE function_call class_name T_PAAMAYIM_NEKUDOTAYIM member_name argument_list
+RULE function_call variable_class_name T_PAAMAYIM_NEKUDOTAYIM member_name argument_list
+RULE @11
+RULE function_call callable_expr @11 argument_list
+RULE class_name T_STATIC
+RULE class_name name
+RULE class_name_reference class_name
+RULE class_name_reference new_variable
+RULE class_name_reference '(' expr ')'
+RULE backticks_expr
+RULE backticks_expr T_ENCAPSED_AND_WHITESPACE
+RULE backticks_expr encaps_list
+RULE ctor_arguments
+RULE ctor_arguments argument_list
+RULE dereferenceable_scalar T_ARRAY '(' array_pair_list ')'
+RULE dereferenceable_scalar '[' array_pair_list ']'
+RULE dereferenceable_scalar T_CONSTANT_ENCAPSED_STRING
+RULE dereferenceable_scalar '"' encaps_list '"'
+RULE scalar T_LNUMBER
+RULE scalar T_DNUMBER
+RULE scalar T_START_HEREDOC T_ENCAPSED_AND_WHITESPACE T_END_HEREDOC
+RULE scalar T_START_HEREDOC T_END_HEREDOC
+RULE scalar T_START_HEREDOC encaps_list T_END_HEREDOC
+RULE scalar dereferenceable_scalar
+RULE scalar constant
+RULE scalar class_constant
+RULE constant name
+RULE constant T_LINE
+RULE constant T_FILE
+RULE constant T_DIR
+RULE constant T_TRAIT_C
+RULE constant T_METHOD_C
+RULE constant T_FUNC_C
+RULE constant T_PROPERTY_C
+RULE constant T_NS_C
+RULE constant T_CLASS_C
+RULE class_constant class_name T_PAAMAYIM_NEKUDOTAYIM identifier
+RULE class_constant variable_class_name T_PAAMAYIM_NEKUDOTAYIM identifier
+RULE class_constant class_name T_PAAMAYIM_NEKUDOTAYIM '{' expr '}'
+RULE class_constant variable_class_name T_PAAMAYIM_NEKUDOTAYIM '{' expr '}'
+RULE optional_expr
+RULE optional_expr expr
+RULE variable_class_name fully_dereferenceable
+RULE fully_dereferenceable variable
+RULE fully_dereferenceable '(' expr ')'
+RULE fully_dereferenceable dereferenceable_scalar
+RULE fully_dereferenceable class_constant
+RULE fully_dereferenceable new_dereferenceable
+RULE array_object_dereferenceable fully_dereferenceable
+RULE array_object_dereferenceable constant
+RULE callable_expr callable_variable
+RULE callable_expr '(' expr ')'
+RULE callable_expr dereferenceable_scalar
+RULE callable_expr new_dereferenceable
+RULE callable_variable simple_variable
+RULE callable_variable array_object_dereferenceable '[' optional_expr ']'
+RULE callable_variable array_object_dereferenceable T_OBJECT_OPERATOR property_name argument_list
+RULE callable_variable array_object_dereferenceable T_NULLSAFE_OBJECT_OPERATOR property_name argument_list
+RULE callable_variable function_call
+RULE variable callable_variable
+RULE variable static_member
+RULE variable array_object_dereferenceable T_OBJECT_OPERATOR property_name
+RULE variable array_object_dereferenceable T_NULLSAFE_OBJECT_OPERATOR property_name
+RULE simple_variable T_VARIABLE
+RULE simple_variable '$' '{' expr '}'
+RULE simple_variable '$' simple_variable
+RULE static_member class_name T_PAAMAYIM_NEKUDOTAYIM simple_variable
+RULE static_member variable_class_name T_PAAMAYIM_NEKUDOTAYIM simple_variable
+RULE new_variable simple_variable
+RULE new_variable new_variable '[' optional_expr ']'
+RULE new_variable new_variable T_OBJECT_OPERATOR property_name
+RULE new_variable new_variable T_NULLSAFE_OBJECT_OPERATOR property_name
+RULE new_variable class_name T_PAAMAYIM_NEKUDOTAYIM simple_variable
+RULE new_variable new_variable T_PAAMAYIM_NEKUDOTAYIM simple_variable
+RULE member_name identifier
+RULE member_name '{' expr '}'
+RULE member_name simple_variable
+RULE property_name T_STRING
+RULE property_name '{' expr '}'
+RULE property_name simple_variable
+RULE array_pair_list non_empty_array_pair_list
+RULE possible_array_pair
+RULE possible_array_pair array_pair
+RULE non_empty_array_pair_list non_empty_array_pair_list ',' possible_array_pair
+RULE non_empty_array_pair_list possible_array_pair
+RULE array_pair expr T_DOUBLE_ARROW expr
+RULE array_pair expr
+RULE array_pair expr T_DOUBLE_ARROW ampersand variable
+RULE array_pair ampersand variable
+RULE array_pair T_ELLIPSIS expr
+RULE array_pair expr T_DOUBLE_ARROW T_LIST '(' array_pair_list ')'
+RULE array_pair T_LIST '(' array_pair_list ')'
+RULE encaps_list encaps_list encaps_var
+RULE encaps_list encaps_list T_ENCAPSED_AND_WHITESPACE
+RULE encaps_list encaps_var
+RULE encaps_list T_ENCAPSED_AND_WHITESPACE encaps_var
+RULE encaps_var T_VARIABLE
+RULE encaps_var T_VARIABLE '[' encaps_var_offset ']'
+RULE encaps_var T_VARIABLE T_OBJECT_OPERATOR T_STRING
+RULE encaps_var T_VARIABLE T_NULLSAFE_OBJECT_OPERATOR T_STRING
+RULE encaps_var T_DOLLAR_OPEN_CURLY_BRACES expr '}'
+RULE encaps_var T_DOLLAR_OPEN_CURLY_BRACES T_STRING_VARNAME '}'
+RULE encaps_var T_DOLLAR_OPEN_CURLY_BRACES T_STRING_VARNAME '[' expr ']' '}'
+RULE encaps_var T_CURLY_OPEN variable '}'
+RULE encaps_var_offset T_STRING
+RULE encaps_var_offset T_NUM_STRING
+RULE encaps_var_offset '-' T_NUM_STRING
+RULE encaps_var_offset T_VARIABLE
+RULE internal_functions_in_yacc T_ISSET '(' isset_variables possible_comma ')'
+RULE internal_functions_in_yacc T_EMPTY '(' expr ')'
+RULE internal_functions_in_yacc T_INCLUDE expr
+RULE internal_functions_in_yacc T_INCLUDE_ONCE expr
+RULE internal_functions_in_yacc T_EVAL '(' expr ')'
+RULE internal_functions_in_yacc T_REQUIRE expr
+RULE internal_functions_in_yacc T_REQUIRE_ONCE expr
+RULE isset_variables isset_variable
+RULE isset_variables isset_variables ',' isset_variable
+RULE isset_variable expr
