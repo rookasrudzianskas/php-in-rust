@@ -5,9 +5,11 @@
 //!   `hash_hmac_file`, `hash_pbkdf2`, `hash_hkdf`, `hash_equals`, `hash_algos`,
 //!   `hash_hmac_algos`) and the helpers shared by the submodules;
 //! * `context`: the final class `HashContext` and the incremental API
-//!   (`hash_init`, `hash_update*`, `hash_final`, `hash_copy`).
+//!   (`hash_init`, `hash_update*`, `hash_final`, `hash_copy`);
+//! * `mhash`: the deprecated `mhash*()` compatibility layer and its constants.
 
 mod context;
+mod mhash;
 
 use php_hash::{HashAlgorithm, HashError, HashOptions, Hmac, to_hex};
 use php_runtime::{Args, Flow, NativeFunction, PResult, PhpArray, PhpStr, Registry, Value, Vm};
@@ -413,5 +415,6 @@ pub fn register(r: &mut Registry) {
     r.function(&HASH_PBKDF2);
     r.function(&HASH_EQUALS);
     r.function(&HASH_HKDF);
+    mhash::register(r);
     context::register_class(r);
 }
