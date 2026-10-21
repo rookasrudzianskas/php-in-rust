@@ -10,6 +10,8 @@
 
 mod context;
 mod mhash;
+#[cfg(test)]
+mod tests;
 
 use php_hash::{HashAlgorithm, HashError, HashOptions, Hmac, to_hex};
 use php_runtime::{Args, Flow, NativeFunction, PResult, PhpArray, PhpStr, Registry, Value, Vm};
