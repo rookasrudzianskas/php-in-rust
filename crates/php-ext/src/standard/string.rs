@@ -21,6 +21,8 @@ mod similar;
 mod split;
 mod strip_tags;
 mod strtok;
+#[cfg(test)]
+mod tests;
 mod trim;
 mod utf8;
 pub mod util;
