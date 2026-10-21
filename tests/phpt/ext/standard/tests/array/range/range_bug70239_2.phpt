@@ -1,0 +1,12 @@
+--TEST--
+Bug #70239 Creating a huge array doesn't result in exhausted, but segfault, var 3
+--FILE--
+<?php
+try {
+    var_dump(range(0, PHP_INT_MAX));
+} catch (Throwable $e) {
+    echo $e::class, ': ', $e->getMessage(), "\n";
+}
+?>
+--EXPECTF--
+ValueError: The supplied range exceeds the maximum array size by %d elements: start=0, end=%d, step=1. Calculated size: %d. Maximum size: %d.

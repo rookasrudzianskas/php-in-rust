@@ -1,0 +1,18 @@
+--TEST--
+bcscale() fails with negative argument
+--EXTENSIONS--
+bcmath
+--INI--
+bcmath.scale=0
+--FILE--
+<?php
+echo bcdiv("20.56", "4"), "\n";
+try {
+    bcscale(-4);
+} catch (\Throwable $e) {
+    echo $e::class, ': ', $e->getMessage(), "\n";
+}
+?>
+--EXPECT--
+5
+ValueError: bcscale(): Argument #1 ($scale) must be between 0 and 2147483647

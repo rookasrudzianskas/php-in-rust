@@ -1,0 +1,9 @@
+/target
+/php-src-ref
+*.out
+*.diff
+*.exp
+*.log
+.DS_Store
+/tests/phpt/**/*.php
+!/tests/phpt/**/*.inc

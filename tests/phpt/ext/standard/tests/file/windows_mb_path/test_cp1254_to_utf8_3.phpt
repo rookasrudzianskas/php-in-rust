@@ -1,0 +1,36 @@
+--TEST--
+cp1254 cmd test
+--SKIPIF--
+<?php
+if (PHP_OS_FAMILY !== 'Windows') die('skip windows only test');
+if (getenv("SKIP_SLOW_TESTS")) die("skip slow test");
+?>
+--CONFLICTS--
+file_cp1254
+--FILE--
+<?php
+/*
+#vim: set fileencoding=cp1254
+#vim: set encoding=cp1254
+*/
+
+include __DIR__ . DIRECTORY_SEPARATOR . "util.inc";
+
+
+$item = "çokbaytlı işleri";
+$prefix = create_data("file_cp1254", $item);
+$fn = $prefix . DIRECTORY_SEPARATOR . $item;
+
+var_dump($fn);
+var_dump(touch($fn));
+var_dump(file_exists($fn));
+system("dir /b \"" . $fn . "\"");
+
+remove_data("file_cp1254");
+
+?>
+--EXPECTF--
+string(%d) "%s\çokbaytlı işleri"
+bool(true)
+bool(true)
+çokbaytlı işleri

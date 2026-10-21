@@ -1,0 +1,16 @@
+--TEST--
+Bug #39863 (file_exists() silently truncates after a null byte)
+--CREDITS--
+Andrew van der Stock, vanderaj @ owasp.org
+--FILE--
+<?php
+
+$filename = __FILE__ . chr(0). ".ridiculous";
+try {
+    var_dump(file_exists($filename));
+} catch (Throwable $e) {
+    echo $e::class, ': ', $e->getMessage(), PHP_EOL;
+}
+?>
+--EXPECT--
+ValueError: file_exists(): Argument #1 ($filename) must not contain any null bytes
