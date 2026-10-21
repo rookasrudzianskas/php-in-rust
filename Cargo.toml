@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 license = "PHP-3.01"
 repository = "https://github.com/rookasrudzianskas/php-in-rust"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [workspace.dependencies]
 php-syntax = { path = "crates/php-syntax" }
