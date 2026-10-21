@@ -21,6 +21,9 @@ pub mod sqlite3;
 pub mod standard;
 pub mod tokenizer;
 
+#[cfg(test)]
+pub mod testing;
+
 use php_runtime::{Registry, Vm};
 
 /// An extension as reported by `php -m` and `extension_loaded()`.
