@@ -1,17 +1,55 @@
 //! Unit tests of the mbstring functions, with expectations taken from
 //! php-src's `ext/mbstring/tests/*.phpt`.
 
+pub mod encoding_tests;
 mod functions;
 
 use php_runtime::{PhpArray, Value};
 
 use crate::testing::TestVm;
 
-/// `var_dump($v)` output.
-pub fn dump(t: &mut TestVm, v: Value) -> String {
-    t.output();
-    call(t, "var_dump", vec![v]);
-    t.output()
+/// `var_dump($v)` output (the interpreter's `var_dump` is not available).
+pub fn dump(_t: &mut TestVm, v: Value) -> String {
+    let mut out = Vec::new();
+    var_dump_into(&mut out, &v, 0);
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn var_dump_into(out: &mut Vec<u8>, v: &Value, indent: usize) {
+    let pad = " ".repeat(indent);
+    out.extend_from_slice(pad.as_bytes());
+    match v {
+        Value::Null | Value::Undef => out.extend_from_slice(b"NULL\n"),
+        Value::Bool(b) => out.extend_from_slice(format!("bool({b})\n").as_bytes()),
+        Value::Int(i) => out.extend_from_slice(format!("int({i})\n").as_bytes()),
+        Value::Float(f) => out.extend_from_slice(format!("float({f})\n").as_bytes()),
+        Value::String(s) => {
+            out.extend_from_slice(format!("string({}) \"", s.len()).as_bytes());
+            out.extend_from_slice(s);
+            out.extend_from_slice(b"\"\n");
+        }
+        Value::Array(a) => {
+            out.extend_from_slice(format!("array({}) {{\n", a.len()).as_bytes());
+            for (k, v) in a.iter() {
+                out.extend_from_slice(pad.as_bytes());
+                match k {
+                    php_runtime::ArrayKey::Int(i) => {
+                        out.extend_from_slice(format!("  [{i}]=>\n").as_bytes())
+                    }
+                    php_runtime::ArrayKey::Str(s) => {
+                        out.extend_from_slice(b"  [\"");
+                        out.extend_from_slice(&s);
+                        out.extend_from_slice(b"\"]=>\n");
+                    }
+                }
+                var_dump_into(out, &v.unref(), indent + 2);
+            }
+            out.extend_from_slice(pad.as_bytes());
+            out.extend_from_slice(b"}\n");
+        }
+        Value::Ref(r) => var_dump_into(out, &r.get(), indent),
+        other => out.extend_from_slice(format!("{other:?}\n").as_bytes()),
+    }
 }
 
 /// Calls `name` and returns its `var_dump` (plus any diagnostics printed).
