@@ -1074,7 +1074,15 @@ impl Lowerer<'_> {
         PhpStr::from(format!("{{closure:{parent}:{start_line}}}"))
     }
 
+    /// Closures in constant expressions compile their bodies as ordinary code.
     pub(crate) fn closure(&mut self, c: &ast::ClosureDecl, line: u32) -> CResult<Expr> {
+        let saved = std::mem::replace(&mut self.in_const_expr, false);
+        let r = self.closure_impl(c, line);
+        self.in_const_expr = saved;
+        r
+    }
+
+    fn closure_impl(&mut self, c: &ast::ClosureDecl, line: u32) -> CResult<Expr> {
         let name = self.closure_name(c.common.start_line);
         // Bind the used variables in the defining scope first.
         let mut outer = Vec::with_capacity(c.uses.len());
@@ -1138,6 +1146,13 @@ impl Lowerer<'_> {
     }
 
     pub(crate) fn arrow_fn(&mut self, a: &ast::ArrowFnDecl, line: u32) -> CResult<Expr> {
+        let saved = std::mem::replace(&mut self.in_const_expr, false);
+        let r = self.arrow_fn_impl(a, line);
+        self.in_const_expr = saved;
+        r
+    }
+
+    fn arrow_fn_impl(&mut self, a: &ast::ArrowFnDecl, line: u32) -> CResult<Expr> {
         let name = self.closure_name(a.common.start_line);
         let mut names = Vec::new();
         find_implicit_binds(&a.common.params, &a.body, &mut names);
