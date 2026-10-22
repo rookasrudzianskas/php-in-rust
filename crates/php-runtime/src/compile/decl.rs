@@ -1351,6 +1351,7 @@ impl Lowerer<'_> {
             end_line: c.end_line,
             declared: RefCell::new(None),
             early_bound: Cell::new(false),
+            strict: self.strict,
         }))
     }
 
@@ -1786,23 +1787,8 @@ impl Lowerer<'_> {
                             None
                         }
                     };
-                    if let (Some(v), Some(t)) = (&value, &c.enum_backing_type) {
-                        if let Some(lit) = &v.literal {
-                            let want_int = matches!(t, ast::TypeHint::Builtin { ty: ast::BuiltinType::Int, .. });
-                            let ok = if want_int {
-                                matches!(lit, Value::Int(_))
-                            } else {
-                                matches!(lit, Value::String(_))
-                            };
-                            if !ok {
-                                return self.error(format!(
-                                    "Enum case type {} does not match enum backing type {}",
-                                    lit.type_name(),
-                                    if want_int { "int" } else { "string" }
-                                ));
-                            }
-                        }
-                    }
+                    // The backing value type is checked when the cases are
+                    // first used (`zend_enum_build_backed_enum_table`).
                     let attrs = self.attributes(&ec.attributes)?;
                     cases.push(EnumCaseDef {
                         name: pstr(&ec.name),

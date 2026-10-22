@@ -62,6 +62,10 @@ static WR_CONSTRUCT: NativeFunction = NativeFunction { sig: "public function __c
 #[derive(Default)]
 pub struct WeakMapData {
     entries: Vec<(WeakObjRef, u32, Value)>,
+    /// Keys (object ids) whose value was wrapped in a reference only so a
+    /// write fetch (`$map[$o][] = 1`) could modify it in place; php-src
+    /// writes through the zval pointer and keeps a plain value.
+    temp_refs: std::collections::HashSet<u32>,
 }
 
 impl WeakMapData {
@@ -103,6 +107,8 @@ fn wm_read(vm: &mut Vm, o: &ObjRef, k: Option<&Value>, mode: DimFetch) -> PResul
                     v => {
                         let r = crate::value::PhpRef::new(v.clone());
                         m.entries[i].2 = Value::Ref(r.clone());
+                        let id = m.entries[i].1;
+                        m.temp_refs.insert(id);
                         r
                     }
                 };
@@ -117,6 +123,7 @@ fn wm_read(vm: &mut Vm, o: &ObjRef, k: Option<&Value>, mode: DimFetch) -> PResul
             if mode == DimFetch::Write {
                 let r = crate::value::PhpRef::new(Value::Null);
                 m.entries.push((key.downgrade(), key.id(), Value::Ref(r.clone())));
+                m.temp_refs.insert(key.id());
                 return Ok(Value::Ref(r));
             }
             drop(m);
@@ -129,6 +136,7 @@ fn wm_write(vm: &mut Vm, o: &ObjRef, k: Option<&Value>, v: Value) -> PResult<()>
     let key = key_obj(vm, k)?;
     let mut m = map_of(o);
     m.purge();
+    m.temp_refs.remove(&key.id());
     match m.find(&key) {
         Some(i) => {
             let old = std::mem::replace(&mut m.entries[i].2, v);
@@ -164,6 +172,7 @@ fn wm_unset(vm: &mut Vm, o: &ObjRef, k: &Value) -> PResult<()> {
     let removed = {
         let mut m = map_of(o);
         m.purge();
+        m.temp_refs.remove(&key.id());
         m.find(&key).map(|i| m.entries.remove(i))
     };
     drop(removed);
@@ -217,11 +226,16 @@ fn wm_debug_info(vm: &mut Vm, o: &ObjRef, _p: crate::class::PropPurpose) -> PRes
     let mut m = map_of(o);
     m.purge();
     let mut out = PhpArray::new();
-    for (w, _, v) in &m.entries {
+    for (w, id, v) in &m.entries {
         if let Some(k) = w.upgrade() {
             let mut e = PhpArray::new();
             e.insert_str("key", Value::Object(k));
-            e.insert_str("value", v.clone());
+            // A reference shows as one only while something else holds it.
+            let shown = match v {
+                Value::Ref(r) if r.refcount() > 1 || !m.temp_refs.contains(id) => v.clone(),
+                _ => v.unref(),
+            };
+            e.insert_str("value", shown);
             let _ = out.append(Value::array(e));
         }
     }
@@ -266,11 +280,13 @@ fn wm_iterator(_vm: &mut Vm, o: &ObjRef, by_ref: bool) -> PResult<Rc<dyn std::an
     let pairs: Vec<(ObjRef, Value)> = {
         let mut m = map_of(o);
         m.purge();
+        let m = &mut *m;
         m.entries
             .iter_mut()
-            .filter_map(|(w, _, v)| {
+            .filter_map(|(w, id, v)| {
                 w.upgrade().map(|k| {
                     if by_ref {
+                        m.temp_refs.remove(id);
                         if !matches!(v, Value::Ref(_)) {
                             *v = Value::Ref(crate::value::PhpRef::new(std::mem::take(v)));
                         }
