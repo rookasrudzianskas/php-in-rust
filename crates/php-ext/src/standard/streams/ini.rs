@@ -108,33 +108,14 @@ fn parse_ini_string(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
 /// from `zend_stream_init_filename_ex`). `None` when it cannot be opened,
 /// after the "Failed to open stream" warning.
 fn read_ini_file(vm: &mut Vm, filename: &[u8]) -> PResult<Option<Vec<u8>>> {
-    match std::fs::read(bytes_to_path(filename)) {
-        Ok(data) => Ok(Some(data)),
-        Err(e) => {
-            vm.warning(format!("Failed to open stream: {}", strerror(&e)))?;
-            Ok(None)
-        }
-    }
-}
-
-#[cfg(unix)]
-fn bytes_to_path(b: &[u8]) -> std::path::PathBuf {
-    use std::os::unix::ffi::OsStrExt;
-    std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b))
-}
-
-#[cfg(not(unix))]
-fn bytes_to_path(b: &[u8]) -> std::path::PathBuf {
-    std::path::PathBuf::from(String::from_utf8_lossy(b).into_owned())
-}
-
-/// `strerror(errno)` for an I/O error (Rust appends " (os error N)").
-fn strerror(e: &std::io::Error) -> String {
-    let s = e.to_string();
-    match (e.raw_os_error(), s.rfind(" (os error ")) {
-        (Some(_), Some(i)) => s[..i].to_string(),
-        _ => s,
-    }
+    use super::stream::open;
+    let opts = open::USE_PATH | open::REPORT_ERRORS | open::STREAM_OPEN_FOR_INCLUDE;
+    let Some(res) = super::wrappers::open_wrapper(vm, filename, b"rb", opts, None, None)? else {
+        return Ok(None);
+    };
+    let data = super::read_to_end(vm, &res)?.unwrap_or_default();
+    super::close(vm, &res)?;
+    Ok(Some(data))
 }
 
 // ---------------------------------------------------------------------------
