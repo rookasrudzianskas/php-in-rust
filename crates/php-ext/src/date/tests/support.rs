@@ -402,6 +402,40 @@ impl P {
         self.write(&out);
     }
 
+    /// A script ending with an uncaught exception: prints PHP's
+    /// `Fatal error: Uncaught ...` report (the stack trace of a Rust-driven
+    /// call differs from the script's, compare it with `%a`).
+    pub fn uncaught(&mut self, r: PResult<Value>) {
+        match r {
+            Err(Flow::Exception(e)) => {
+                let r = self.t.vm.report_uncaught_exception(&e);
+                self.unwrap(r.map(|_| Value::Null), "uncaught");
+            }
+            Ok(v) => panic!("expected an uncaught exception, got {v:?}"),
+            Err(other) => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// `foreach ($aggregate as $k => $v)` over an `IteratorAggregate` (or an
+    /// `Iterator`): the `(key, value)` pairs.
+    pub fn foreach(&mut self, obj: &Value) -> Vec<(Value, Value)> {
+        let o = obj.as_object().expect("foreach over a non-object").clone();
+        let it = if o.class().instance_of_name(b"IteratorAggregate") {
+            self.m(obj, "getIterator", vec![])
+        } else {
+            obj.clone()
+        };
+        let mut out = Vec::new();
+        self.m(&it, "rewind", vec![]);
+        while self.m(&it, "valid", vec![]).as_bool() == Some(true) {
+            let v = self.m(&it, "current", vec![]);
+            let k = self.m(&it, "key", vec![]);
+            out.push((k, v));
+            self.m(&it, "next", vec![]);
+        }
+        out
+    }
+
     /// `try { ... } catch (Throwable $e) { echo $e::class, ': ', $e->getMessage(), "\n"; }`
     pub fn catch(&mut self, r: PResult<Value>) -> Option<Value> {
         match r {

@@ -2,5 +2,12 @@
 
 mod support;
 
-mod smoke;
 mod core;
+mod smoke;
+
+mod batch_a;
+mod batch_b;
+mod batch_c;
+mod batch_d;
+mod batch_e;
+mod batch_f;
