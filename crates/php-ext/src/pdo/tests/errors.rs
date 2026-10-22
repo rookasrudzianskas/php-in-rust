@@ -671,3 +671,13 @@ fn fetch_func_with_internal_function_and_grouping() {
         "array(2) {\n  [0]=>\n  string(3) \"PHP\"\n  [1]=>\n  string(3) \"SQL\"\n}\narray(1) {\n  [\"g1\"]=>\n  array(2) {\n    [0]=>\n    string(3) \"PHP\"\n    [1]=>\n    string(3) \"SQL\"\n  }\n}\nTypeError: function \"no_such_function\" not found or invalid function name\nArgumentCountError: PDOStatement::fetchAll() expects exactly 2 argument for PDO::FETCH_FUNC, 1 given\nValueError: PDOStatement::fetch(): Argument #1 ($mode) PDO::FETCH_FUNC can only be used with PDOStatement::fetchAll()\n"
     );
 }
+
+/// `class PDOException extends RuntimeException` (pdo.stub.php): SPL is
+/// registered before PDO, so the real parent must be found.
+#[test]
+fn pdo_exception_extends_runtime_exception() {
+    let t = crate::testing::TestVm::new();
+    let ce = t.vm.find_class(b"PDOException").expect("PDOException");
+    let parent = ce.parent.as_ref().expect("PDOException has a parent");
+    assert_eq!(parent.name.as_bytes(), b"RuntimeException");
+}
