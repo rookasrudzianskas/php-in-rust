@@ -1093,7 +1093,15 @@ impl Lowerer<'_> {
         PhpStr::from(format!("{{closure:{parent}:{start_line}}}"))
     }
 
+    /// Closures in constant expressions compile their bodies as ordinary code.
     pub(crate) fn closure(&mut self, c: &ast::ClosureDecl, line: u32) -> CResult<Expr> {
+        let saved = std::mem::replace(&mut self.in_const_expr, false);
+        let r = self.closure_impl(c, line);
+        self.in_const_expr = saved;
+        r
+    }
+
+    fn closure_impl(&mut self, c: &ast::ClosureDecl, line: u32) -> CResult<Expr> {
         let name = self.closure_name(c.common.start_line);
         // Bind the used variables in the defining scope first.
         let mut outer = Vec::with_capacity(c.uses.len());
@@ -1157,6 +1165,13 @@ impl Lowerer<'_> {
     }
 
     pub(crate) fn arrow_fn(&mut self, a: &ast::ArrowFnDecl, line: u32) -> CResult<Expr> {
+        let saved = std::mem::replace(&mut self.in_const_expr, false);
+        let r = self.arrow_fn_impl(a, line);
+        self.in_const_expr = saved;
+        r
+    }
+
+    fn arrow_fn_impl(&mut self, a: &ast::ArrowFnDecl, line: u32) -> CResult<Expr> {
         let name = self.closure_name(a.common.start_line);
         let mut names = Vec::new();
         find_implicit_binds(&a.common.params, &a.body, &mut names);
@@ -1421,15 +1436,27 @@ impl Lowerer<'_> {
                     }
                 }
                 ast::ClassMemberKind::Property(g) => {
+                    // zend_compile_prop_decl
                     if kind == ClassKindIr::Enum {
                         return self.error(format!("Enum {class_name} cannot include properties"));
                     }
                     let mut flags = modifiers_to_flags(g.modifiers);
-                    if flags & member_flags::PPP_MASK == 0 {
-                        flags |= member_flags::PUBLIC;
+                    if flags & member_flags::FINAL != 0 && flags & member_flags::PRIVATE != 0 {
+                        return self.error("Property cannot be both final and private");
                     }
-                    if readonly_class && flags & member_flags::STATIC == 0 {
-                        flags |= member_flags::READONLY;
+                    if is_interface {
+                        if flags & member_flags::FINAL != 0 {
+                            return self.error("Property in interface cannot be final");
+                        }
+                        if flags & (member_flags::PROTECTED | member_flags::PRIVATE) != 0 {
+                            return self.error("Property in interface cannot be protected or private");
+                        }
+                        if flags & member_flags::ABSTRACT != 0 {
+                            return self.error(
+                                "Property in interface cannot be explicitly abstract. All interface members are implicitly abstract",
+                            );
+                        }
+                        flags |= member_flags::ABSTRACT;
                     }
                     let ty = match &g.ty {
                         Some(t) => Some(self.type_info(t)?),
@@ -1438,8 +1465,14 @@ impl Lowerer<'_> {
                     let attrs = self.attributes(&g.attributes)?;
                     for p in &g.props {
                         self.line = p.line;
-                        if props.iter().any(|x| x.name.as_bytes() == p.name.as_bytes()) {
-                            return self.error(format!("Cannot redeclare {}::${}", class_name, p.name));
+                        let mut flags = flags;
+                        if p.hooks.is_none() {
+                            if is_interface {
+                                return self.error("Interfaces may only include hooked properties");
+                            }
+                            if flags & member_flags::ABSTRACT != 0 {
+                                return self.error("Only hooked properties may be declared abstract");
+                            }
                         }
                         if let Some(t) = &ty {
                             if t.decl.mask & mask::CALLABLE != 0 || t.decl.mask & (mask::VOID | mask::NEVER) != 0 {
@@ -1449,25 +1482,8 @@ impl Lowerer<'_> {
                                 ));
                             }
                         }
-                        if is_interface && p.hooks.is_none() {
-                            return self.error("Interfaces may only include hooked properties");
-                        }
-                        if flags & member_flags::READONLY != 0 {
-                            if ty.is_none() {
-                                return self.error(format!("Readonly property {}::${} must have type", class_name, p.name));
-                            }
-                            if flags & member_flags::STATIC != 0 {
-                                return self.error(format!("Static property {}::${} cannot be readonly", class_name, p.name));
-                            }
-                            if p.default.is_some() {
-                                return self.error(format!(
-                                    "Readonly property {}::${} cannot have default value",
-                                    class_name, p.name
-                                ));
-                            }
-                        }
-                        if flags & member_flags::ABSTRACT != 0 && p.hooks.is_none() {
-                            return self.error("Only hooked properties may be declared abstract");
+                        if props.iter().any(|x| x.name.as_bytes() == p.name.as_bytes()) {
+                            return self.error(format!("Cannot redeclare {}::${}", class_name, p.name));
                         }
                         let default = match &p.default {
                             Some(d) => {
@@ -1493,18 +1509,36 @@ impl Lowerer<'_> {
                             }
                             None => None,
                         };
+                        if readonly_class {
+                            flags |= member_flags::READONLY;
+                        }
+                        if flags & member_flags::READONLY != 0 {
+                            if ty.is_none() {
+                                return self.error(format!("Readonly property {}::${} must have type", class_name, p.name));
+                            }
+                            if flags & member_flags::STATIC != 0 {
+                                return self.error(format!("Static property {}::${} cannot be readonly", class_name, p.name));
+                            }
+                        }
+                        flags = self.declared_property_flags(flags, class_name, &pstr(&p.name), ty.is_some())?;
                         let hooks = match &p.hooks {
                             Some(hs) => {
-                                if flags & member_flags::STATIC != 0 {
-                                    return self.error("Cannot declare hooks for static property");
+                                let (h, uses) = self.hooks(hs, &pstr(&p.name), flags, ty.as_ref(), &g.ty)?;
+                                if is_interface || !uses {
+                                    flags |= member_flags::VIRTUAL;
                                 }
-                                if flags & member_flags::READONLY != 0 {
-                                    return self.error("Hooked properties cannot be readonly");
-                                }
-                                self.hooks(hs, &pstr(&p.name), ty.as_ref(), &g.ty)?
+                                h
                             }
-                            None => Vec::new(),
+                            None => {
+                                if is_interface {
+                                    flags |= member_flags::VIRTUAL;
+                                }
+                                Vec::new()
+                            }
                         };
+                        if Self::has_attr(&attrs, "Override") {
+                            flags |= member_flags::OVERRIDE;
+                        }
                         props.push(PropDef {
                             name: pstr(&p.name),
                             flags,
@@ -1622,12 +1656,25 @@ impl Lowerer<'_> {
                                 }
                                 // A promoted parameter's type without implicit nullability.
                                 let ty = p.ty.clone();
+                                self.line = p.line;
+                                pf = self.declared_property_flags(pf, class_name, &p.name, ty.is_some())?;
+                                let ast_param = md.common.params.iter().find(|ap| ap.name.as_bytes() == p.name.as_bytes());
+                                let hooks = match ast_param.and_then(|ap| ap.hooks.as_ref().map(|h| (h, ap))) {
+                                    Some((hs, ap)) => {
+                                        let (h, uses) = self.hooks(hs, &p.name, pf, ty.as_ref(), &ap.ty)?;
+                                        if !uses {
+                                            pf |= member_flags::VIRTUAL;
+                                        }
+                                        h
+                                    }
+                                    None => Vec::new(),
+                                };
                                 props.push(PropDef {
                                     name: p.name.clone(),
                                     flags: pf,
                                     ty,
                                     default: None,
-                                    hooks: Vec::new(),
+                                    hooks,
                                     doc_comment: p.doc_comment.clone(),
                                     attributes: p.attributes.clone(),
                                     line: p.line,
@@ -1804,34 +1851,143 @@ impl Lowerer<'_> {
         Ok(code)
     }
 
+    /// The access flags of a declared property (`zend_declare_typed_property`):
+    /// implicit `public`, implicit `protected(set)` for public readonly
+    /// properties, asymmetric visibility checks.
+    fn declared_property_flags(&mut self, mut flags: u32, class_name: &PhpStr, name: &PhpStr, typed: bool) -> CResult<u32> {
+        const SET: u32 = member_flags::PUBLIC_SET | member_flags::PROTECTED_SET | member_flags::PRIVATE_SET;
+        if flags & member_flags::PPP_MASK == 0 {
+            flags |= member_flags::PUBLIC;
+        }
+        if flags & (member_flags::PUBLIC | member_flags::READONLY | SET) == (member_flags::PUBLIC | member_flags::READONLY) {
+            flags |= member_flags::PROTECTED_SET;
+        } else if flags & SET != 0 {
+            if !typed {
+                return self.error(format!(
+                    "Property with asymmetric visibility {}::${} must have type",
+                    class_name, name
+                ));
+            }
+            let get_as_set = (flags & member_flags::PPP_MASK) << 7;
+            if get_as_set > flags & SET {
+                return self.error(format!(
+                    "Visibility of property {}::${} must not be weaker than set visibility",
+                    class_name, name
+                ));
+            }
+            if get_as_set == flags & SET {
+                flags &= !SET;
+            }
+            if flags & member_flags::PRIVATE_SET != 0 {
+                flags |= member_flags::FINAL;
+            }
+        }
+        Ok(flags)
+    }
+
+    /// `zend_compile_property_hooks`. Returns the hooks and whether a hook
+    /// body uses the backing value (`!zend_property_is_virtual`).
     fn hooks(
         &mut self,
         hooks: &[ast::PropertyHook],
         prop: &PhpStr,
+        prop_flags: u32,
         ty: Option<&TypeInfo>,
         ast_ty: &Option<ast::TypeHint>,
-    ) -> CResult<Vec<HookDef>> {
+    ) -> CResult<(Vec<HookDef>, bool)> {
+        let class_name = self.class.as_ref().map(|c| c.name.clone()).unwrap_or_default();
+        let is_interface = self.class.as_ref().is_some_and(|c| c.kind == ClassKindIr::Interface);
+        if prop_flags & member_flags::READONLY != 0 {
+            return self.error("Hooked properties cannot be readonly");
+        }
         if hooks.is_empty() {
             return self.error("Property hook list must not be empty");
         }
         let mut out: Vec<HookDef> = Vec::new();
+        let mut uses_prop = false;
         for h in hooks {
             self.line = h.start_line;
+            let mut flags = modifiers_to_flags(h.modifiers);
+            // Non-private hooks are always public.
+            flags |= if prop_flags & member_flags::PPP_MASK != member_flags::PRIVATE {
+                member_flags::PUBLIC
+            } else {
+                member_flags::PRIVATE
+            };
+            if prop_flags & member_flags::STATIC != 0 {
+                return self.error("Cannot declare hooks for static property");
+            }
+            if flags & member_flags::FINAL != 0 && flags & member_flags::PRIVATE != 0 {
+                return self.error("Property hook cannot be both final and private");
+            }
+            let has_body = !matches!(h.body, ast::HookBody::Abstract);
+            if is_interface || (prop_flags & member_flags::ABSTRACT != 0 && !has_body) {
+                flags |= member_flags::ABSTRACT;
+                if has_body {
+                    return self.error("Abstract property hook cannot have body");
+                }
+                if flags & member_flags::PRIVATE != 0 {
+                    return self.error("Property hook cannot be both abstract and private");
+                }
+                if flags & member_flags::FINAL != 0 {
+                    return self.error("Property hook cannot be both abstract and final");
+                }
+            } else if !has_body {
+                return self.error("Non-abstract property hook must have a body");
+            }
             let kind = if h.name.eq_ignore_case(b"get") {
                 HookKind::Get
             } else if h.name.eq_ignore_case(b"set") {
                 HookKind::Set
             } else {
-                return self.error(format!("Unknown hook \"{}\" for property {}::${}, expected \"get\" or \"set\"",
-                    h.name, self.class.as_ref().map(|c| c.name.clone()).unwrap_or_default(), prop));
-            };
-            if out.iter().any(|x| x.kind == kind) {
                 return self.error(format!(
-                    "Cannot redeclare property hook \"{}\"",
-                    if kind == HookKind::Get { "get" } else { "set" }
+                    "Unknown hook \"{}\" for property {}::${}, expected \"get\" or \"set\"",
+                    h.name, class_name, prop
                 ));
+            };
+            if kind == HookKind::Set && matches!(h.body, ast::HookBody::Expr(_)) {
+                uses_prop = true;
             }
-            let flags = modifiers_to_flags(h.modifiers);
+            if kind == HookKind::Get {
+                if h.params.is_some() {
+                    return self.error(format!(
+                        "get hook of property {}::${} must not have a parameter list",
+                        class_name, prop
+                    ));
+                }
+            } else if let Some(ps) = &h.params {
+                if ps.len() != 1 {
+                    return self.error(format!(
+                        "{} hook of property {}::${} must accept exactly one parameters",
+                        h.name, class_name, prop
+                    ));
+                }
+                let vp = &ps[0];
+                if vp.by_ref {
+                    return self.error(format!(
+                        "Parameter ${} of {} hook {}::${} must not be pass-by-reference",
+                        vp.name, h.name, class_name, prop
+                    ));
+                }
+                if vp.variadic {
+                    return self.error(format!(
+                        "Parameter ${} of {} hook {}::${} must not be variadic",
+                        vp.name, h.name, class_name, prop
+                    ));
+                }
+                if vp.default.is_some() {
+                    return self.error(format!(
+                        "Parameter ${} of {} hook {}::${} must not have a default value",
+                        vp.name, h.name, class_name, prop
+                    ));
+                }
+                if ast_ty.is_some() != vp.ty.is_some() {
+                    return self.error(format!(
+                        "Type of parameter ${} of hook {}::${}::set must be compatible with property type",
+                        vp.name, class_name, prop
+                    ));
+                }
+            }
             let name = PhpStr::from(format!(
                 "${prop}::{}",
                 if kind == HookKind::Get { "get" } else { "set" }
@@ -1846,111 +2002,100 @@ impl Lowerer<'_> {
                 end_line: h.end_line,
                 is_generator: h.is_generator,
             };
-            let code = match &h.body {
-                ast::HookBody::Abstract => None,
-                body => {
-                    let saved = self.begin_fn(FuncKind::Hook, name.clone(), &common);
-                    self.fs.is_method = true;
-                    self.fs.hook_prop = Some(prop.clone());
-                    self.fs.hook_kind = Some(kind);
-                    let display = name.to_string();
-                    let res = (|| -> CResult<_> {
-                        let attributes = self.attributes(&h.attributes)?;
-                        let mut params = Vec::new();
-                        if kind == HookKind::Set {
-                            match &h.params {
-                                Some(ps) => {
-                                    params = self.params(ps, &display, false, false)?;
-                                    if params.len() != 1 {
-                                        return self.error(format!(
-                                            "set hook of property {}::${} must accept exactly one parameters",
-                                            self.class.as_ref().map(|c| c.name.clone()).unwrap_or_default(),
-                                            prop
-                                        ));
-                                    }
-                                }
-                                None => {
-                                    let slot = self.cv(b"value");
-                                    params.push(ParamInfo {
-                                        name: PhpStr::from("value"),
-                                        slot,
-                                        by_ref: false,
-                                        variadic: false,
-                                        ty: ty.cloned(),
-                                        default: None,
-                                        default_const: None,
-                                        default_text: None,
-                                        promote: None,
-                                        attributes: Vec::new(),
-                                        doc_comment: None,
-                                        line: h.start_line,
-                                    });
-                                }
-                            }
-                        } else if h.params.is_some() {
-                            return self.error(format!(
-                                "get hook of property {}::${} must not have a parameter list",
-                                self.class.as_ref().map(|c| c.name.clone()).unwrap_or_default(),
-                                prop
-                            ));
+            let saved = self.begin_fn(FuncKind::Hook, name.clone(), &common);
+            self.fs.is_method = true;
+            self.fs.hook_prop = Some(prop.clone());
+            self.fs.hook_kind = Some(kind);
+            if !has_body {
+                self.fs.flags |= code_flags::ABSTRACT;
+            }
+            let display = format!("{class_name}::{name}");
+            let res = (|| -> CResult<_> {
+                let attributes = self.attributes(&h.attributes)?;
+                let mut params = Vec::new();
+                if kind == HookKind::Set {
+                    match &h.params {
+                        Some(ps) => {
+                            params = self.params(ps, &display, false, !has_body)?;
                         }
-                        let body = match body {
-                            ast::HookBody::Block(b) => self.block(b)?,
-                            ast::HookBody::Expr(e) => {
-                                let x = self.expr(e)?;
-                                if kind == HookKind::Get {
-                                    vec![Stmt {
-                                        kind: StmtKind::Return(Some(x)),
-                                        line: e.line,
-                                    }]
-                                } else {
-                                    // `set => expr` assigns the backing value.
-                                    vec![Stmt {
-                                        kind: StmtKind::Expr(Expr::Assign(
-                                            Box::new(LVal::Prop(
-                                                Box::new(LVal::This),
-                                                Member::Name(prop.clone()),
-                                                false,
-                                                e.line,
-                                            )),
-                                            Box::new(x),
-                                            e.line,
-                                        )),
-                                        line: e.line,
-                                    }]
-                                }
-                            }
-                            ast::HookBody::Abstract => unreachable!(),
-                        };
-                        Ok((params, body, attributes))
-                    })();
-                    let (params, body, attributes) = match res {
-                        Ok(x) => x,
-                        Err(e) => {
-                            self.fs = saved;
-                            return Err(e);
+                        None => {
+                            let slot = self.cv(b"value");
+                            params.push(ParamInfo {
+                                name: PhpStr::from("value"),
+                                slot,
+                                by_ref: false,
+                                variadic: false,
+                                ty: ty.cloned(),
+                                default: None,
+                                default_const: None,
+                                default_text: None,
+                                promote: None,
+                                attributes: Vec::new(),
+                                doc_comment: None,
+                                line: h.start_line,
+                            });
                         }
-                    };
-                    let rt = if kind == HookKind::Get {
-                        ty.cloned()
-                    } else {
-                        Some(TypeInfo {
-                            decl: TypeDecl::from_mask(mask::VOID),
-                            text: PhpStr::from("void"),
-                        })
-                    };
-                    let _ = ast_ty;
-                    Some(self.finish_fn(saved, name, FuncKind::Hook, &common, params, body, rt, Vec::new(), attributes)?)
+                    }
+                }
+                let body = match &h.body {
+                    ast::HookBody::Block(b) => self.block(b)?,
+                    ast::HookBody::Expr(e) => {
+                        if kind == HookKind::Get {
+                            self.line = e.line;
+                            let r = self.return_stmt(Some(e))?;
+                            vec![Stmt { kind: r, line: e.line }]
+                        } else {
+                            let x = self.expr(e)?;
+                            // `set => expr` assigns the backing value.
+                            vec![Stmt {
+                                kind: StmtKind::Expr(Expr::Assign(
+                                    Box::new(LVal::Prop(
+                                        Box::new(LVal::This),
+                                        Member::Name(prop.clone()),
+                                        false,
+                                        e.line,
+                                    )),
+                                    Box::new(x),
+                                    e.line,
+                                )),
+                                line: e.line,
+                            }]
+                        }
+                    }
+                    ast::HookBody::Abstract => Vec::new(),
+                };
+                Ok((params, body, attributes))
+            })();
+            let (params, body, attributes) = match res {
+                Ok(x) => x,
+                Err(e) => {
+                    self.fs = saved;
+                    return Err(e);
                 }
             };
+            if self.fs.hook_uses_prop {
+                uses_prop = true;
+            }
+            let rt = if kind == HookKind::Get {
+                ty.cloned()
+            } else {
+                Some(TypeInfo {
+                    decl: TypeDecl::from_mask(mask::VOID),
+                    text: PhpStr::from("void"),
+                })
+            };
+            let code = self.finish_fn(saved, name, FuncKind::Hook, &common, params, body, rt, Vec::new(), attributes)?;
+            if out.iter().any(|x| x.kind == kind) {
+                return self.error(format!("Cannot redeclare property hook \"{}\"", h.name));
+            }
             out.push(HookDef {
                 kind,
-                code,
+                code: Some(code),
                 flags,
                 line: h.start_line,
             });
         }
-        Ok(out)
+        Ok((out, uses_prop))
     }
 }
 

@@ -332,16 +332,47 @@ impl Vm {
 
     /// `php_error_docref(NULL, type, msg)`: prefixes `"fname(): "` with the
     /// active function (`Class::method` for methods, `main` at top level).
+    /// With `html_errors` and a `docref_root`, php_verror's manual link is
+    /// inserted (`fname() [<a href='root/function.fname.ext'>...</a>]: msg`).
     pub fn php_error_docref(&mut self, ty: i64, msg: impl Into<PhpStr>) -> PResult<()> {
+        self.php_error_docref_ref(None, ty, msg)
+    }
+
+    /// `php_error_docref("docref", type, msg)`: like [`Vm::php_error_docref`]
+    /// with an explicit manual page (e.g. `"function.include"`).
+    pub fn php_error_docref_ref(
+        &mut self,
+        docref: Option<&str>,
+        ty: i64,
+        msg: impl Into<PhpStr>,
+    ) -> PResult<()> {
         let msg = msg.into();
-        let mut origin = self.error_origin().into_bytes();
+        let (origin, default_docref) = self.error_origin_and_docref();
+        let docref = match (docref, default_docref) {
+            (Some(d), Some(_)) => Some(d.to_string()),
+            (_, d) => d,
+        };
+        let mut origin = origin.into_bytes();
         let mut msg = msg.to_vec();
-        if self.errors.html_errors {
+        let html = self.errors.html_errors;
+        if html {
             origin = escape_html(&origin);
             msg = escape_html(&msg);
         }
         let mut full = Vec::with_capacity(origin.len() + msg.len() + 4);
         full.extend_from_slice(&origin);
+        let root = if html {
+            self.ini_get("docref_root").map(|v| v.to_string()).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        if let Some(mut docref) = docref {
+            if html && !root.is_empty() {
+                let ext = self.ini_get("docref_ext").map(|v| v.to_string()).unwrap_or_default();
+                docref.push_str(&ext);
+                full.extend_from_slice(format!(" [<a href='{root}{docref}'>{docref}</a>]").as_bytes());
+            }
+        }
         full.extend_from_slice(b": ");
         full.extend_from_slice(&msg);
         self.zend_error(ty, PhpStr::from_vec(full))
@@ -374,6 +405,35 @@ impl Vm {
     /// `"fname()"` origin for docref-style messages (`php_verror`): the active
     /// function's declaring class and name, `main()` for top-level code.
     pub fn error_origin(&self) -> String {
+        self.error_origin_and_docref().0
+    }
+
+    /// php_verror's origin plus the default docref (`function.name` or
+    /// `class.name`, lowercase with `_` -> `-`) when the origin is a function.
+    fn error_origin_and_docref(&self) -> (String, Option<String>) {
+        fn docref(class: Option<&str>, function: &str) -> String {
+            let function = function.trim_start_matches('_');
+            let d = match class {
+                Some(c) => format!("{c}.{function}"),
+                None => format!("function.{function}"),
+            };
+            d.replace('_', "-").to_ascii_lowercase()
+        }
+        if let Some(crate::vm::ActiveInclude { op, depth, filename, .. }) = &self.include_or_eval {
+            if self.frames.len() == *depth {
+                // zend_trace_current_function_args_string: the operand.
+                let args = if self.ini_bool("error_include_args") {
+                    let mut out = Vec::new();
+                    let max_len =
+                        self.ini_int("zend.exception_string_param_max_len").max(0) as usize;
+                    append_trace_arg(&mut out, &Value::String(filename.clone()), max_len, self.precision);
+                    String::from_utf8_lossy(&out).into_owned()
+                } else {
+                    String::new()
+                };
+                return (format!("{op}({args})"), Some(docref(None, op)));
+            }
+        }
         match self.frames.last() {
             Some(f) => {
                 let name = if f.name.is_empty() {
@@ -400,12 +460,19 @@ impl Vm {
                     String::new()
                 };
                 match f.function.as_ref().and_then(|func| func.scope.as_ref()) {
-                    Some(scope) => format!("{scope}::{name}({args})"),
-                    None => format!("{name}({args})"),
+                    Some(scope) => {
+                        let scope = scope.to_string();
+                        let d = docref(Some(&scope), &name);
+                        (format!("{scope}::{name}({args})"), Some(d))
+                    }
+                    None => {
+                        let d = docref(None, &name);
+                        (format!("{name}({args})"), Some(d))
+                    }
                 }
             }
-            None if self.executing => "main()".to_string(),
-            None => "Unknown".to_string(),
+            None if self.executing => ("main()".to_string(), Some(docref(None, "main"))),
+            None => ("Unknown".to_string(), None),
         }
     }
 

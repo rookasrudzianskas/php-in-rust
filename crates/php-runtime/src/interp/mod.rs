@@ -27,6 +27,7 @@ pub mod exec;
 pub mod fiber;
 pub mod generator;
 pub mod include;
+pub mod internal_iterator;
 pub mod objects;
 pub mod pfa;
 pub mod place;
@@ -83,6 +84,10 @@ pub struct State {
     pub depth: u32,
     /// Running shutdown functions.
     pub in_shutdown: bool,
+    /// No user code is executing (`EG(current_execute_data) == NULL`), as
+    /// when the user exception handler runs after the script: functions the
+    /// engine calls then have no call site.
+    pub detached: bool,
 }
 
 impl State {

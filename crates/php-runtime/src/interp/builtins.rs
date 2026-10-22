@@ -1249,6 +1249,7 @@ pub fn register_core_extras(r: &mut Registry<'_>) {
     super::fiber::register(r);
     register_attributes(r);
     super::weak::register(r);
+    super::internal_iterator::register(r);
     crate::output::register_functions(r);
 }
 

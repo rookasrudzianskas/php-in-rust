@@ -28,6 +28,7 @@ pub fn eval(vm: &mut Vm, cx: &Ctx, e: &Expr) -> PResult<Value> {
         Expr::Call(c) => call::eval_call(vm, cx, c),
         Expr::Place(lv) => place::read_place(vm, cx, lv, false),
         Expr::PlaceIs(lv) => place::read_place(vm, cx, lv, true),
+        Expr::ConstProp(obj, m, nullsafe, line) => place::const_prop(vm, cx, obj, m, *nullsafe, *line),
         Expr::IncDec(op, lv, line) => place::incdec(vm, cx, *op, lv, *line),
         Expr::AssignOp(op, lv, v, line) => place::assign_op(vm, cx, *op, lv, v, *line),
         Expr::MethodCall(m) => call::eval_method_call(vm, cx, m),

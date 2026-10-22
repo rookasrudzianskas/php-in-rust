@@ -92,6 +92,17 @@ impl Lowerer<'_> {
         self.expr_inner(e)
     }
 
+    /// The operand of a property/dim fetch inside a constant expression: a
+    /// nullsafe short-circuit in it must skip the whole chain, so it is not
+    /// wrapped in its own [`Expr::Chain`].
+    fn const_chain_operand(&mut self, e: &ast::Expr) -> CResult<Expr> {
+        if is_chain_kind(e) {
+            self.expr_inner(e)
+        } else {
+            self.expr(e)
+        }
+    }
+
     pub(crate) fn boxed(&mut self, e: &ast::Expr) -> CResult<Box<Expr>> {
         Ok(Box::new(self.expr(e)?))
     }
@@ -182,6 +193,25 @@ impl Lowerer<'_> {
             K::Dim { index: None, .. } => {
                 return self.error("Cannot use [] for reading");
             }
+            K::Prop {
+                object,
+                name,
+                nullsafe,
+            } if self.in_const_expr => {
+                let obj = Box::new(self.const_chain_operand(object)?);
+                let m = self.member(name)?;
+                Expr::ConstProp(obj, m, *nullsafe, line)
+            }
+            K::Dim {
+                base,
+                index: Some(index),
+            } if self.in_const_expr => {
+                // zend_ast_evaluate: the base is evaluated as an expression
+                // (so property fetches in it get the enum check).
+                let b = LVal::Temp(Box::new(self.const_chain_operand(base)?));
+                let i = self.boxed(index)?;
+                Expr::Place(Box::new(LVal::Dim(Box::new(b), Some(i), line)))
+            }
             K::Dim { .. } | K::Prop { .. } | K::StaticProp { .. } => {
                 Expr::Place(Box::new(self.lval_read(e)?))
             }
@@ -216,6 +246,9 @@ impl Lowerer<'_> {
                 }))
             }
             K::StaticCall { class, name, args } => {
+                if let Some(x) = self.parent_hook_call(class, name, args, line)? {
+                    return Ok(x);
+                }
                 let cs = self.class_spec(class)?;
                 let m = self.member(name)?;
                 if args.is_callable_convert() {
@@ -568,6 +601,64 @@ impl Lowerer<'_> {
         self.expr(e)
     }
 
+    /// `parent::$prop::get()` / `parent::$prop::set($v)` inside a property
+    /// hook (`zend_compile_parent_property_hook_call`). Lowered to a static
+    /// call of the pseudo method `$prop::get` on `parent`.
+    fn parent_hook_call(&mut self, class: &ast::ClassRef, name: &ast::MemberName, args: &ast::ArgList, line: u32) -> CResult<Option<Expr>> {
+        let ast::ClassRef::Expr(ce) = class else { return Ok(None) };
+        let ast::ExprKind::StaticProp {
+            class: ast::ClassRef::Name(pn),
+            name: ast::VarName::Name(prop),
+            parenthesized: false,
+        } = &ce.kind
+        else {
+            return Ok(None);
+        };
+        if pn.special_class() != Some(ast::SpecialClass::Parent) {
+            return Ok(None);
+        }
+        let ast::MemberName::Ident(hook) = name else { return Ok(None) };
+        let kind = if hook.eq_ignore_case(b"get") {
+            HookKind::Get
+        } else if hook.eq_ignore_case(b"set") {
+            HookKind::Set
+        } else {
+            return Ok(None);
+        };
+        if self.class.is_none() {
+            return self.error("Cannot use \"parent\" when no class scope is active");
+        }
+        if args.is_callable_convert() {
+            return self.error("Cannot create Closure for parent property hook call");
+        }
+        let Some(active) = self.fs.hook_prop.clone() else {
+            return self.error(format!("Must not use parent::${prop}::{hook}() outside a property hook"));
+        };
+        if active.as_bytes() != prop.as_bytes() {
+            return self.error(format!(
+                "Must not use parent::${prop}::{hook}() in a different property (${active})"
+            ));
+        }
+        if self.fs.hook_kind != Some(kind) {
+            return self.error(format!(
+                "Must not use parent::${prop}::{hook}() in a different property hook ({})",
+                if self.fs.hook_kind == Some(HookKind::Get) { "get" } else { "set" }
+            ));
+        }
+        let a = self.args(args)?;
+        let pseudo = PhpStr::from(format!(
+            "${}::{}",
+            prop,
+            if kind == HookKind::Get { "get" } else { "set" }
+        ));
+        Ok(Some(Expr::StaticCall(Box::new(StaticCallExpr {
+            class: ClassSpec::Parent,
+            name: Member::Name(pseudo),
+            args: a,
+            line,
+        }))))
+    }
+
     fn magic_const(&mut self, m: ast::MagicConst, line: u32) -> CResult<Expr> {
         use ast::MagicConst as M;
         let s = |b: &PhpStr| Ok(Expr::Lit(Value::String(b.clone())));
@@ -642,7 +733,7 @@ impl Lowerer<'_> {
             },
             M::Property => match &self.fs.hook_prop {
                 Some(p) => s(&p.clone()),
-                None => self.error("Cannot use __PROPERTY__ outside a property hook"),
+                None => s(&PhpStr::new()),
             },
         }
     }
@@ -1371,6 +1462,11 @@ impl Lowerer<'_> {
                 }
                 let b = if is_this(object) {
                     self.fs.flags |= code_flags::USES_THIS;
+                    if let (Some(hp), ast::MemberName::Ident(n)) = (&self.fs.hook_prop, name) {
+                        if hp.as_bytes() == n.as_bytes() {
+                            self.fs.hook_uses_prop = true;
+                        }
+                    }
                     LVal::This
                 } else {
                     self.lval_base(object, mode)?
