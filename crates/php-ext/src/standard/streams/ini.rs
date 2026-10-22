@@ -1752,3 +1752,927 @@ fn getenv(name: &[u8]) -> Option<Vec<u8>> {
             .map(|v| v.to_string_lossy().into_owned().into_bytes())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{TestVm, thrown};
+    use php_runtime::ini::{IniDef, modifiable};
+    use php_runtime::value::float_fmt;
+    use std::path::PathBuf;
+
+    // ----- helpers -------------------------------------------------------
+
+    fn var_dump_into(out: &mut Vec<u8>, v: &Value, indent: usize) {
+        out.extend(std::iter::repeat_n(b' ', indent));
+        match v {
+            Value::Null => out.extend_from_slice(b"NULL\n"),
+            Value::Bool(b) => out.extend_from_slice(format!("bool({b})\n").as_bytes()),
+            Value::Int(i) => out.extend_from_slice(format!("int({i})\n").as_bytes()),
+            Value::Float(d) => {
+                out.extend_from_slice(format!("float({})\n", float_fmt::repr(*d, -1)).as_bytes())
+            }
+            Value::String(s) => {
+                out.extend_from_slice(format!("string({}) \"", s.len()).as_bytes());
+                out.extend_from_slice(s.as_bytes());
+                out.extend_from_slice(b"\"\n");
+            }
+            Value::Array(a) => {
+                out.extend_from_slice(format!("array({}) {{\n", a.len()).as_bytes());
+                for (k, v) in a.iter() {
+                    out.extend(std::iter::repeat_n(b' ', indent + 2));
+                    match k {
+                        ArrayKey::Int(i) => out.extend_from_slice(format!("[{i}]=>\n").as_bytes()),
+                        ArrayKey::Str(s) => {
+                            out.extend_from_slice(b"[\"");
+                            out.extend_from_slice(s.as_bytes());
+                            out.extend_from_slice(b"\"]=>\n");
+                        }
+                    }
+                    var_dump_into(out, v, indent + 2);
+                }
+                out.extend(std::iter::repeat_n(b' ', indent));
+                out.extend_from_slice(b"}\n");
+            }
+            other => panic!("unexpected value {other:?}"),
+        }
+    }
+
+    /// `var_dump($v)`.
+    fn var_dump(v: &Value) -> String {
+        let mut out = Vec::new();
+        var_dump_into(&mut out, v, 0);
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    fn print_r_into(out: &mut Vec<u8>, v: &Value, indent: usize) {
+        match v {
+            Value::Array(a) => {
+                out.extend_from_slice(b"Array\n");
+                out.extend(std::iter::repeat_n(b' ', indent));
+                out.extend_from_slice(b"(\n");
+                for (k, v) in a.iter() {
+                    out.extend(std::iter::repeat_n(b' ', indent + 4));
+                    out.extend_from_slice(format!("[{k}] => ").as_bytes());
+                    print_r_into(out, v, indent + 8);
+                    out.push(b'\n');
+                }
+                out.extend(std::iter::repeat_n(b' ', indent));
+                out.extend_from_slice(b")\n");
+            }
+            Value::String(s) => out.extend_from_slice(s.as_bytes()),
+            Value::Bool(true) => out.push(b'1'),
+            Value::Bool(false) | Value::Null => {}
+            Value::Int(i) => out.extend_from_slice(i.to_string().as_bytes()),
+            other => panic!("unexpected value {other:?}"),
+        }
+    }
+
+    /// `print_r($v)`.
+    fn print_r(v: &Value) -> String {
+        let mut out = Vec::new();
+        print_r_into(&mut out, v, 0);
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    fn parse_str(t: &mut TestVm, s: &[u8], sections: bool, mode: i64) -> Value {
+        t.call(
+            "parse_ini_string",
+            vec![Value::from(s), Value::Bool(sections), Value::Int(mode)],
+        )
+        .unwrap()
+    }
+
+    /// Diagnostics plus `var_dump(parse_ini_string($s, $sections, $mode))`.
+    fn dump_mode(s: &str, sections: bool, mode: i64) -> String {
+        let mut t = TestVm::new();
+        let v = parse_str(&mut t, s.as_bytes(), sections, mode);
+        t.output() + &var_dump(&v)
+    }
+
+    fn dump(s: &str) -> String {
+        dump_mode(s, false, INI_SCANNER_NORMAL)
+    }
+
+    fn parse_file(t: &mut TestVm, path: &std::path::Path, sections: bool, mode: i64) -> Value {
+        t.call(
+            "parse_ini_file",
+            vec![
+                Value::from(path.to_str().unwrap()),
+                Value::Bool(sections),
+                Value::Int(mode),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn phpt_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/phpt")
+    }
+
+    /// The `--EXPECT--` section of a .phpt file.
+    fn phpt_expect(rel: &str) -> String {
+        let src = std::fs::read_to_string(phpt_dir().join(rel)).unwrap();
+        let start = src.find("--EXPECT--\n").unwrap() + "--EXPECT--\n".len();
+        let rest = &src[start..];
+        let end = rest.find("\n--CLEAN--").unwrap_or(rest.len());
+        rest[..end].trim_end().to_string()
+    }
+
+    /// A scratch file holding `contents`, removed on drop.
+    struct TempFile(PathBuf);
+
+    impl TempFile {
+        fn new(name: &str, contents: &[u8]) -> TempFile {
+            let path =
+                std::env::temp_dir().join(format!("php_ini_{}_{}", std::process::id(), name));
+            std::fs::write(&path, contents).unwrap();
+            TempFile(path)
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// The displayed `ini_error()` warning (its message ends with "\n").
+    fn ini_warning(msg: &str) -> String {
+        format!("\nWarning: {msg}\n in /t.php on line 3\n")
+    }
+
+    // ----- registration and argument validation --------------------------
+
+    #[test]
+    fn constants() {
+        let t = TestVm::new();
+        assert_eq!(
+            t.vm.constant("INI_SCANNER_NORMAL").unwrap().as_int(),
+            Some(0)
+        );
+        assert_eq!(t.vm.constant("INI_SCANNER_RAW").unwrap().as_int(), Some(1));
+        assert_eq!(
+            t.vm.constant("INI_SCANNER_TYPED").unwrap().as_int(),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn argument_validation() {
+        let mut t = TestVm::new();
+        let r = t.call("parse_ini_file", vec![Value::from("")]);
+        assert_eq!(
+            thrown(r),
+            (
+                "ValueError".to_string(),
+                "parse_ini_file(): Argument #1 ($filename) cannot be empty".to_string()
+            )
+        );
+        let r = t.call("parse_ini_file", vec![Value::from(&b"a\0b"[..])]);
+        assert_eq!(
+            thrown(r).1,
+            "parse_ini_file(): Argument #1 ($filename) must not contain any null bytes"
+        );
+        let r = t.call(
+            "parse_ini_string",
+            vec![Value::from("a=1"), Value::Bool(false), Value::Int(3)],
+        );
+        assert_eq!(
+            thrown(r),
+            (
+                "ValueError".to_string(),
+                "parse_ini_string(): Argument #3 ($scanner_mode) must be one of INI_SCANNER_NORMAL, INI_SCANNER_RAW, or INI_SCANNER_TYPED".to_string()
+            )
+        );
+        let r = t.call(
+            "parse_ini_file",
+            vec![Value::from("x.ini"), Value::Bool(false), Value::Int(-1)],
+        );
+        assert_eq!(
+            thrown(r).1,
+            "parse_ini_file(): Argument #3 ($scanner_mode) must be one of INI_SCANNER_NORMAL, INI_SCANNER_RAW, or INI_SCANNER_TYPED"
+        );
+    }
+
+    // ----- general_functions/parse_ini_string_*.phpt ---------------------
+
+    #[test]
+    fn parse_ini_string_001() {
+        let src = std::fs::read_to_string(
+            phpt_dir().join("ext/standard/tests/general_functions/parse_ini_string_001.phpt"),
+        )
+        .unwrap();
+        let start = src.find("<<<EOD\n").unwrap() + "<<<EOD\n".len();
+        let end = src.find("\nEOD;").unwrap();
+        // The heredoc escapes the test uses: \n, \t and \0.
+        let raw = &src.as_bytes()[start..end];
+        let mut ini = Vec::new();
+        let mut i = 0;
+        while i < raw.len() {
+            match (raw[i], raw.get(i + 1)) {
+                (b'\\', Some(b'n')) => ini.push(b'\n'),
+                (b'\\', Some(b't')) => ini.push(b'\t'),
+                (b'\\', Some(b'0')) => ini.push(0),
+                (c, _) => {
+                    ini.push(c);
+                    i += 1;
+                    continue;
+                }
+            }
+            i += 2;
+        }
+        let mut t = TestVm::new();
+        t.vm.define_constant("BIRD", Value::from("Humming bird"));
+        let flat = parse_str(&mut t, &ini, false, INI_SCANNER_NORMAL);
+        let sections = parse_str(&mut t, &ini, true, INI_SCANNER_NORMAL);
+        let out = format!(
+            "*** Test parse_ini_string() function:  with various keys and values given in string ***\n\
+             -- ini string without process_sections optional arg --\n{}\n\
+             -- ini string with process_sections as TRUE --\n{}*** Done **",
+            print_r(&flat),
+            print_r(&sections)
+        );
+        assert_eq!(t.output(), "");
+        assert_eq!(
+            out,
+            phpt_expect("ext/standard/tests/general_functions/parse_ini_string_001.phpt")
+        );
+    }
+
+    #[test]
+    fn parse_ini_string_002() {
+        assert_eq!(
+            dump("\ntest =\n"),
+            "array(1) {\n  [\"test\"]=>\n  string(0) \"\"\n}\n"
+        );
+        let err =
+            ini_warning("syntax error, unexpected '=' in Unknown on line 2") + "bool(false)\n";
+        assert_eq!(dump("\ntest==\n"), err);
+        assert_eq!(dump("\ntest=test=\n"), err);
+        assert_eq!(
+            dump("\ntest= \"new\nline\"\n"),
+            "array(1) {\n  [\"test\"]=>\n  string(8) \"new\nline\"\n}\n"
+        );
+        let mut t = TestVm::new();
+        t.vm.define_constant("TEST_CONST", Value::from("test const value"));
+        let v = parse_str(&mut t, b"\ntest=TEST_CONST\n", false, 0);
+        assert_eq!(
+            var_dump(&v),
+            "array(1) {\n  [\"test\"]=>\n  string(16) \"test const value\"\n}\n"
+        );
+        let section = "\n[section]\ntest=hello\n";
+        assert_eq!(
+            dump_mode(section, true, 0),
+            "array(1) {\n  [\"section\"]=>\n  array(1) {\n    [\"test\"]=>\n    string(5) \"hello\"\n  }\n}\n"
+        );
+        assert_eq!(
+            dump_mode(section, false, 0),
+            "array(1) {\n  [\"test\"]=>\n  string(5) \"hello\"\n}\n"
+        );
+        assert_eq!(
+            dump_mode("\nsection.test=hello\n", true, 0),
+            "array(1) {\n  [\"section.test\"]=>\n  string(5) \"hello\"\n}\n"
+        );
+        assert_eq!(
+            dump_mode("\n[section]\nsection.test=hello\n", true, 0),
+            "array(1) {\n  [\"section\"]=>\n  array(1) {\n    [\"section.test\"]=>\n    string(5) \"hello\"\n  }\n}\n"
+        );
+        assert_eq!(
+            dump_mode("\n[section]\n1=2\n", true, 0),
+            "array(1) {\n  [\"section\"]=>\n  array(1) {\n    [1]=>\n    string(1) \"2\"\n  }\n}\n"
+        );
+        assert_eq!(
+            dump_mode("\n1=2\n", true, 0),
+            "array(1) {\n  [1]=>\n  string(1) \"2\"\n}\n"
+        );
+        assert_eq!(
+            dump_mode("\ntest=test2\ntest=test3\ntest=test4\n", true, 0),
+            "array(1) {\n  [\"test\"]=>\n  string(5) \"test4\"\n}\n"
+        );
+        // Bug #44574
+        assert_eq!(
+            dump_mode("[section1]\nname = value", true, 0),
+            "array(1) {\n  [\"section1\"]=>\n  array(1) {\n    [\"name\"]=>\n    string(5) \"value\"\n  }\n}\n"
+        );
+        // Bug #44842: labels starting with underscore.
+        assert_eq!(
+            dump_mode("foo=bar1\n_foo=bar2\nfoo_=bar3", true, 0),
+            "array(3) {\n  [\"foo\"]=>\n  string(4) \"bar1\"\n  [\"_foo\"]=>\n  string(4) \"bar2\"\n  [\"foo_\"]=>\n  string(4) \"bar3\"\n}\n"
+        );
+    }
+
+    #[test]
+    fn parse_ini_string_003_typed() {
+        let ini = "foo = 1\nbar = 1.3\nbaz = null\nqux[] = false\nqux[] = off\nqux[] = something\nqux[] = \"something else\"";
+        assert_eq!(
+            dump_mode(ini, false, INI_SCANNER_TYPED),
+            "array(4) {\n  [\"foo\"]=>\n  int(1)\n  [\"bar\"]=>\n  float(1.3)\n  [\"baz\"]=>\n  NULL\n  [\"qux\"]=>\n  array(4) {\n    [0]=>\n    bool(false)\n    [1]=>\n    bool(false)\n    [2]=>\n    string(9) \"something\"\n    [3]=>\n    string(14) \"something else\"\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn parse_ini_string_bug76068() {
+        let typed = |s: &str| dump_mode(s, true, INI_SCANNER_TYPED);
+        let wrap = |inner: &str| {
+            format!(
+                "array(1) {{\n  [\"foo\"]=>\n  array(1) {{\n    [\"bar\"]=>\n    {inner}\n  }}\n}}\n"
+            )
+        };
+        assert_eq!(typed("[foo]\nbar=1|>baz"), wrap("int(1)"));
+        assert_eq!(typed("[foo]\nbar=\"1|>baz\""), wrap("string(6) \"1|>baz\""));
+        assert_eq!(typed("[foo]\nbar=1"), wrap("int(1)"));
+        assert_eq!(typed("[foo]\nbar=42|>baz"), wrap("int(42)"));
+    }
+
+    #[test]
+    fn parse_ini_string_error() {
+        assert_eq!(
+            dump("a=\"b"),
+            ini_warning(
+                "syntax error, unexpected end of file, expecting TC_DOLLAR_CURLY or TC_QUOTED_STRING or '\"' in Unknown on line 1"
+            ) + "bool(false)\n"
+        );
+        assert_eq!(
+            dump("a=${b"),
+            ini_warning(
+                "syntax error, unexpected end of file, expecting TC_FALLBACK or '}' in Unknown on line 1"
+            ) + "bool(false)\n"
+        );
+        assert_eq!(
+            dump("a=${b:-a"),
+            ini_warning(
+                "syntax error, unexpected TC_FALLBACK, expecting TC_VARNAME in Unknown on line 1"
+            ) + "bool(false)\n"
+        );
+    }
+
+    #[test]
+    fn parse_ini_numeric_entry_name() {
+        assert_eq!(
+            dump("\n1[]=1\n2M[]=2\n"),
+            "array(2) {\n  [1]=>\n  array(1) {\n    [0]=>\n    string(1) \"1\"\n  }\n  [\"2M\"]=>\n  array(1) {\n    [0]=>\n    string(1) \"2\"\n  }\n}\n"
+        );
+    }
+
+    // ----- ext/standard/tests/{gh*,strings/bug51899}.phpt -----------------
+
+    #[test]
+    fn gh11010_concatenated_numbers_stay_strings() {
+        let mut t = TestVm::new();
+        let v = parse_str(&mut t, b"variable = -00 20 30", false, INI_SCANNER_TYPED);
+        let a = v.as_array().unwrap();
+        assert_eq!(
+            var_dump(a.get_str(b"variable").unwrap()),
+            "string(9) \"-00 20 30\"\n"
+        );
+    }
+
+    #[test]
+    fn gh20695_malformed_offset() {
+        assert_eq!(
+            dump_mode("8 [[] = !!$]", true, INI_SCANNER_TYPED),
+            "array(1) {\n  [8]=>\n  array(1) {\n    [\"[\"]=>\n    int(0)\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn bug51899_empty_value_without_newline() {
+        let a_is = |s: &str| format!("array(1) {{\n  [\"a\"]=>\n  {s}\n}}\n");
+        assert_eq!(dump("a="), a_is("string(0) \"\""));
+        assert_eq!(dump("a= "), a_is("string(0) \"\""));
+        assert_eq!(dump("a=\n"), a_is("string(0) \"\""));
+        assert_eq!(dump("a=b "), a_is("string(2) \"b \""));
+        assert_eq!(dump(""), "array(0) {\n}\n");
+        assert_eq!(dump("\0"), "array(0) {\n}\n");
+    }
+
+    // ----- general_functions/bug*.phpt ------------------------------------
+
+    #[test]
+    fn bug40752_scalar_redeclared_as_array() {
+        assert_eq!(
+            dump("\nfoo   = 1;\nfoo[] = 1;\n"),
+            "array(1) {\n  [\"foo\"]=>\n  array(1) {\n    [0]=>\n    string(1) \"1\"\n  }\n}\n"
+        );
+        assert_eq!(
+            dump("\nfoo[] = 1;\nfoo   = 1;\n"),
+            "array(1) {\n  [\"foo\"]=>\n  string(1) \"1\"\n}\n"
+        );
+    }
+
+    #[test]
+    fn bug41445_numeric_section_names() {
+        let f = TempFile::new(
+            "bug41445.ini",
+            b"[001099030277]\noption1 = yes\n\n[011099030277]\noption2 = yes",
+        );
+        let mut t = TestVm::new();
+        assert_eq!(
+            var_dump(&parse_file(&mut t, &f.0, true, 0)),
+            "array(2) {\n  [\"001099030277\"]=>\n  array(1) {\n    [\"option1\"]=>\n    string(1) \"1\"\n  }\n  [\"011099030277\"]=>\n  array(1) {\n    [\"option2\"]=>\n    string(1) \"1\"\n  }\n}\n"
+        );
+        assert_eq!(
+            var_dump(&parse_file(&mut t, &f.0, false, 0)),
+            "array(2) {\n  [\"option1\"]=>\n  string(1) \"1\"\n  [\"option2\"]=>\n  string(1) \"1\"\n}\n"
+        );
+        let f = TempFile::new(
+            "bug41445b.ini",
+            b"[23.44]\noption1 = yes\n\n[9633337363542736472364]\noption2 = yes",
+        );
+        assert_eq!(
+            var_dump(&parse_file(&mut t, &f.0, true, 0)),
+            "array(2) {\n  [\"23.44\"]=>\n  array(1) {\n    [\"option1\"]=>\n    string(1) \"1\"\n  }\n  [\"9633337363542736472364\"]=>\n  array(1) {\n    [\"option2\"]=>\n    string(1) \"1\"\n  }\n}\n"
+        );
+        assert_eq!(t.output(), "");
+    }
+
+    #[test]
+    fn bug41445_1_numeric_keys() {
+        let ini = "[2454.33]\n09 = yes\n\n[9876543]\n098765434567876543 = yes\n\n[09876543]\n987654345678765432456798765434567876543 = yes";
+        assert_eq!(
+            dump_mode(ini, true, 0),
+            "array(3) {\n  [\"2454.33\"]=>\n  array(1) {\n    [\"09\"]=>\n    string(1) \"1\"\n  }\n  [9876543]=>\n  array(1) {\n    [\"098765434567876543\"]=>\n    string(1) \"1\"\n  }\n  [\"09876543\"]=>\n  array(1) {\n    [\"987654345678765432456798765434567876543\"]=>\n    string(1) \"1\"\n  }\n}\n"
+        );
+        assert_eq!(
+            dump(ini),
+            "array(3) {\n  [\"09\"]=>\n  string(1) \"1\"\n  [\"098765434567876543\"]=>\n  string(1) \"1\"\n  [\"987654345678765432456798765434567876543\"]=>\n  string(1) \"1\"\n}\n"
+        );
+    }
+
+    #[test]
+    fn bug44461_trailing_comment_at_eof() {
+        let f = TempFile::new(
+            "bug44461.ini",
+            b"[attachments]\nzip = \"application/zip\" ; MIME-type for ZIP files",
+        );
+        let mut t = TestVm::new();
+        let v = parse_file(&mut t, &f.0, true, 0);
+        assert_eq!(t.output(), "");
+        assert_eq!(
+            var_dump(&v),
+            "array(1) {\n  [\"attachments\"]=>\n  array(1) {\n    [\"zip\"]=>\n    string(15) \"application/zip\"\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn bug47859_special_chars_in_keys() {
+        let cases = [
+            ("*key = \"*value\"", "*key", "*value"),
+            ("-key = \"-value\"", "-key", "-value"),
+            ("_key = \"_value\"", "_key", "_value"),
+            ("key* = \"value*\"", "key*", "value*"),
+            ("key.*.* = \"value.*.*\"", "key.*.*", "value.*.*"),
+            ("*.*.key = \"*.*.value\"", "*.*.key", "*.*.value"),
+            ("k*e*y = \"v*a*lue\"", "k*e*y", "v*a*lue"),
+        ];
+        for (ini, k, v) in cases {
+            assert_eq!(
+                dump(ini),
+                format!(
+                    "array(1) {{\n  [\"{k}\"]=>\n  string({}) \"{v}\"\n}}\n",
+                    v.len()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn bug48660_dollar_sign_at_end_of_value() {
+        let ini = "\n[cases]\n\nCase.a = avalue\nCase.b = \"$dollar_sign\"\nCase.c = \"dollar_sign$\"\nCase.d = \"$dollar_sign$\"\nCase.e = 10\n";
+        let expected = "array(1) {\n  [\"cases\"]=>\n  array(5) {\n    [\"Case.a\"]=>\n    string(6) \"avalue\"\n    [\"Case.b\"]=>\n    string(12) \"$dollar_sign\"\n    [\"Case.c\"]=>\n    string(12) \"dollar_sign$\"\n    [\"Case.d\"]=>\n    string(13) \"$dollar_sign$\"\n    [\"Case.e\"]=>\n    string(2) \"10\"\n  }\n}\n";
+        let f = TempFile::new("bug48660.ini", ini.as_bytes());
+        let mut t = TestVm::new();
+        assert_eq!(
+            var_dump(&parse_file(&mut t, &f.0, true, INI_SCANNER_RAW)),
+            expected
+        );
+        assert_eq!(
+            var_dump(&parse_file(&mut t, &f.0, true, INI_SCANNER_NORMAL)),
+            expected
+        );
+        assert_eq!(t.output(), "");
+    }
+
+    #[test]
+    fn bug48768_quoted_equals_sign() {
+        let expected = "array(1) {\n  [\"equal\"]=>\n  string(1) \"=\"\n}\n";
+        assert_eq!(
+            dump_mode("equal = \"=\"\n", false, INI_SCANNER_RAW),
+            expected
+        );
+        assert_eq!(
+            dump_mode("equal = \"=\"\n", false, INI_SCANNER_NORMAL),
+            expected
+        );
+    }
+
+    #[test]
+    fn bug49056_non_ascii_keys() {
+        let ini =
+            "Cooking_furniture=\"KÃ¼chen MÃ¶bel (en)\"\nKÃ¼chen_MÃ¶bel=\"Cooking furniture (en)\"";
+        let f = TempFile::new("bug49056.ini", ini.as_bytes());
+        let mut t = TestVm::new();
+        assert_eq!(
+            var_dump(&parse_file(&mut t, &f.0, false, 0)),
+            "array(2) {\n  [\"Cooking_furniture\"]=>\n  string(23) \"KÃ¼chen MÃ¶bel (en)\"\n  [\"KÃ¼chen_MÃ¶bel\"]=>\n  string(22) \"Cooking furniture (en)\"\n}\n"
+        );
+    }
+
+    #[test]
+    fn bug49692_slash_in_keys() {
+        let path = phpt_dir().join("ext/standard/tests/general_functions/bug49692.ini");
+        let mut t = TestVm::new();
+        assert_eq!(
+            var_dump(&parse_file(&mut t, &path, true, 0)),
+            "array(1) {\n  [\"sitemap\"]=>\n  array(2) {\n    [\"/home\"]=>\n    string(13) \"default:index\"\n    [\"/info\"]=>\n    string(12) \"default:info\"\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn bug52138_constants_not_expanded_in_sections() {
+        let path = phpt_dir().join("ext/standard/tests/general_functions/bug52138.data");
+        let mut t = TestVm::new();
+        t.vm.define_constant("MYCONST", Value::Int(1));
+        t.vm.define_constant("A", Value::from("B"));
+        t.vm.define_constant("M_PI", Value::Float(std::f64::consts::PI));
+        assert_eq!(
+            var_dump(&parse_file(&mut t, &path, true, 0)),
+            "array(4) {\n  [\"MYCONST\"]=>\n  array(1) {\n    [\"MYCONST\"]=>\n    string(1) \"1\"\n  }\n  [\"M_PI\"]=>\n  array(1) {\n    [\"FOO\"]=>\n    string(20) \"3.1415926535898 test\"\n  }\n  [\"foo::bar\"]=>\n  array(2) {\n    [\"A\"]=>\n    string(1) \"1\"\n    [\"B\"]=>\n    string(3) \"BAB\"\n  }\n  [\"MYCONST M_PI\"]=>\n  array(0) {\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn bug70157_typed_numbers_and_strings() {
+        let ini = "[agatha.christie]\ntitle = 10 little indians\nfoo[123] = E_ALL & ~E_DEPRECATED\nfoo[456] = 123";
+        assert_eq!(
+            dump_mode(ini, false, INI_SCANNER_TYPED),
+            "array(2) {\n  [\"title\"]=>\n  string(17) \"10 little indians\"\n  [\"foo\"]=>\n  array(2) {\n    [123]=>\n    int(22527)\n    [456]=>\n    int(123)\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn bug70947_typed_string_with_number() {
+        assert_eq!(
+            dump_mode("foo = bar 123", false, INI_SCANNER_TYPED),
+            "array(1) {\n  [\"foo\"]=>\n  string(7) \"bar 123\"\n}\n"
+        );
+    }
+
+    #[test]
+    fn bug77844_typed_operators_on_floats() {
+        assert_eq!(
+            dump_mode("val1=3.7&2\nval2=2&3.7", true, INI_SCANNER_TYPED),
+            "array(2) {\n  [\"val1\"]=>\n  int(2)\n  [\"val2\"]=>\n  int(2)\n}\n"
+        );
+    }
+
+    // ----- general_functions/parse_ini_{basic,booleans,file}.phpt --------
+
+    #[test]
+    fn parse_ini_basic() {
+        let mut t = TestVm::new();
+        // The test's --ENV-- / --INI-- values as configuration directives
+        // (run-tests drops empty environment variables: `emptyval` is unset).
+        for (name, value) in [
+            ("basicval", "FUBAR_VARIABLE"),
+            ("basicqval", "FUBAR_QUOTES_VARIABLE"),
+            ("falsyval", "false"),
+            ("INI:WITH:COLON", "ini_with_colon"),
+        ] {
+            t.vm.ini
+                .register(&IniDef::new(name, Some(value), modifiable::ALL), "test");
+        }
+        t.vm.define_constant("TEST_CONSTANT", Value::from("this_is_test_constant"));
+        let path = phpt_dir().join("ext/standard/tests/general_functions/parse_ini_basic.data");
+        let v = parse_file(&mut t, &path, true, 0);
+        assert_eq!(t.output(), "");
+        assert_eq!(
+            var_dump(&v) + "Done.",
+            phpt_expect("ext/standard/tests/general_functions/parse_ini_basic.phpt")
+        );
+    }
+
+    #[test]
+    fn parse_ini_booleans() {
+        let mut t = TestVm::new();
+        let path = phpt_dir().join("ext/standard/tests/general_functions/parse_ini_booleans.data");
+        let v = parse_file(&mut t, &path, true, 0);
+        assert_eq!(
+            t.output() + &var_dump(&v) + "Done.",
+            phpt_expect("ext/standard/tests/general_functions/parse_ini_booleans.phpt")
+        );
+    }
+
+    #[test]
+    fn parse_ini_file_multiple_calls() {
+        let mut t = TestVm::new();
+        let missing =
+            std::env::temp_dir().join(format!("php_ini_{}_does_not_exist.dat", std::process::id()));
+        let v = parse_file(&mut t, &missing, false, 0);
+        assert!(matches!(v, Value::Bool(false)));
+        assert_eq!(
+            t.output(),
+            "\nWarning: parse_ini_file(): Failed to open stream: No such file or directory in /t.php on line 3\n"
+        );
+
+        let f = TempFile::new("parse_ini_file1.dat", b"\ntest =\n");
+        assert_eq!(
+            var_dump(&parse_file(&mut t, &f.0, false, 0)),
+            "array(1) {\n  [\"test\"]=>\n  string(0) \"\"\n}\n"
+        );
+        let f = TempFile::new("parse_ini_file2.dat", b"\ntest==\n");
+        let v = parse_file(&mut t, &f.0, false, 0);
+        assert!(matches!(v, Value::Bool(false)));
+        assert_eq!(
+            t.output(),
+            ini_warning(&format!(
+                "syntax error, unexpected '=' in {} on line 2",
+                f.0.display()
+            ))
+        );
+        // #44575: `;` comments.
+        let f = TempFile::new(
+            "parse_ini_file3.dat",
+            b"foo=bar1\n; comment\n_foo=bar2\n; comment\nfoo_=bar3",
+        );
+        assert_eq!(
+            var_dump(&parse_file(&mut t, &f.0, true, 0)),
+            "array(3) {\n  [\"foo\"]=>\n  string(4) \"bar1\"\n  [\"_foo\"]=>\n  string(4) \"bar2\"\n  [\"foo_\"]=>\n  string(4) \"bar3\"\n}\n"
+        );
+    }
+
+    // ----- Zend/tests ------------------------------------------------------
+
+    #[test]
+    fn zend_bug52508_raw_without_newline() {
+        let f = TempFile::new("bug52508.ini", b"a = 1");
+        let mut t = TestVm::new();
+        assert_eq!(
+            var_dump(&parse_file(&mut t, &f.0, true, INI_SCANNER_RAW)),
+            "array(1) {\n  [\"a\"]=>\n  string(1) \"1\"\n}\n"
+        );
+    }
+
+    #[test]
+    fn zend_bug69551_raw_unterminated_quote() {
+        assert_eq!(
+            dump_mode(
+                "[Network.eth0]\nSubnetMask = \"\n\"",
+                false,
+                INI_SCANNER_RAW
+            ),
+            ini_warning("syntax error, unexpected '\"' in Unknown on line 3") + "bool(false)\n"
+        );
+    }
+
+    #[test]
+    fn zend_bug70748_unterminated_variable_in_section() {
+        let f = TempFile::new("bug70748.ini", b"[${ \t");
+        let mut t = TestVm::new();
+        let v = parse_file(&mut t, &f.0, false, 0);
+        assert!(matches!(v, Value::Bool(false)));
+        assert_eq!(
+            t.output(),
+            ini_warning(&format!(
+                "syntax error, unexpected end of file, expecting TC_FALLBACK or '}}' in {} on line 1",
+                f.0.display()
+            ))
+        );
+    }
+
+    #[test]
+    fn zend_bug74603_large_operand() {
+        let path = phpt_dir().join("Zend/tests/bug74603.ini");
+        let mut t = TestVm::new();
+        assert_eq!(
+            var_dump(&parse_file(&mut t, &path, true, INI_SCANNER_NORMAL)),
+            "array(1) {\n  [0]=>\n  string(1) \"0\"\n}\n"
+        );
+    }
+
+    #[test]
+    fn zend_bug76965_raw_trailing_whitespace() {
+        let ini = "1=\"foo\"\n2=\"bar\" ; comment\n3= baz\n4= \"foo;bar\"\n5= \"foo\" ; bar ; baz\n6= \"foo;bar\" ; baz\n7= foo\"bar ; \"ok";
+        assert_eq!(
+            dump_mode(ini, false, INI_SCANNER_RAW),
+            "array(7) {\n  [1]=>\n  string(3) \"foo\"\n  [2]=>\n  string(3) \"bar\"\n  [3]=>\n  string(3) \"baz\"\n  [4]=>\n  string(7) \"foo;bar\"\n  [5]=>\n  string(3) \"foo\"\n  [6]=>\n  string(7) \"foo;bar\"\n  [7]=>\n  string(7) \"foo\"bar\"\n}\n"
+        );
+    }
+
+    #[test]
+    fn zend_bug77589_typed_numeric_sections() {
+        let ini = "[0]\na = 1\nb = on\nc = true\n\n[\"true\"]\na = 100\nb = null\nc = yes";
+        assert_eq!(
+            dump_mode(ini, true, INI_SCANNER_TYPED),
+            "array(2) {\n  [0]=>\n  array(3) {\n    [\"a\"]=>\n    int(1)\n    [\"b\"]=>\n    bool(true)\n    [\"c\"]=>\n    bool(true)\n  }\n  [\"true\"]=>\n  array(3) {\n    [\"a\"]=>\n    int(100)\n    [\"b\"]=>\n    NULL\n    [\"c\"]=>\n    bool(true)\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn zend_oss_fuzz_428983568() {
+        assert_eq!(
+            dump("[${zz:-x\n"),
+            ini_warning("syntax error, unexpected end of file, expecting '}' in Unknown on line 1")
+                + "bool(false)\n"
+        );
+    }
+
+    // ----- behaviour derived from zend_ini_scanner.l / zend_ini_parser.y --
+
+    fn one(v: &str) -> String {
+        format!("array(1) {{\n  [\"a\"]=>\n  {v}\n}}\n")
+    }
+
+    #[test]
+    fn expressions_use_c_int_arithmetic() {
+        assert_eq!(dump("a = 1 | 2"), one("string(1) \"3\""));
+        assert_eq!(dump("a = ~0"), one("string(2) \"-1\""));
+        assert_eq!(dump("a = !0"), one("string(1) \"1\""));
+        assert_eq!(dump("a = (1|6)&2"), one("string(1) \"2\""));
+        assert_eq!(dump("a = 5 ^ 1"), one("string(1) \"4\""));
+        // atoi() truncated to a C int.
+        assert_eq!(dump("a = 4294967297 | 0"), one("string(1) \"1\""));
+        assert_eq!(
+            dump_mode("a = ~1", false, INI_SCANNER_TYPED),
+            one("int(-2)")
+        );
+        assert_eq!(
+            dump_mode("a = (5)", false, INI_SCANNER_TYPED),
+            one("int(5)")
+        );
+    }
+
+    #[test]
+    fn typed_numbers_follow_the_leading_token() {
+        // Z_EXTRA(INI_ZVAL_IS_NUMBER) is kept by concatenation onto a number.
+        assert_eq!(
+            dump_mode("a = 1\"2\"", false, INI_SCANNER_TYPED),
+            one("int(12)")
+        );
+        assert_eq!(
+            dump_mode("a = \"1\"2", false, INI_SCANNER_TYPED),
+            one("string(2) \"12\"")
+        );
+        assert_eq!(
+            dump_mode("a = \"1\"", false, INI_SCANNER_TYPED),
+            one("string(1) \"1\"")
+        );
+        // `-1.5` scans as TC_STRING (`-` only prefixes LNUM).
+        assert_eq!(
+            dump_mode("a = -1.5", false, INI_SCANNER_TYPED),
+            one("string(4) \"-1.5\"")
+        );
+        assert_eq!(
+            dump_mode("a = -15", false, INI_SCANNER_TYPED),
+            one("int(-15)")
+        );
+        assert_eq!(
+            dump_mode("a = .5", false, INI_SCANNER_TYPED),
+            one("float(0.5)")
+        );
+        // Integer overflow is not converted.
+        assert_eq!(
+            dump_mode("a = 99999999999999999999", false, INI_SCANNER_TYPED),
+            one("string(20) \"99999999999999999999\"")
+        );
+        assert_eq!(
+            dump_mode("a = yes", false, INI_SCANNER_RAW),
+            one("string(3) \"yes\"")
+        );
+    }
+
+    #[test]
+    fn reserved_words_as_keys() {
+        assert_eq!(
+            dump("true = 1"),
+            ini_warning("syntax error, unexpected BOOL_TRUE in Unknown on line 1")
+                + "bool(false)\n"
+        );
+        assert_eq!(
+            dump("\n\nnull = 1"),
+            ini_warning("syntax error, unexpected NULL_NULL in Unknown on line 3")
+                + "bool(false)\n"
+        );
+        // A bare label is accepted and ignored.
+        assert_eq!(
+            dump("lonely\nb = 1"),
+            "array(1) {\n  [\"b\"]=>\n  string(1) \"1\"\n}\n"
+        );
+    }
+
+    #[test]
+    fn line_numbers_count_quoted_newlines_and_sections() {
+        assert_eq!(
+            dump("[a]\nb = \"x\ny\"\nc = 1 = 2"),
+            ini_warning("syntax error, unexpected '=' in Unknown on line 4") + "bool(false)\n"
+        );
+    }
+
+    #[test]
+    fn quoted_string_escapes_and_concatenation() {
+        assert_eq!(
+            dump(r#"a = "x\"y\\z\$w\n" 'r\aw' tail"#),
+            one(r#"string(18) "x"y\z$w\nr\aw tail""#)
+        );
+        // Whitespace before an opening quote and after a closing one is dropped.
+        assert_eq!(dump("a = x \"y\" z"), one("string(3) \"xyz\""));
+    }
+
+    #[test]
+    fn variables_come_from_ini_then_environment() {
+        let mut t = TestVm::new();
+        t.vm.ini.register(
+            &IniDef::new("ini.test.var", Some("startup"), modifiable::ALL),
+            "test",
+        );
+        t.vm.ini_set("ini.test.var", "runtime");
+        let v = parse_str(&mut t, b"a = ${ini.test.var}", false, 0);
+        // zend_get_configuration_directive() sees the startup value.
+        assert_eq!(var_dump(&v), one("string(7) \"startup\""));
+        if let Some(path) = std::env::var_os("PATH").and_then(|p| p.into_string().ok()) {
+            let v = parse_str(&mut t, b"a = \"${PATH}\"", false, 0);
+            assert_eq!(
+                var_dump(&v),
+                one(&format!("string({}) \"{path}\"", path.len()))
+            );
+        }
+        let v = parse_str(
+            &mut t,
+            b"a = ${php_ini_test_undefined:-${php_ini_test_undefined2:-x} y}",
+            false,
+            0,
+        );
+        assert_eq!(var_dump(&v), one("string(3) \"x y\""));
+    }
+
+    #[test]
+    fn constants_in_values_and_offsets() {
+        let mut t = TestVm::new();
+        t.vm.define_constant("ARR", Value::empty_array());
+        let v = parse_str(&mut t, b"a[E_WARNING] = ARR\nb[true] = x", false, 0);
+        assert_eq!(
+            t.output(),
+            "\nWarning: Array to string conversion in /t.php on line 3\n"
+        );
+        assert_eq!(
+            var_dump(&v),
+            "array(2) {\n  [\"a\"]=>\n  array(1) {\n    [2]=>\n    string(5) \"Array\"\n  }\n  [\"b\"]=>\n  array(1) {\n    [1]=>\n    string(1) \"x\"\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn duplicate_sections_replace_earlier_ones() {
+        assert_eq!(
+            dump_mode("top = 1\n[s]\nx = 1\n[t]\n[s]\ny = 2", true, 0),
+            "array(3) {\n  [\"top\"]=>\n  string(1) \"1\"\n  [\"s\"]=>\n  array(1) {\n    [\"y\"]=>\n    string(1) \"2\"\n  }\n  [\"t\"]=>\n  array(0) {\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn raw_sections_are_literal() {
+        assert_eq!(
+            dump_mode("[${x} y]\na = ${x}", true, INI_SCANNER_RAW),
+            "array(1) {\n  [\"${x} y\"]=>\n  array(1) {\n    [\"a\"]=>\n    string(4) \"${x}\"\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn utf8_bom_and_crlf() {
+        assert_eq!(
+            dump("\u{feff}a = 1\r\nb = 2\r\n"),
+            "array(2) {\n  [\"a\"]=>\n  string(1) \"1\"\n  [\"b\"]=>\n  string(1) \"2\"\n}\n"
+        );
+    }
+
+    #[test]
+    fn parser_stack_exhaustion() {
+        let ini = format!("a = {}1", "!".repeat(10_000));
+        assert_eq!(
+            dump(&ini),
+            ini_warning("memory exhausted in Unknown on line 1") + "bool(false)\n"
+        );
+    }
+
+    #[test]
+    fn parse_ini_with_reports_events() {
+        let mut t = TestVm::new();
+        let mut events = Vec::new();
+        let ok = parse_ini_with(
+            &mut t.vm,
+            b"[sec]\nk = v\nbare\nk[o] = w\n",
+            Some(b"x.ini"),
+            INI_SCANNER_NORMAL,
+            &mut |_, ev| {
+                events.push(format!("{ev:?}"));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(ok);
+        assert_eq!(events.len(), 4);
+        assert!(events[0].starts_with("Section"));
+        assert!(events[2].contains("value: None"));
+        assert!(events[3].starts_with("PopEntry"));
+    }
+}
