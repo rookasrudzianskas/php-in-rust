@@ -200,7 +200,10 @@ impl Dumper {
                     out.extend_from_slice(b"}\n");
                     return Ok(());
                 }
-                (r.get(), r.refcount() > 1)
+                // References only reach here as copies of array elements or
+                // property slots (one extra holder): php-src prints `&` for
+                // `Z_REFCOUNT > 1`.
+                (r.get(), r.refcount() > 2)
             }
             v => (v.clone(), false),
         };
