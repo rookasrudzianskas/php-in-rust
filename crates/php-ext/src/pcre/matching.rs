@@ -4,7 +4,9 @@
 use php_regex::{Captures, PregError};
 use php_runtime::{ArrayKey, PResult, PhpArray, PhpRef, PhpStr, Value, Vm};
 
-use super::cache::{Exec, Pce, error_code, handle_exec_error, set_error};
+use super::cache::{
+    Exec, Pce, error_code, handle_exec_error, is_known_valid_utf8, remember_valid_utf8, set_error,
+};
 use super::{PREG_OFFSET_CAPTURE, PREG_PATTERN_ORDER, PREG_SET_ORDER, PREG_UNMATCHED_AS_NULL};
 
 /// The text of a `(*MARK)`: PCRE2 hands PHP a C string.
@@ -180,7 +182,9 @@ pub fn match_impl(
     let mut out = PhpArray::new();
 
     let ex = Exec::new(vm, pce, subject);
-    let mut res = ex.first(pce.utf, start_offset2);
+    let orig_start_offset = start_offset2;
+    let check_utf = pce.utf && !is_known_valid_utf8(vm, subject_str, orig_start_offset);
+    let mut res = ex.first(check_utf, start_offset2);
 
     'exec: loop {
         match res {
@@ -321,6 +325,11 @@ pub fn match_impl(
     }
 
     if error_code(vm) == PregError::NoError {
+        // If there was no error and we're in /u mode, remember that the string
+        // is valid UTF-8.
+        if pce.utf && orig_start_offset == 0 {
+            remember_valid_utf8(vm, subject_str);
+        }
         Ok(Value::Int(matched))
     } else {
         Ok(Value::Bool(false))

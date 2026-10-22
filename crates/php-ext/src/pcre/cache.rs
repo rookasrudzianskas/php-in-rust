@@ -122,6 +122,10 @@ impl RegexCache {
 pub struct PcreState {
     /// `PCRE_G(error_code)`.
     pub error_code: PregError,
+    /// The last subject a UTF-8 pattern matched without an error from offset
+    /// 0, so it is known to be valid UTF-8 (php-src caches this as the
+    /// `IS_STR_VALID_UTF8` flag on the string itself).
+    valid_utf8: Option<PhpStr>,
     cache: RegexCache,
 }
 
@@ -129,6 +133,7 @@ impl Default for PcreState {
     fn default() -> Self {
         PcreState {
             error_code: PregError::NoError,
+            valid_utf8: None,
             cache: RegexCache::default(),
         }
     }
@@ -142,6 +147,23 @@ pub fn set_error(vm: &mut Vm, code: PregError) {
 /// The current `PCRE_G(error_code)`.
 pub fn error_code(vm: &mut Vm) -> PregError {
     vm.ext_data::<PcreState>().error_code
+}
+
+/// `is_known_valid_utf8()`: whether `subject` was already validated and
+/// `start_offset` is not inside a character.
+pub fn is_known_valid_utf8(vm: &mut Vm, subject: &PhpStr, start_offset: usize) -> bool {
+    let known = vm
+        .ext_data::<PcreState>()
+        .valid_utf8
+        .as_ref()
+        .is_some_and(|s| PhpStr::ptr_eq(s, subject));
+    // Offset at the end, or not on a UTF-8 continuation byte.
+    known && (start_offset == subject.len() || subject[start_offset] & 0xc0 != 0x80)
+}
+
+/// Remembers that `subject` is valid UTF-8.
+pub fn remember_valid_utf8(vm: &mut Vm, subject: &PhpStr) {
+    vm.ext_data::<PcreState>().valid_utf8 = Some(subject.clone());
 }
 
 /// `pcre_handle_exec_error()`.
