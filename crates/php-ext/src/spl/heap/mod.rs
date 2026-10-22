@@ -1,4 +1,4 @@
-//! ext/spl/spl_dllist.c (SplDoublyLinkedList, SplQueue, SplStack)
+//! ext/spl/spl_heap.c
 
 use php_runtime::Registry;
 
