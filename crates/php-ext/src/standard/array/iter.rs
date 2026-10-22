@@ -123,7 +123,7 @@ fn move_pointer(vm: &mut Vm, args: &mut Args, m: Move) -> PResult<Value> {
             deprecate_object_iap(vm)?;
             Ok(with_object_table(vm, &o, |t| apply_move(t, m)))
         }
-        None => Ok(with_array_mut(args, 0, |a| apply_move(a, m))),
+        None => Ok(with_array_mut(vm, args, 0, |a| apply_move(a, m))),
     }
 }
 

@@ -394,7 +394,7 @@ natives! {
     "t_lt(mixed $a, mixed $b)" => t_lt,
     "t_zero(mixed $a, mixed $b): int" => t_zero,
     "t_double(mixed $x): mixed" => t_double,
-    "t_even(mixed $x): bool" => t_even,
+    "t_even(mixed $x, mixed ...$ignored): bool" => t_even,
     "t_add(mixed $a, mixed $b): mixed" => t_add,
     "t_concat(mixed $a, mixed $b): mixed" => t_concat,
     "t_kv(mixed $v, mixed $k): string" => t_kv,

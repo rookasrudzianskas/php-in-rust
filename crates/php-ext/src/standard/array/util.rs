@@ -93,13 +93,44 @@ pub fn ref_array(args: &Args, i: usize) -> Option<PhpArrayRef> {
 /// Runs `f` with exclusive access to the array held by the by-reference
 /// parameter `i`, separating it first when it is shared (`SEPARATE_ARRAY`).
 /// No PHP code may run inside `f`.
-pub fn with_array_mut<R>(args: &Args, i: usize, f: impl FnOnce(&mut PhpArray) -> R) -> R {
+///
+/// The runtime keeps the call's (dereferenced) arguments in the frame for
+/// backtraces, which would make every by-reference array always look shared
+/// (copying it on each call and resetting a past-the-end internal pointer, as
+/// `zend_array_dup` does). The frame's copy is therefore released while `f`
+/// runs and re-attached afterwards.
+// TODO(runtime): keep by-reference arguments as references in `Frame::args`.
+pub fn with_array_mut<R>(
+    vm: &mut Vm,
+    args: &Args,
+    i: usize,
+    f: impl FnOnce(&mut PhpArray) -> R,
+) -> R {
     let r = args.by_ref(i);
-    let mut slot = r.borrow_mut();
-    match &mut *slot {
-        Value::Array(a) => f(Rc::make_mut(a)),
-        other => panic!("array expected after ZPP, got {other:?}"),
+    let mut released: Vec<usize> = Vec::new();
+    if let (Some(frame), Value::Array(cur)) = (vm.frames.last_mut(), &*r.borrow()) {
+        for (idx, (_, v)) in frame.args.iter_mut().enumerate() {
+            if matches!(v, Value::Array(a) if Rc::ptr_eq(a, cur)) {
+                *v = Value::Null;
+                released.push(idx);
+            }
+        }
     }
+    let out = {
+        let mut slot = r.borrow_mut();
+        match &mut *slot {
+            Value::Array(a) => f(Rc::make_mut(a)),
+            other => panic!("array expected after ZPP, got {other:?}"),
+        }
+    };
+    if !released.is_empty() {
+        if let (Some(frame), Value::Array(cur)) = (vm.frames.last_mut(), &*r.borrow()) {
+            for idx in released {
+                frame.args[idx].1 = Value::Array(cur.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Replaces the array held by a reference.

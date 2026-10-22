@@ -281,7 +281,7 @@ fn array_reverse(_vm: &mut Vm, args: &mut Args) -> PResult<Value> {
 
 fn array_push(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     let vals: Vec<Value> = args.rest(1).to_vec();
-    let result = with_array_mut(args, 0, |a| {
+    let result = with_array_mut(vm, args, 0, |a| {
         for v in vals {
             if a.append(v).is_err() {
                 return Err(());
@@ -295,17 +295,17 @@ fn array_push(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     }
 }
 
-fn array_pop(_vm: &mut Vm, args: &mut Args) -> PResult<Value> {
-    Ok(with_array_mut(args, 0, |a| a.pop()).unwrap_or(Value::Null))
+fn array_pop(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+    Ok(with_array_mut(vm, args, 0, |a| a.pop()).unwrap_or(Value::Null))
 }
 
-fn array_shift(_vm: &mut Vm, args: &mut Args) -> PResult<Value> {
-    Ok(with_array_mut(args, 0, |a| a.shift()).unwrap_or(Value::Null))
+fn array_shift(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+    Ok(with_array_mut(vm, args, 0, |a| a.shift()).unwrap_or(Value::Null))
 }
 
-fn array_unshift(_vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+fn array_unshift(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     let vals: Vec<Value> = args.rest(1).to_vec();
-    let n = with_array_mut(args, 0, |a| {
+    let n = with_array_mut(vm, args, 0, |a| {
         a.unshift(vals);
         a.len()
     });
