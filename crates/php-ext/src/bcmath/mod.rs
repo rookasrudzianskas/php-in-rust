@@ -40,10 +40,14 @@ pub(crate) fn memory_limit(vm: &Vm) -> Option<usize> {
 /// The fatal error the Zend memory manager raises for an allocation of
 /// `bytes` bytes beyond `memory_limit`.
 pub(crate) fn memory_exhausted(vm: &mut Vm, bytes: usize) -> Flow {
-    let limit = memory_limit(vm).unwrap_or(0);
-    vm.fatal_error(format!(
-        "Allowed memory size of {limit} bytes exhausted (tried to allocate {bytes} bytes)"
-    ))
+    match memory_limit(vm) {
+        Some(limit) => vm.fatal_error(format!(
+            "Allowed memory size of {limit} bytes exhausted (tried to allocate {bytes} bytes)"
+        )),
+        None => vm.fatal_error(format!(
+            "Out of memory (allocated 0) (tried to allocate {bytes} bytes)"
+        )),
+    }
 }
 
 /// Fails like `emalloc(bytes)` when `bytes` exceeds `memory_limit`.

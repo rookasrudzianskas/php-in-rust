@@ -990,6 +990,20 @@ fn bcround_precision_bounds() {
 }
 
 #[test]
+fn bcround_absurd_negative_precision_is_a_fatal_error() {
+    // Allocating 10^PHP_INT_MIN digits fails in php-src with or without a memory limit.
+    for limit in [None, Some("-1")] {
+        let mut t = TestVm::new();
+        if let Some(l) = limit {
+            t.vm.ini_set_system("memory_limit", l);
+        }
+        let mode = mode_case(&mut t, "AwayFromZero");
+        let r = t.call("bcround", vec![s("1"), i(i64::MIN), mode]);
+        assert!(matches!(r, Err(php_runtime::Flow::Fatal)), "{r:?}");
+    }
+}
+
+#[test]
 fn bcround_default_arguments() {
     let mut t = TestVm::new();
     assert_eq!(call(&mut t, "bcround", vec![s("1.5")]), "2");

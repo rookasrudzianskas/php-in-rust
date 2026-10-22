@@ -892,9 +892,13 @@ pub fn round(
     Ok((result, scale))
 }
 
+/// Rejects an allocation of `bytes` bytes that exceeds the memory limit (or
+/// that no allocator could ever satisfy, even without a limit).
 fn check_limit(bytes: usize, limit: Option<usize>) -> Result<(), AllocError> {
+    let unallocatable = bytes > isize::MAX as usize / 2;
     match limit {
         Some(l) if bytes > l => Err(AllocError(bytes)),
+        _ if unallocatable => Err(AllocError(bytes)),
         _ => Ok(()),
     }
 }
