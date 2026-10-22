@@ -83,7 +83,11 @@ pub static MBFL_ENCODING_SJIS_SB: Encoding = Encoding {
     no: NoEncoding::SjisSb,
     name: "SJIS-Mobile#SOFTBANK",
     mime_name: Some("Shift_JIS"),
-    aliases: &["SJIS-SOFTBANK", "shift_jis-softbank", "x-sjis-emoji-softbank"],
+    aliases: &[
+        "SJIS-SOFTBANK",
+        "shift_jis-softbank",
+        "x-sjis-emoji-softbank",
+    ],
     mblen_table: Some(&mblen::MBLEN_TABLE_SJIS_MOBILE),
     flag: ENCTYPE_GL_UNSAFE,
     input_filter: None,
@@ -890,12 +894,14 @@ fn sjis_mobile_lookup(w: u32) -> u32 {
     }
 
     if w != 0 && (s == 0 || s >= 0x8080) {
-        let ext1 = &CP932EXT1_UCS_TABLE[..(CP932EXT1_UCS_TABLE_MAX - CP932EXT1_UCS_TABLE_MIN) as usize];
+        let ext1 =
+            &CP932EXT1_UCS_TABLE[..(CP932EXT1_UCS_TABLE_MAX - CP932EXT1_UCS_TABLE_MIN) as usize];
         if let Some(i) = ext1.iter().position(|&x| x as u32 == w) {
             let i = i as u32;
             return (((i / 94) + 0x2D) << 8) + (i % 94) + 0x21;
         }
-        let ext2 = &CP932EXT2_UCS_TABLE[..(CP932EXT2_UCS_TABLE_MAX - CP932EXT2_UCS_TABLE_MIN) as usize];
+        let ext2 =
+            &CP932EXT2_UCS_TABLE[..(CP932EXT2_UCS_TABLE_MAX - CP932EXT2_UCS_TABLE_MIN) as usize];
         if let Some(i) = ext2.iter().position(|&x| x as u32 == w) {
             let i = i as u32;
             return (((i / 94) + 0x79) << 8) + (i % 94) + 0x21;
@@ -926,7 +932,11 @@ fn uni2code_emoji(
     };
     let (_, _, key, value) = lookup;
     let i = mbfl_bisec_srch2((w - offset) as i32, key, key.len());
-    if i >= 0 { kuten_to_jis(value[i as usize] as u32) } else { s }
+    if i >= 0 {
+        kuten_to_jis(value[i as usize] as u32)
+    } else {
+        s
+    }
 }
 
 pub fn mb_wchar_to_sjis_docomo(input: &[u32], buf: &mut ConvertBuf, end: bool) {
@@ -1278,11 +1288,13 @@ pub fn mb_sjis_sb_to_wchar(input: &mut &[u8], out: &mut [u32], state: &mut u32) 
 
         if c == 0x1B {
             // Escape sequence
-            if p == e || {
-                let b = s[p];
-                p += 1;
-                b != b'$'
-            } || p == e
+            if p == e
+                || {
+                    let b = s[p];
+                    p += 1;
+                    b != b'$'
+                }
+                || p == e
             {
                 out[o] = BAD_INPUT;
                 o += 1;
@@ -1514,7 +1526,8 @@ pub fn mb_sjis2004_to_wchar(input: &mut &[u8], out: &mut [u32], _state: &mut u32
 
             // Conversion for combining characters
             if (0x0170..=0x03F1).contains(&w1) {
-                let k = mbfl_bisec_srch2(w1 as i32, &JISX0213_U2_KEY_B, JISX0213_U2_TBL_LEN as usize);
+                let k =
+                    mbfl_bisec_srch2(w1 as i32, &JISX0213_U2_KEY_B, JISX0213_U2_TBL_LEN as usize);
                 if k >= 0 {
                     let k = k as usize;
                     out[o] = JISX0213_U2_TBL[2 * k] as u32;
@@ -1535,7 +1548,11 @@ pub fn mb_sjis2004_to_wchar(input: &mut &[u8], out: &mut [u32], _state: &mut u32
             }
 
             // Conversion for CJK Unified Ideographs extension B (U+2XXXX)
-            let k = mbfl_bisec_srch2(w1 as i32, &JISX0213_JIS_U5_KEY, JISX0213_U5_TBL_LEN as usize);
+            let k = mbfl_bisec_srch2(
+                w1 as i32,
+                &JISX0213_JIS_U5_KEY,
+                JISX0213_U5_TBL_LEN as usize,
+            );
             if k >= 0 {
                 out[o] = JISX0213_JIS_U5_TBL[k as usize] as u32 + 0x20000;
             } else {
@@ -1608,7 +1625,11 @@ pub(super) fn ucs_to_jisx0213(w: u32, input: &[u32], ip: &mut usize, end: bool) 
 
     // Check for Japanese chars in compressed mapping area: U+1E00-U+4DBF
     if s == 0 && (UCS_C1_JISX0213_MIN..=UCS_C1_JISX0213_MAX).contains(&w) {
-        let k = mbfl_bisec_srch(w as i32, &UCS_C1_JISX0213_TBL, UCS_C1_JISX0213_TBL_LEN as usize);
+        let k = mbfl_bisec_srch(
+            w as i32,
+            &UCS_C1_JISX0213_TBL,
+            UCS_C1_JISX0213_TBL_LEN as usize,
+        );
         if k >= 0 {
             let k = k as usize;
             s = UCS_C1_JISX0213_OFST[k] as u32 + w - UCS_C1_JISX0213_TBL[2 * k] as u32;
@@ -1617,7 +1638,11 @@ pub(super) fn ucs_to_jisx0213(w: u32, input: &[u32], ip: &mut usize, end: bool) 
 
     // Check for Japanese chars in CJK Unified Ideographs ext.B (U+2XXXX)
     if s == 0 && (JISX0213_U5_TBL_MIN..=JISX0213_U5_TBL_MAX).contains(&w) {
-        let k = mbfl_bisec_srch2((w - 0x20000) as i32, &JISX0213_U5_JIS_KEY, JISX0213_U5_TBL_LEN as usize);
+        let k = mbfl_bisec_srch2(
+            (w - 0x20000) as i32,
+            &JISX0213_U5_JIS_KEY,
+            JISX0213_U5_TBL_LEN as usize,
+        );
         if k >= 0 {
             s = JISX0213_U5_JIS_TBL[k as usize] as u32;
         }
@@ -1783,7 +1808,9 @@ fn wchar_to_cp932_common(input: &[u32], buf: &mut ConvertBuf, sjiswin: bool) {
 
         if s1 == 0 || (s1 >= 0x8080 && s2 == 0) {
             // not found or X 0212
-            if let Some(v) = mbfl_binary_search_paired_sorted_table(w, &CP932EXT1_UCS_TABLE_PAIRED_SORTED) {
+            if let Some(v) =
+                mbfl_binary_search_paired_sorted_table(w, &CP932EXT1_UCS_TABLE_PAIRED_SORTED)
+            {
                 let v = v as u32;
                 s1 = ((v / 94 + 0x2D) << 8) + (v % 94 + 0x21);
             } else if let Some(v) =
@@ -1830,11 +1857,18 @@ pub(super) mod testutil {
     /// Codepoints -> encoded character.
     pub type FromUni = BTreeMap<Vec<u32>, Vec<u8>>;
 
-    const DATA_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/phpt/ext/mbstring/tests/data/");
+    const DATA_DIR: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/phpt/ext/mbstring/tests/data/"
+    );
 
     pub fn data_lines(name: &str) -> Vec<String> {
-        let bytes = std::fs::read(format!("{DATA_DIR}{name}")).unwrap_or_else(|e| panic!("{name}: {e}"));
-        String::from_utf8_lossy(&bytes).lines().map(str::to_owned).collect()
+        let bytes =
+            std::fs::read(format!("{DATA_DIR}{name}")).unwrap_or_else(|e| panic!("{name}: {e}"));
+        String::from_utf8_lossy(&bytes)
+            .lines()
+            .map(str::to_owned)
+            .collect()
     }
 
     /// Hex digits at the start of `s` (`%x` in `sscanf`).
@@ -1848,7 +1882,9 @@ pub(super) mod testutil {
 
     /// PHP's `hexdec`: hex digits, ignoring anything else.
     pub fn hexdec(s: &str) -> u32 {
-        s.chars().filter_map(|c| c.to_digit(16)).fold(0, |acc, d| (acc << 4) | d)
+        s.chars()
+            .filter_map(|c| c.to_digit(16))
+            .fold(0, |acc, d| (acc << 4) | d)
     }
 
     /// The string `readConversionTable` makes of a character code: as many
@@ -1917,13 +1953,13 @@ pub(super) mod testutil {
                 to.insert(bytes, vec![cp1, cp2]);
                 continue;
             }
-            if fullwidth {
-                if let Some(pos) = line.find("Fullwidth: U+") {
-                    let digits: String =
-                        line[pos + 13..].chars().take_while(|c| matches!(c, '0'..='9' | 'A'..='F')).collect();
-                    if !digits.is_empty() {
-                        cp1 = hexdec(&digits);
-                    }
+            if fullwidth && let Some(pos) = line.find("Fullwidth: U+") {
+                let digits: String = line[pos + 13..]
+                    .chars()
+                    .take_while(|c| matches!(c, '0'..='9' | 'A'..='F'))
+                    .collect();
+                if !digits.is_empty() {
+                    cp1 = hexdec(&digits);
                 }
             }
             to.insert(bytes.clone(), vec![cp1]);
@@ -1998,7 +2034,12 @@ pub(super) mod testutil {
                 prefixes.insert(k[..l].to_vec());
             }
         }
-        let mut cx = Ctx { valid, prefixes, invalid: BTreeSet::new(), truncated: BTreeSet::new() };
+        let mut cx = Ctx {
+            valid,
+            prefixes,
+            invalid: BTreeSet::new(),
+            truncated: BTreeSet::new(),
+        };
 
         for b in 0..=255u8 {
             if lens[b as usize] != 0 {
@@ -2053,7 +2094,11 @@ pub(super) mod testutil {
         while !inp.is_empty() {
             let before = inp.len();
             let n = (enc.to_wchar)(&mut inp, &mut buf, &mut state);
-            assert!(n > 0 || inp.len() < before, "{}: no progress on {bytes:02X?}", enc.name);
+            assert!(
+                n > 0 || inp.len() < before,
+                "{}: no progress on {bytes:02X?}",
+                enc.name
+            );
             out.extend_from_slice(&buf[..n]);
         }
         out
@@ -2065,7 +2110,13 @@ pub(super) mod testutil {
 
     /// Encodes `cps` in chunks of `chunk` codepoints (`end` set on the last
     /// one), like `mb_fast_convert` does with the output of a decoder.
-    pub fn encode_with(enc: &'static Encoding, cps: &[u32], chunk: usize, replacement: u32, mode: u32) -> ConvertBuf {
+    pub fn encode_with(
+        enc: &'static Encoding,
+        cps: &[u32],
+        chunk: usize,
+        replacement: u32,
+        mode: u32,
+    ) -> ConvertBuf {
         let mut buf = ConvertBuf::new(cps.len(), replacement, mode);
         let n = cps.len().div_ceil(chunk);
         for (i, c) in cps.chunks(chunk).enumerate() {
@@ -2086,7 +2137,16 @@ pub(super) mod testutil {
     impl Failures {
         pub fn check(&mut self, ok: bool, msg: impl FnOnce() -> String) {
             if !ok {
-                self.0.push(msg());
+                let mut msg = msg();
+                if msg.len() > 400 {
+                    let cut = (0..=400)
+                        .rev()
+                        .find(|&i| msg.is_char_boundary(i))
+                        .unwrap_or(0);
+                    msg.truncate(cut);
+                    msg.push_str("...");
+                }
+                self.0.push(msg);
             }
         }
 
@@ -2095,16 +2155,32 @@ pub(super) mod testutil {
                 self.0.is_empty(),
                 "{what}: {} failures; first ones:\n{}",
                 self.0.len(),
-                self.0.iter().take(25).cloned().collect::<Vec<_>>().join("\n")
+                self.0
+                    .iter()
+                    .take(25)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n")
             );
         }
     }
 
     /// `testValidString`/`convertValidString`: `bytes` decodes to `cps`
     /// and, with `both_ways`, `cps` encodes back to `bytes` without errors.
-    pub fn check_valid(f: &mut Failures, enc: &'static Encoding, bytes: &[u8], cps: &[u32], both_ways: bool) {
+    pub fn check_valid(
+        f: &mut Failures,
+        enc: &'static Encoding,
+        bytes: &[u8],
+        cps: &[u32],
+        both_ways: bool,
+    ) {
         let got = decode(enc, bytes);
-        f.check(got == cps, || format!("{} -> Unicode {bytes:02X?}: expected {cps:X?}, got {got:X?}", enc.name));
+        f.check(got == cps, || {
+            format!(
+                "{} -> Unicode {bytes:02X?}: expected {cps:X?}, got {got:X?}",
+                enc.name
+            )
+        });
         if both_ways {
             check_valid_encode(f, enc, cps, bytes);
         }
@@ -2113,12 +2189,20 @@ pub(super) mod testutil {
     pub fn check_valid_encode(f: &mut Failures, enc: &'static Encoding, cps: &[u32], bytes: &[u8]) {
         let buf = encode(enc, cps);
         f.check(buf.out == bytes && buf.errors == 0, || {
-            format!("Unicode -> {} {cps:X?}: expected {bytes:02X?}, got {:02X?} ({} errors)", enc.name, buf.out, buf.errors)
+            format!(
+                "Unicode -> {} {cps:X?}: expected {bytes:02X?}, got {:02X?} ({} errors)",
+                enc.name, buf.out, buf.errors
+            )
         });
     }
 
     /// `convertInvalidString` from Unicode: `cps` encodes to `bytes`, with errors.
-    pub fn check_invalid_encode(f: &mut Failures, enc: &'static Encoding, cps: &[u32], bytes: &[u8]) {
+    pub fn check_invalid_encode(
+        f: &mut Failures,
+        enc: &'static Encoding,
+        cps: &[u32],
+        bytes: &[u8],
+    ) {
         let buf = encode(enc, cps);
         f.check(buf.out == bytes && buf.errors > 0, || {
             format!(
@@ -2130,7 +2214,13 @@ pub(super) mod testutil {
 
     /// `testAllValidChars` from `enc`: every character alone, and all of
     /// them concatenated in a shuffled order.
-    pub fn test_all_valid_chars(f: &mut Failures, enc: &'static Encoding, chars: &ToUni, both_ways: bool, rng: &mut Rng) {
+    pub fn test_all_valid_chars(
+        f: &mut Failures,
+        enc: &'static Encoding,
+        chars: &ToUni,
+        both_ways: bool,
+        rng: &mut Rng,
+    ) {
         let mut keys: Vec<&Vec<u8>> = chars.keys().collect();
         rng.shuffle(&mut keys);
         let (mut bytes, mut cps) = (Vec::new(), Vec::new());
@@ -2145,7 +2235,12 @@ pub(super) mod testutil {
     }
 
     /// `testAllValidChars` from Unicode to `enc`.
-    pub fn test_all_valid_codepoints(f: &mut Failures, enc: &'static Encoding, chars: &FromUni, rng: &mut Rng) {
+    pub fn test_all_valid_codepoints(
+        f: &mut Failures,
+        enc: &'static Encoding,
+        chars: &FromUni,
+        rng: &mut Rng,
+    ) {
         let mut keys: Vec<&Vec<u32>> = chars.keys().collect();
         rng.shuffle(&mut keys);
         let (mut bytes, mut cps) = (Vec::new(), Vec::new());
@@ -2178,16 +2273,25 @@ pub(super) mod testutil {
             expected.extend_from_slice(gc);
             let got = decode(enc, &bytes);
             f.check(got == expected, || {
-                format!("{} -> Unicode {bytes:02X?}: expected {expected:X?}, got {got:X?}", enc.name)
+                format!(
+                    "{} -> Unicode {bytes:02X?}: expected {expected:X?}, got {got:X?}",
+                    enc.name
+                )
             });
         }
     }
 
     /// `testTruncatedChars`: each truncated character decodes to one error marker.
-    pub fn test_truncated_chars(f: &mut Failures, enc: &'static Encoding, truncated: &BTreeSet<Vec<u8>>) {
+    pub fn test_truncated_chars(
+        f: &mut Failures,
+        enc: &'static Encoding,
+        truncated: &BTreeSet<Vec<u8>>,
+    ) {
         for t in truncated {
             let got = decode(enc, t);
-            f.check(got == [BAD_INPUT], || format!("{} -> Unicode {t:02X?}: got {got:X?}", enc.name));
+            f.check(got == [BAD_INPUT], || {
+                format!("{} -> Unicode {t:02X?}: got {got:X?}", enc.name)
+            });
         }
     }
 
@@ -2215,7 +2319,9 @@ pub(super) mod testutil {
     /// Codepoints 0-0xFFFF which are not a key of `from` (`findInvalidChars`
     /// on a UTF-16BE table).
     pub fn invalid_bmp_codepoints(from: &FromUni) -> Vec<u32> {
-        (0..=0xFFFF).filter(|&cp| !from.contains_key(&vec![cp])).collect()
+        (0..=0xFFFF)
+            .filter(|&cp| !from.contains_key(&vec![cp]))
+            .collect()
     }
 }
 
@@ -2261,7 +2367,8 @@ mod tests {
 
         test_all_valid_chars(&mut f, enc, &valid, true, &mut rng);
 
-        let (invalid, truncated) = find_invalid_chars(&valid, &[(0x81..=0x9F, 2), (0xE0..=0xEF, 2)]);
+        let (invalid, truncated) =
+            find_invalid_chars(&valid, &[(0x81..=0x9F, 2), (0xE0..=0xEF, 2)]);
         assert!(invalid.len() > 5000 && truncated.len() == 0x1F + 0x10);
         test_all_invalid_chars(&mut f, enc, &invalid, &valid, &mut rng);
         test_truncated_chars(&mut f, enc, &truncated);
@@ -2286,7 +2393,10 @@ mod tests {
         assert_eq!((n, &out[..], inp), (2, &[0x61, 0x3042][..], &b"b"[..]));
         // A bad lead byte 0x80, 0xA0 or 0xF0-0xFF does not swallow the next byte
         assert_eq!(decode(enc, b"\xF0A\x80"), [BAD_INPUT, 0x41, BAD_INPUT]);
-        assert_eq!(decode_with(enc, b"\x82\xA0\x82\xA2\x82\xA4", 1), [0x3042, 0x3044, 0x3046]);
+        assert_eq!(
+            decode_with(enc, b"\x82\xA0\x82\xA2\x82\xA4", 1),
+            [0x3042, 0x3044, 0x3046]
+        );
         assert!(decode(enc, b"").is_empty());
     }
 
@@ -2314,7 +2424,11 @@ mod tests {
             if cps.is_empty() {
                 continue;
             }
-            let bytes = if code < 256 { vec![code as u8] } else { be16(code) };
+            let bytes = if code < 256 {
+                vec![code as u8]
+            } else {
+                be16(code)
+            };
             valid.insert(bytes.clone(), cps.clone());
             from.insert(cps, bytes);
         }
@@ -2343,7 +2457,8 @@ mod tests {
 
         test_all_valid_chars(&mut f, enc, &valid, true, &mut rng);
 
-        let (invalid, truncated) = find_invalid_chars(&valid, &[(0x81..=0x9F, 2), (0xE0..=0xED, 2)]);
+        let (invalid, truncated) =
+            find_invalid_chars(&valid, &[(0x81..=0x9F, 2), (0xE0..=0xED, 2)]);
         test_all_invalid_chars(&mut f, enc, &invalid, &valid, &mut rng);
         test_truncated_chars(&mut f, enc, &truncated);
 
@@ -2352,8 +2467,9 @@ mod tests {
         // A transcoding hint (U+F860-F862) followed by a codepoint which can
         // continue it is not a single error, so give the hints a following
         // character which cannot.
-        let (hints, others): (Vec<u32>, Vec<u32>) =
-            invalid_bmp_codepoints(&from).into_iter().partition(|cp| (0xF860..=0xF862).contains(cp));
+        let (hints, others): (Vec<u32>, Vec<u32>) = invalid_bmp_codepoints(&from)
+            .into_iter()
+            .partition(|cp| (0xF860..=0xF862).contains(cp));
         test_all_invalid_codepoints(&mut f, enc, others, &from, &mut rng);
         let mut kana = FromUni::new();
         set(&mut kana, 0x3042, b"\x82\xA0");
@@ -2394,7 +2510,12 @@ mod tests {
         );
 
         // Multi-codepoint characters split across calls of the encoder
-        let chars: [&[u32]; 4] = [&[0xF862, 0x58, 0x49, 0x49, 0x49], &[0x2026, 0xF87F], &[0x2010, 0xF87E], &[0xF861, 0x46, 0x41, 0x58]];
+        let chars: [&[u32]; 4] = [
+            &[0xF862, 0x58, 0x49, 0x49, 0x49],
+            &[0x2026, 0xF87F],
+            &[0x2010, 0xF87E],
+            &[0xF861, 0x46, 0x41, 0x58],
+        ];
         let cps = chars.concat();
         let expected: Vec<u8> = chars.iter().flat_map(|c| from[*c].clone()).collect();
         for chunk in 1..=cps.len() {
@@ -2405,9 +2526,21 @@ mod tests {
         // As in C, a partial match of the first transcoding hint sequence
         // (U+F860 U+0030 ...) is saved as a state indistinguishable from a
         // lone U+F860, so it does not survive a buffer boundary.
-        let buf = encode_with(enc, &[0xF860, 0x30, 0x2E], 3, b'%' as u32, ILLEGAL_MODE_CHAR);
+        let buf = encode_with(
+            enc,
+            &[0xF860, 0x30, 0x2E],
+            3,
+            b'%' as u32,
+            ILLEGAL_MODE_CHAR,
+        );
         assert_eq!(buf.out, from[&vec![0xF860, 0x30, 0x2E]]);
-        let buf = encode_with(enc, &[0xF860, 0x30, 0x2E], 2, b'%' as u32, ILLEGAL_MODE_CHAR);
+        let buf = encode_with(
+            enc,
+            &[0xF860, 0x30, 0x2E],
+            2,
+            b'%' as u32,
+            ILLEGAL_MODE_CHAR,
+        );
         assert_eq!((&buf.out[..], buf.errors), (&b"%."[..], 1));
 
         // A trailing s_form codepoint uses its fallback mapping
@@ -2421,7 +2554,11 @@ mod tests {
         let (hi, lo) = (ku >> 1, ku % 2);
         let lead = if hi < 31 { hi + 0x81 } else { hi - 31 + 0xE0 };
         let trail = if lo == 0 {
-            if ten < 63 { ten + 0x40 } else { ten - 63 + 0x80 }
+            if ten < 63 {
+                ten + 0x40
+            } else {
+                ten - 63 + 0x80
+            }
         } else {
             ten + 0x9F
         };
@@ -2463,12 +2600,15 @@ mod tests {
             }
         }
 
-        let mut invalid_codepoints: BTreeSet<u32> = invalid_bmp_codepoints(&from).into_iter().collect();
+        let mut invalid_codepoints: BTreeSet<u32> =
+            invalid_bmp_codepoints(&from).into_iter().collect();
 
         // 0xFA00-0xFC4B (and a few others) duplicate other codes, which are
         // preferred when converting from Unicode
         let mut non_invertible = ToUni::new();
-        let collisions = [0x8790, 0x8791, 0x8792, 0x8795, 0x8796, 0x8797, 0x879A, 0x879B, 0x879C, 0xEEF9];
+        let collisions = [
+            0x8790, 0x8791, 0x8792, 0x8795, 0x8796, 0x8797, 0x879A, 0x879B, 0x879C, 0xEEF9,
+        ];
         for i in (0xFA00..=0xFC4B).chain(collisions) {
             let bytes = be16(i);
             if let Some(cps) = sjis.get(&bytes) {
@@ -2609,7 +2749,14 @@ mod tests {
 
         // SoftBank's alternative representation of emoji: ESC $ and a letter
         // for the ku code, then single bytes for the ten codes
-        let escapes = [(b'G', 0x91, 0x7A), (b'E', 0x8D, 0x7A), (b'F', 0x8E, 0x7A), (b'O', 0x92, 0x6D), (b'P', 0x95, 0x6C), (b'Q', 0x96, 0x5E)];
+        let escapes = [
+            (b'G', 0x91, 0x7A),
+            (b'E', 0x8D, 0x7A),
+            (b'F', 0x8E, 0x7A),
+            (b'O', 0x92, 0x6D),
+            (b'P', 0x95, 0x6C),
+            (b'Q', 0x96, 0x5E),
+        ];
         for (ch, ku, max_ten) in escapes {
             for ten in 0x21..=max_ten {
                 let sjis = shift_jis_encode(ku, ten);
@@ -2645,7 +2792,8 @@ mod tests {
         t: &MobileTables,
         rng: &mut Rng,
     ) {
-        let (mut invalid, mut truncated) = find_invalid_chars(&valid, &[(0xE0..=0xFC, 2), (0x81..=0x9F, 2)]);
+        let (mut invalid, mut truncated) =
+            find_invalid_chars(&valid, &[(0xE0..=0xFC, 2), (0x81..=0x9F, 2)]);
         for ch in *b"GEFOPQ" {
             invalid.remove(&vec![0x1B, b'$', ch, 0x0F]);
             truncated.remove(&vec![0x1B, b'$', ch]);
@@ -2687,17 +2835,42 @@ mod tests {
     #[test]
     fn sjis_mobile_exhaustive() {
         let t = mobile_tables();
-        assert!(t.docomo.len() > 9500 && t.non_invertible.len() > 300 && t.invalid_codepoints.len() > 50000);
+        assert!(
+            t.docomo.len() > 9500
+                && t.non_invertible.len() > 300
+                && t.invalid_codepoints.len() > 50000
+        );
         assert!(t.softbank.keys().filter(|k| k[0] == 0x1B).count() > 400);
         let mut rng = Rng::new(818);
         let mut f = Failures::default();
 
         let docomo = &MBFL_ENCODING_SJIS_DOCOMO;
-        test_sjis_variant(&mut f, docomo, t.docomo.clone(), t.non_invertible_docomo.clone(), &t, &mut rng);
+        test_sjis_variant(
+            &mut f,
+            docomo,
+            t.docomo.clone(),
+            t.non_invertible_docomo.clone(),
+            &t,
+            &mut rng,
+        );
         let kddi = &MBFL_ENCODING_SJIS_KDDI;
-        test_sjis_variant(&mut f, kddi, t.kddi.clone(), t.non_invertible.clone(), &t, &mut rng);
+        test_sjis_variant(
+            &mut f,
+            kddi,
+            t.kddi.clone(),
+            t.non_invertible.clone(),
+            &t,
+            &mut rng,
+        );
         let sb = &MBFL_ENCODING_SJIS_SB;
-        test_sjis_variant(&mut f, sb, t.softbank.clone(), t.non_invertible_softbank.clone(), &t, &mut rng);
+        test_sjis_variant(
+            &mut f,
+            sb,
+            t.softbank.clone(),
+            t.non_invertible_softbank.clone(),
+            &t,
+            &mut rng,
+        );
         f.assert_none("SJIS-Mobile");
     }
 
@@ -2725,7 +2898,10 @@ mod tests {
         let mut bytes = b"\x1B$G".to_vec();
         bytes.extend([ten; 7]);
         bytes.extend(b"\x0Fa");
-        assert_eq!(decode_with(sb, &bytes, 5), [emoji.repeat(7), vec![0x61]].concat());
+        assert_eq!(
+            decode_with(sb, &bytes, 5),
+            [emoji.repeat(7), vec![0x61]].concat()
+        );
 
         let mobile: [(&'static Encoding, &[u8], &[u8]); 3] = [
             (&MBFL_ENCODING_SJIS_DOCOMO, b"\xF9\xD6", b"\xF9\x90"),
@@ -2738,7 +2914,13 @@ mod tests {
 
             // Digits at the end of the input are not dropped
             for d in b'0'..=b'9' {
-                check_valid(&mut f, enc, &[b'a', b'b', b'c', d], &[0x61, 0x62, 0x63, d as u32], true);
+                check_valid(
+                    &mut f,
+                    enc,
+                    &[b'a', b'b', b'c', d],
+                    &[0x61, 0x62, 0x63, d as u32],
+                    true,
+                );
             }
 
             for i in 0..=256 {
@@ -2775,7 +2957,8 @@ mod tests {
 
         test_all_valid_chars(&mut f, enc, &valid, true, &mut rng);
 
-        let (invalid, truncated) = find_invalid_chars(&valid, &[(0x81..=0x9F, 2), (0xE0..=0xFC, 2)]);
+        let (invalid, truncated) =
+            find_invalid_chars(&valid, &[(0x81..=0x9F, 2), (0xE0..=0xFC, 2)]);
         test_all_invalid_chars(&mut f, enc, &invalid, &valid, &mut rng);
         test_truncated_chars(&mut f, enc, &truncated);
 
@@ -2797,7 +2980,13 @@ mod tests {
         let enc = &MBFL_ENCODING_SJIS2004;
         // か + U+309A is one character; split between two calls of the encoder
         for chunk in 1..=3 {
-            let buf = encode_with(enc, &[0x41, 0x304B, 0x309A], chunk, b'%' as u32, ILLEGAL_MODE_CHAR);
+            let buf = encode_with(
+                enc,
+                &[0x41, 0x304B, 0x309A],
+                chunk,
+                b'%' as u32,
+                ILLEGAL_MODE_CHAR,
+            );
             assert_eq!(buf.out, b"A\x82\xF5", "chunk size {chunk}");
         }
         // Combining characters need two output slots
@@ -2805,7 +2994,10 @@ mod tests {
         let mut out = [0u32; 2];
         let n = mb_sjis2004_to_wchar(&mut inp, &mut out, &mut 0);
         assert_eq!((n, inp), (1, &b"\x82\xF5"[..]));
-        assert_eq!(decode_with(enc, b"\x82\xF5\x82\xF5", 3), [0x304B, 0x309A, 0x304B, 0x309A]);
+        assert_eq!(
+            decode_with(enc, b"\x82\xF5\x82\xF5", 3),
+            [0x304B, 0x309A, 0x304B, 0x309A]
+        );
         assert_eq!(decode(enc, &[0x82]), [BAD_INPUT]);
     }
 
@@ -2847,7 +3039,8 @@ mod tests {
         // Codes which map to the same codepoints as other codes
         let mut non_invertible = ToUni::new();
         let others = [
-            0x8790, 0x8791, 0x8792, 0x8795, 0x8796, 0x8797, 0x879A, 0x879B, 0x879C, 0xFA54, 0xFA58, 0xFA59, 0xFA5A, 0xFA5B,
+            0x8790, 0x8791, 0x8792, 0x8795, 0x8796, 0x8797, 0x879A, 0x879B, 0x879C, 0xFA54, 0xFA58,
+            0xFA59, 0xFA5A, 0xFA5B,
         ];
         for i in (0xED00..=0xEEFF).chain(0xFA4A..=0xFA53).chain(others) {
             let bytes = be16(i);
@@ -2856,7 +3049,13 @@ mod tests {
                 non_invertible.insert(bytes, cps);
             }
         }
-        Cp932Tables { valid, from, non_invertible, invalid, invalid_codepoints }
+        Cp932Tables {
+            valid,
+            from,
+            non_invertible,
+            invalid,
+            invalid_codepoints,
+        }
     }
 
     // cp932_encoding.phpt
@@ -2866,7 +3065,10 @@ mod tests {
         let mut f = Failures::default();
         let mut t = cp932_tables();
         let sizes = (t.valid.len(), t.non_invertible.len(), t.invalid.len());
-        assert!(sizes.0 > 9000 && sizes.1 == 398 && sizes.2 > 5000, "{sizes:?}");
+        assert!(
+            sizes.0 > 9000 && sizes.1 == 398 && sizes.2 > 5000,
+            "{sizes:?}"
+        );
 
         for enc in [&MBFL_ENCODING_CP932, &MBFL_ENCODING_SJISWIN] {
             if enc.is(NoEncoding::Sjiswin) {
@@ -2879,7 +3081,13 @@ mod tests {
                 check_valid(&mut f, enc, bytes, cps, false);
             }
             test_all_invalid_chars(&mut f, enc, &t.invalid, &t.valid, &mut rng);
-            test_all_invalid_codepoints(&mut f, enc, t.invalid_codepoints.iter().copied(), &t.from, &mut rng);
+            test_all_invalid_codepoints(
+                &mut f,
+                enc,
+                t.invalid_codepoints.iter().copied(),
+                &t.from,
+                &mut rng,
+            );
 
             for bad in [&b"\x80"[..], b"\xEA", b"\x81\x20", b"\xEA\xA9"] {
                 check_valid(&mut f, enc, bad, &[BAD_INPUT], false);
@@ -2895,7 +3103,13 @@ mod tests {
         check_valid_encode(&mut f, cp932, &[0xA5, 0x203E], b"\x5C\x7E");
         check_valid_encode(&mut f, sjiswin, &[0xA5, 0x203E], b"\x81\x8F\x81\x50");
         // U+0000 is emitted as is; the user area round-trips
-        check_valid(&mut f, cp932, b"\x00\xF0\x40\xF9\xFC", &[0, 0xE000, 0xE757], true);
+        check_valid(
+            &mut f,
+            cp932,
+            b"\x00\xF0\x40\xF9\xFC",
+            &[0, 0xE000, 0xE757],
+            true,
+        );
         // SJIS-win reports errors through the CP932 encoder: same marker
         check_invalid_encode(&mut f, sjiswin, &[0x10000], b"%");
         f.assert_none("CP932 specifics");

@@ -84,7 +84,11 @@ fn add_eucjp(buf: &mut ConvertBuf, s: u32) {
     } else if s < 0x8080 {
         buf.add2((((s >> 8) & 0xFF) | 0x80) as u8, ((s & 0xFF) | 0x80) as u8);
     } else {
-        buf.add3(0x8F, (((s >> 8) & 0xFF) | 0x80) as u8, ((s & 0xFF) | 0x80) as u8);
+        buf.add3(
+            0x8F,
+            (((s >> 8) & 0xFF) | 0x80) as u8,
+            ((s & 0xFF) | 0x80) as u8,
+        );
     }
 }
 
@@ -123,7 +127,11 @@ pub fn mb_eucjp_to_wchar(input: &mut &[u8], out: &mut [u32], _state: &mut u32) -
             // Kana
             let c2 = s[p];
             p += 1;
-            out[o] = if (0xA1..=0xDF).contains(&c2) { 0xFEC0 + c2 as u32 } else { BAD_INPUT };
+            out[o] = if (0xA1..=0xDF).contains(&c2) {
+                0xFEC0 + c2 as u32
+            } else {
+                BAD_INPUT
+            };
         } else if c == 0x8F {
             // JIS X 0212
             if e - p >= 2 {
@@ -232,7 +240,11 @@ pub fn mb_eucjpwin_to_wchar(input: &mut &[u8], out: &mut [u32], _state: &mut u32
         } else if c == 0x8E && p < e {
             let c2 = s[p];
             p += 1;
-            out[o] = if (0xA1..=0xDF).contains(&c2) { 0xFEC0 + c2 as u32 } else { BAD_INPUT };
+            out[o] = if (0xA1..=0xDF).contains(&c2) {
+                0xFEC0 + c2 as u32
+            } else {
+                BAD_INPUT
+            };
         } else if c == 0x8F && p < e {
             let c2 = s[p];
             p += 1;
@@ -386,7 +398,11 @@ pub fn mb_cp51932_to_wchar(input: &mut &[u8], out: &mut [u32], _state: &mut u32)
         } else if c == 0x8E && p < e {
             let c2 = s[p];
             p += 1;
-            out[o] = if (0xA1..=0xDF).contains(&c2) { 0xFEC0 + c2 as u32 } else { BAD_INPUT };
+            out[o] = if (0xA1..=0xDF).contains(&c2) {
+                0xFEC0 + c2 as u32
+            } else {
+                BAD_INPUT
+            };
         } else {
             out[o] = BAD_INPUT;
         }
@@ -509,7 +525,11 @@ pub fn mb_eucjp2004_to_wchar(input: &mut &[u8], out: &mut [u32], _state: &mut u3
 
             // Conversion for CJK Unified Ideographs ext.B (U+2XXXX)
             if w == 0 {
-                let k = mbfl_bisec_srch2(w1 as i32, &JISX0213_JIS_U5_KEY, JISX0213_U5_TBL_LEN as usize);
+                let k = mbfl_bisec_srch2(
+                    w1 as i32,
+                    &JISX0213_JIS_U5_KEY,
+                    JISX0213_U5_TBL_LEN as usize,
+                );
                 if k >= 0 {
                     w = JISX0213_JIS_U5_TBL[k as usize] as u32 + 0x20000;
                 }
@@ -521,7 +541,11 @@ pub fn mb_eucjp2004_to_wchar(input: &mut &[u8], out: &mut [u32], _state: &mut u3
             // Kana
             let c2 = s[p];
             p += 1;
-            out[o] = if (0xA1..=0xDF).contains(&c2) { 0xFEC0 + c2 as u32 } else { BAD_INPUT };
+            out[o] = if (0xA1..=0xDF).contains(&c2) {
+                0xFEC0 + c2 as u32
+            } else {
+                BAD_INPUT
+            };
             o += 1;
         } else if c == 0x8F && p < e {
             let c2 = s[p];
@@ -545,7 +569,10 @@ pub fn mb_eucjp2004_to_wchar(input: &mut &[u8], out: &mut [u32], _state: &mut u3
                 let s1 = c2 as u32 - 0xA1;
                 let s2 = c3 as u32 - 0xA1;
 
-                if ((s1 <= 4 && s1 != 1) || s1 == 7 || (11..=14).contains(&s1) || (77..94).contains(&s1))
+                if ((s1 <= 4 && s1 != 1)
+                    || s1 == 7
+                    || (11..=14).contains(&s1)
+                    || (77..94).contains(&s1))
                     && s2 < 94
                 {
                     // Plane 2 rows are stored after plane 1 in the order of
@@ -567,8 +594,11 @@ pub fn mb_eucjp2004_to_wchar(input: &mut &[u8], out: &mut [u32], _state: &mut u3
 
                     // Check for Japanese chars in CJK Unified Ideographs ext B (U+2XXXX)
                     if w == 0 {
-                        let k =
-                            mbfl_bisec_srch2(s as i32, &JISX0213_JIS_U5_KEY, JISX0213_U5_TBL_LEN as usize);
+                        let k = mbfl_bisec_srch2(
+                            s as i32,
+                            &JISX0213_JIS_U5_KEY,
+                            JISX0213_U5_TBL_LEN as usize,
+                        );
                         if k >= 0 {
                             w = JISX0213_JIS_U5_TBL[k as usize] as u32 + 0x20000;
                         }
@@ -632,5 +662,363 @@ pub fn mb_wchar_to_eucjp2004(input: &[u32], buf: &mut ConvertBuf, end: bool) {
             let s = JISX0213_P2_OFST[k as usize] as u32 + 0x21;
             buf.add3(0x8F, (s | 0x80) as u8, (s2 | 0x80) as u8);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::sjis::MBFL_ENCODING_SJIS;
+    use super::super::sjis::testutil::*;
+    use super::*;
+
+    fn set(map: &mut FromUni, cp: u32, bytes: &[u8]) {
+        map.insert(vec![cp], bytes.to_vec());
+    }
+
+    // eucjp_encoding.phpt
+    #[test]
+    fn eucjp_exhaustive() {
+        let enc = &MBFL_ENCODING_EUC_JP;
+        let mut rng = Rng::new(555);
+        let mut f = Failures::default();
+
+        let (mut valid, mut from) = read_conversion_table("EUC-JP.txt");
+        // Kuten 0x2140 (EUC-JP 0xA1C0) is a fullwidth backslash
+        valid.insert(b"\xA1\xC0".to_vec(), vec![0xFF3C]);
+        set(&mut from, 0xFF3C, b"\xA1\xC0");
+        set(&mut from, 0xFFE2, b"\xA2\xCC");
+        set(&mut from, 0xFFE1, b"\xA1\xF2");
+        set(&mut from, 0xFFE0, b"\xA1\xF1");
+        set(&mut from, 0xFF5E, b"\xA1\xC1");
+        set(&mut from, 0xFF0D, b"\xA1\xDD");
+        set(&mut from, 0x2225, b"\xA1\xC2");
+        // U+007E and U+005C use the simpler of their two representations
+        set(&mut from, 0x7E, b"\x7E");
+        set(&mut from, 0x5C, b"\x5C");
+        set(&mut from, 0x203E, b"\xA1\xB1");
+
+        let (invalid, truncated) = find_invalid_chars(
+            &valid,
+            &[(0xA1..=0xFE, 2), (0x8E..=0x8E, 2), (0x8F..=0x8F, 3)],
+        );
+        assert!(
+            valid.len() > 13000 && invalid.len() > 60000,
+            "{} {}",
+            valid.len(),
+            invalid.len()
+        );
+
+        // JIS X 0212 0x2237 (EUC-JP 0x8FA2B7) is a tilde, like ASCII 0x7E
+        valid.remove(b"\x8F\xA2\xB7".as_slice());
+
+        test_all_valid_chars(&mut f, enc, &valid, true, &mut rng);
+        test_all_invalid_chars(&mut f, enc, &invalid, &valid, &mut rng);
+        test_truncated_chars(&mut f, enc, &truncated);
+        check_valid(&mut f, enc, b"\x8F\xA2\xB7", &[0x7E], false);
+
+        test_all_valid_codepoints(&mut f, enc, &from, &mut rng);
+        test_all_invalid_codepoints(&mut f, enc, invalid_bmp_codepoints(&from), &from, &mut rng);
+
+        for bad in [&b"\x80"[..], b"\xFE\xFF"] {
+            check_valid(&mut f, enc, bad, &[BAD_INPUT], false);
+        }
+        f.assert_none("EUC-JP");
+    }
+
+    #[test]
+    fn eucjp_truncation_and_limits() {
+        let enc = &MBFL_ENCODING_EUC_JP;
+        // A truncated JIS X 0212 character swallows the rest of the input
+        assert_eq!(decode(enc, b"\x8F\xA2"), [BAD_INPUT]);
+        assert_eq!(decode(enc, b"a\xA4"), [0x61, BAD_INPUT]);
+        assert_eq!(decode(enc, b"\x8E"), [BAD_INPUT]);
+        let mut inp: &[u8] = b"\xA4\xA2\xA4\xA4";
+        let mut out = [0u32; 1];
+        assert_eq!(mb_eucjp_to_wchar(&mut inp, &mut out, &mut 0), 1);
+        assert_eq!((out[0], inp), (0x3042, &b"\xA4\xA4"[..]));
+        // U+00AF uses the JIS X 0212 overline; X 0212 characters take SS3
+        let buf = encode(enc, &[0xAF, 0, 0xFF61]);
+        assert_eq!(buf.out, b"\x8F\xA2\xB4\x00\x8E\xA1");
+    }
+
+    // eucjp_ms_encoding.phpt
+    #[test]
+    fn eucjpwin_exhaustive() {
+        let enc = &MBFL_ENCODING_EUCJP_WIN;
+        let mut rng = Rng::new(555);
+        let mut f = Failures::default();
+
+        let (to, mut from) = read_conversion_table("EUC-JP-MS.txt");
+        let (irreversible, _) = read_conversion_table("EUC-JP-MS.IRREVERSIBLE.txt");
+        for (bytes, cps) in &irreversible {
+            from.entry(cps.clone()).or_insert_with(|| bytes.clone());
+        }
+
+        // Several codes map to the same codepoint; use the intended ones
+        for (cp, bytes) in [
+            (0x2121, b"\xAD\xE4"),
+            (0x2161, b"\xAD\xB6"),
+            (0x2162, b"\xAD\xB7"),
+            (0x2163, b"\xAD\xB8"),
+            (0x2165, b"\xAD\xBA"),
+            (0x2168, b"\xAD\xBD"),
+            (0x2169, b"\xAD\xBE"),
+            (0x221A, b"\xA2\xE5"),
+            (0x2220, b"\xA2\xDC"),
+            (0x2229, b"\xA2\xC1"),
+            (0x222A, b"\xA2\xC0"),
+            (0x222B, b"\xA2\xE9"),
+            (0x2235, b"\xA2\xE8"),
+            (0x2252, b"\xA2\xE2"),
+            (0x2261, b"\xA2\xE1"),
+            (0x22A5, b"\xA2\xDD"),
+            (0x3231, b"\xAD\xEA"),
+            (0xFF5E, b"\xA1\xC1"),
+        ] {
+            set(&mut from, cp, bytes);
+        }
+
+        let (invalid, truncated) = find_invalid_chars(&to, &[(0xA1..=0xFE, 2), (0x8F..=0x8F, 3)]);
+        assert!(
+            to.len() > 15000 && invalid.len() > 60000,
+            "{} {}",
+            to.len(),
+            invalid.len()
+        );
+        test_all_valid_chars(&mut f, enc, &to, false, &mut rng);
+        test_all_invalid_chars(&mut f, enc, &invalid, &to, &mut rng);
+        test_truncated_chars(&mut f, enc, &truncated);
+
+        test_all_invalid_codepoints(&mut f, enc, invalid_bmp_codepoints(&from), &from, &mut rng);
+        // convertAllInvalidChars uses every character of `from` as a good one
+        test_all_valid_codepoints(&mut f, enc, &from, &mut rng);
+
+        for bad in [&b"\x80"[..], b"\xFE\xFF"] {
+            check_valid(&mut f, enc, bad, &[BAD_INPUT], false);
+        }
+        f.assert_none("eucJP-win");
+    }
+
+    #[test]
+    fn eucjpwin_specifics() {
+        let mut f = Failures::default();
+        let enc = &MBFL_ENCODING_EUCJP_WIN;
+        // User-defined area: rows 85-94 of JIS X 0208 and of JIS X 0212
+        check_valid(&mut f, enc, b"\xF5\xA1\xFE\xFE", &[0xE000, 0xE3AB], true);
+        check_valid(
+            &mut f,
+            enc,
+            b"\x8F\xF5\xA1\x8F\xFE\xFE",
+            &[0xE3AC, 0xE757],
+            true,
+        );
+        // IBM extensions in JIS X 0212 rows 83-84
+        check_valid(&mut f, enc, b"\x8F\xF3\xF3", &[0x2170], true);
+        // A JIS X 0212 lead byte with only one more byte
+        check_valid(&mut f, enc, b"\x8F\xA2", &[BAD_INPUT], false);
+        check_valid(&mut f, enc, b"\x8F", &[BAD_INPUT], false);
+        check_valid_encode(
+            &mut f,
+            enc,
+            &[0, 0xAF, 0x203E, 0xA5, 0x2014],
+            b"\x00\x8F\xA2\xB4\x7E\x5C\xA1\xBD",
+        );
+        f.assert_none("eucJP-win specifics");
+    }
+
+    fn read_cp51932() -> (ToUni, FromUni) {
+        let mut valid = ToUni::new();
+        let mut from = FromUni::new();
+        for line in data_lines("CP51932.txt") {
+            if line.starts_with('#') {
+                continue;
+            }
+            let Some((cp, rest)) = line.strip_prefix("<U").and_then(hex) else {
+                continue;
+            };
+            let Some(rest) = rest.strip_prefix('>') else {
+                continue;
+            };
+            let Some((b1, rest)) = rest.trim_start().strip_prefix("\\x").and_then(hex) else {
+                continue;
+            };
+            let b2 = rest.strip_prefix("\\x").and_then(hex).map_or(0, |(b, _)| b);
+            // Latin letters with accents are mapped to the letters without;
+            // none of them is mapped from any CP932 character
+            if (0xC0..=0xD6).contains(&cp)
+                || (0xD8..=0xF6).contains(&cp)
+                || (0xF8..=0xFF).contains(&cp)
+            {
+                continue;
+            }
+            let bytes = if b2 != 0 {
+                vec![b1 as u8, b2 as u8]
+            } else {
+                vec![b1 as u8]
+            };
+            valid.insert(bytes.clone(), vec![cp]);
+            from.insert(vec![cp], bytes);
+        }
+        (valid, from)
+    }
+
+    // cp51932_encoding.phpt
+    #[test]
+    fn cp51932_exhaustive() {
+        let enc = &MBFL_ENCODING_CP51932;
+        let mut rng = Rng::new(2020);
+        let mut f = Failures::default();
+
+        let (mut valid, mut from) = read_cp51932();
+        set(&mut from, 0x301C, b"\xA1\xC1");
+        set(&mut from, 0x2212, b"\xA1\xDD");
+        set(&mut from, 0x2016, b"\xA1\xC2");
+        // Duplicate mappings: the primary ones
+        for (cp, bytes) in [
+            (0x2220, b"\xA2\xDC"),
+            (0x2229, b"\xA2\xC1"),
+            (0x222B, b"\xA2\xE9"),
+            (0x2235, b"\xA2\xE8"),
+            (0x221A, b"\xA2\xE5"),
+            (0x222A, b"\xA2\xC0"),
+            (0x2261, b"\xA2\xE1"),
+            (0x22A5, b"\xA2\xDD"),
+            (0x2252, b"\xA2\xE2"),
+            (0xFFE2, b"\xA2\xCC"),
+        ] {
+            set(&mut from, cp, bytes);
+        }
+        // Lossy mappings of the table which we don't do
+        for cp in [
+            0xA1, 0xA6, 0xA9, 0xAA, 0xAB, 0xAD, 0xAE, 0xAF, 0xB2, 0xB3, 0xB5, 0xB7, 0xB8, 0xB9,
+            0xBA, 0xBB, 0x3094,
+        ] {
+            from.remove(&vec![cp]);
+        }
+        for i in 0..=0x7Fu32 {
+            valid.insert(vec![i as u8], vec![i]);
+        }
+        set(&mut from, 0xA5, b"\xA1\xEF");
+        set(&mut from, 0x203E, b"\xA1\xB1");
+        set(&mut from, 0xAF, b"\xA1\xB1");
+        assert!(
+            valid.len() > 7000 && from.len() > 7000,
+            "{} {}",
+            valid.len(),
+            from.len()
+        );
+
+        test_all_valid_chars(&mut f, enc, &valid, false, &mut rng);
+        test_all_valid_codepoints(&mut f, enc, &from, &mut rng);
+
+        let start_bytes = [(0xA9..=0xAF, 2), (0xF5..=0xF8, 2), (0xFD..=0xFE, 2)];
+        let (invalid, truncated) = find_invalid_chars(&valid, &start_bytes);
+        test_all_invalid_chars(&mut f, enc, &invalid, &valid, &mut rng);
+        test_truncated_chars(&mut f, enc, &truncated);
+
+        test_all_invalid_codepoints(&mut f, enc, invalid_bmp_codepoints(&from), &from, &mut rng);
+
+        for bad in [&b"\x80"[..], b"\xFE\xFF"] {
+            check_valid(&mut f, enc, bad, &[BAD_INPUT], false);
+        }
+        f.assert_none("CP51932");
+    }
+
+    // eucjp_2004_encoding.phpt
+    #[test]
+    fn eucjp2004_exhaustive() {
+        let enc = &MBFL_ENCODING_EUCJP2004;
+        let mut rng = Rng::new(200);
+        let mut f = Failures::default();
+
+        let (mut valid, mut from) = read_jisx0213_table("EUC-JP-2004.txt", false);
+        // 0xA1B1 is FULLWIDTH MACRON, 0xA1EF FULLWIDTH YEN SIGN
+        valid.insert(b"\xA1\xB1".to_vec(), vec![0xFFE3]);
+        set(&mut from, 0xFFE3, b"\xA1\xB1");
+        valid.insert(b"\xA1\xEF".to_vec(), vec![0xFFE5]);
+        set(&mut from, 0xFFE5, b"\xA1\xEF");
+        // YEN SIGN and OVERLINE go to the bytes legacy software used for them
+        set(&mut from, 0xA5, b"\x5C");
+        set(&mut from, 0x203E, b"\x7E");
+        let pairs = valid.values().filter(|v| v.len() == 2).count();
+        assert!(
+            valid.len() > 11000 && pairs == 25,
+            "{} {pairs}",
+            valid.len()
+        );
+
+        test_all_valid_chars(&mut f, enc, &valid, true, &mut rng);
+
+        let (invalid, truncated) = find_invalid_chars(&valid, &[]);
+        test_all_invalid_chars(&mut f, enc, &invalid, &valid, &mut rng);
+        test_truncated_chars(&mut f, enc, &truncated);
+
+        test_all_valid_codepoints(&mut f, enc, &from, &mut rng);
+        test_all_invalid_codepoints(&mut f, enc, invalid_bmp_codepoints(&from), &from, &mut rng);
+
+        for bad in [&b"\x80"[..], b"\xFE\xFF"] {
+            check_valid(&mut f, enc, bad, &[BAD_INPUT], false);
+        }
+        f.assert_none("EUC-JP-2004");
+    }
+
+    #[test]
+    fn eucjp2004_combining_across_buffers() {
+        let enc = &MBFL_ENCODING_EUCJP2004;
+        // か + U+309A is one character, also when split between calls
+        for chunk in 1..=3 {
+            let buf = encode_with(
+                enc,
+                &[0x41, 0x304B, 0x309A],
+                chunk,
+                b'%' as u32,
+                ILLEGAL_MODE_CHAR,
+            );
+            assert_eq!(buf.out, b"A\xA4\xF7", "chunk size {chunk}");
+        }
+        // ... but か at the very end falls back to the plain character
+        assert_eq!(encode(enc, &[0x304B]).out, b"\xA4\xAB");
+        // Combining characters need two output slots
+        let mut inp: &[u8] = b"a\xA4\xF7";
+        let mut out = [0u32; 2];
+        assert_eq!(mb_eucjp2004_to_wchar(&mut inp, &mut out, &mut 0), 1);
+        assert_eq!(inp, b"\xA4\xF7");
+        assert_eq!(
+            decode_with(enc, b"\xA4\xF7\xA4\xF7", 3),
+            [0x304B, 0x309A, 0x304B, 0x309A]
+        );
+        // Plane 2 characters (row 1 here) round-trip through JISX0213_P2_OFST
+        let cps = decode(enc, b"\x8F\xA1\xA1");
+        assert_eq!(cps.len(), 1);
+        assert_ne!(cps[0], BAD_INPUT);
+        assert_eq!(encode(enc, &cps).out, b"\x8F\xA1\xA1");
+    }
+
+    // bug25140.phpt, bug69086.phpt, bug69079.phpt
+    #[test]
+    fn eucjp_bug_regressions() {
+        // Converting an empty string
+        assert!(decode(&MBFL_ENCODING_EUC_JP, b"").is_empty());
+        assert!(encode(&MBFL_ENCODING_SJIS, &[]).out.is_empty());
+
+        // A replacement character the target can't encode becomes '?'
+        let bad = decode(&MBFL_ENCODING_EUC_JP, b"\x80");
+        assert_eq!(bad, [BAD_INPUT]);
+        let buf = encode_with(&MBFL_ENCODING_SJIS, &bad, 128, 0xFFFD, ILLEGAL_MODE_CHAR);
+        assert_eq!(buf.out, b"?");
+        assert_eq!(decode(&MBFL_ENCODING_EUCJP2004, b"\x80"), [BAD_INPUT]);
+
+        // mb_scrub in EUC-JP-2004 with various substitute characters
+        let enc = &MBFL_ENCODING_EUCJP2004;
+        let bad = decode(enc, b"\x8D");
+        assert_eq!(bad, [BAD_INPUT]);
+        assert_eq!(
+            encode_with(enc, &bad, 128, 0x63, ILLEGAL_MODE_CHAR).out,
+            b"c"
+        );
+        assert_eq!(
+            encode_with(enc, &bad, 128, 0x50AA, ILLEGAL_MODE_CHAR).out,
+            b"\x8F\xA1\xEF"
+        );
     }
 }
