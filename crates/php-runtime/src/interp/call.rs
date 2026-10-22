@@ -61,7 +61,7 @@ pub(crate) fn cannot_pass_by_ref(vm: &mut Vm, func: &Function, i: usize) -> Flow
     let pname = sig
         .params
         .get(i)
-        .filter(|p| !p.variadic || i >= sig.num_args())
+        .filter(|p| !p.variadic && i < sig.num_args())
         .map(|p| format!(" (${})", p.name))
         .unwrap_or_default();
     vm.throw_error(
@@ -327,7 +327,7 @@ pub(crate) fn resolve_callable_for_call(vm: &mut Vm, cx: &Ctx, callee: &Value) -
                 let cls = PhpStr::from_bytes(&s[..pos]);
                 let m = PhpStr::from_bytes(&s[pos + 2..]);
                 let class = eval::lookup_class_or_error(vm, &cls, vm.current_line)?;
-                return static_method_target(vm, cx.env, &class, &m, false);
+                return dynamic_static_target(vm, cx, &class, &m);
             }
             let name = s.strip_prefix(b"\\").unwrap_or(s);
             match vm.find_function(name) {
@@ -358,7 +358,7 @@ pub(crate) fn resolve_callable_for_call(vm: &mut Vm, cx: &Ctx, callee: &Value) -
                 Value::Object(o) => method_target(vm, cx.scope(), &o, &m),
                 Value::String(c) => {
                     let class = eval::lookup_class_or_error(vm, &c, vm.current_line)?;
-                    static_method_target(vm, cx.env, &class, &m, false)
+                    dynamic_static_target(vm, cx, &class, &m)
                 }
                 _ => Err(vm.throw_error("Error", "First array member is not a valid class name or object")),
             }
@@ -387,8 +387,30 @@ pub(crate) fn resolve_callable_for_call(vm: &mut Vm, cx: &Ctx, callee: &Value) -
                 )),
             }
         }
-        _ => Err(vm.throw_error("Error", "Value not callable")),
+        other => Err(vm.throw_error(
+            "Error",
+            format!("Value of type {} is not callable", other.type_name()),
+        )),
     }
+}
+
+/// `"A::m"` / `["A", "m"]` dynamic calls (`zend_init_dynamic_call_string`):
+/// `$this` is never forwarded, so non-static methods are an error.
+fn dynamic_static_target(vm: &mut Vm, cx: &Ctx, class: &ClassRef, m: &PhpStr) -> PResult<Target> {
+    let t = static_method_target(vm, cx.env, class, m, false)?;
+    if t.this.is_some() {
+        let scope = t.func.scope.clone().unwrap_or_else(|| class.name.clone());
+        let name = t.magic_name.clone().unwrap_or_else(|| t.func.name.clone());
+        return Err(vm.throw_error(
+            "Error",
+            format!(
+                "Non-static method {}::{}() cannot be called statically",
+                super::decl::display_class_name(&scope),
+                name
+            ),
+        ));
+    }
+    Ok(t)
 }
 
 /// Invokes a function with bound arguments.
@@ -405,6 +427,10 @@ pub fn invoke(
 ) -> PResult<Value> {
     match &func.kind {
         FunctionKind::Native(_) => {
+            if dynamic && super::pfa::forbids_dynamic_calls(func) {
+                // `zend_forbid_dynamic_call`.
+                return Err(vm.throw_error("Error", format!("Cannot call {}() dynamically", func.name)));
+            }
             let r = vm.invoke_native(
                 func,
                 CallArgs {
@@ -785,11 +811,12 @@ fn check_param_type(
         }
     }
     let need = ty.decl.to_type_string_in(env.scope.as_deref(), None);
+    let pname = if p.variadic { String::new() } else { format!(" (${})", p.name) };
     let mut msg = format!(
-        "{}(): Argument #{} (${}) must be of type {}, {} given",
+        "{}(): Argument #{}{} must be of type {}, {} given",
         func.display_name(),
         i + 1,
-        p.name,
+        pname,
         need,
         v.value_name()
     );
@@ -1663,6 +1690,38 @@ pub fn call_value(vm: &mut Vm, callable: &Value, positional: Vec<Value>, named: 
     }
     let b = Bound { positional, named };
     call_target(vm, t, b, &caller, dynamic)
+}
+
+/// `debug_backtrace_get_args`: arguments of `#[\SensitiveParameter]`
+/// parameters of a userland function are wrapped in `SensitiveParameterValue`.
+pub(crate) fn redact_sensitive_args(vm: &Vm, func: &Function, args: &mut [(Option<PhpStr>, Value)]) {
+    let Some(u) = user_fn(func) else { return };
+    let params = &u.code.params;
+    let is_sensitive = |p: &ParamInfo| {
+        p.attributes.iter().any(|a| {
+            let n = a.name.as_bytes();
+            n.strip_prefix(b"\\").unwrap_or(n).eq_ignore_ascii_case(b"SensitiveParameter")
+        })
+    };
+    if !params.iter().any(is_sensitive) {
+        return;
+    }
+    let num_args = params.iter().filter(|p| !p.variadic).count();
+    let variadic = params.last().filter(|p| p.variadic);
+    let mut i = 0usize;
+    for (name, v) in args.iter_mut() {
+        let p = match name {
+            Some(_) => variadic,
+            None => {
+                let p = if i < num_args { params.get(i) } else { variadic };
+                i += 1;
+                p
+            }
+        };
+        if p.is_some_and(is_sensitive) {
+            *v = super::builtins::sensitive_parameter_value(vm, std::mem::take(v));
+        }
+    }
 }
 
 /// Host entry: calls a function with `CallArgs` (native → user callbacks).

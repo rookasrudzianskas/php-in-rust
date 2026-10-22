@@ -836,7 +836,11 @@ impl Vm {
                 let fargs: &[(Option<PhpStr>, Value)] = match &f.env {
                     // Userland frames show the current values of their parameters.
                     Some(env) if f.function.is_some() && !f.is_internal => {
-                        live = env.trace_args(f.function.as_deref());
+                        let mut a = env.trace_args(f.function.as_deref());
+                        if let Some(func) = &f.function {
+                            crate::interp::call::redact_sensitive_args(self, func, &mut a);
+                        }
+                        live = a;
                         &live
                     }
                     _ => &f.args,

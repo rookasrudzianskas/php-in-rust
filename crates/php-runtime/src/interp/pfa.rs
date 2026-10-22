@@ -1066,9 +1066,13 @@ fn create(vm: &mut Vm, cx: &Ctx, pe: &PartialExpr) -> PResult<Value> {
 
     // zend_create_partial_closure: scope of the function (magic methods: the
     // scope the PFA is created in).
-    let scope = if view.trampoline { cx.env.scope.clone() } else { view.scope.clone() };
+    let mut scope = if view.trampoline { cx.env.scope.clone() } else { view.scope.clone() };
     let is_static_closure = code.has(code_flags::STATIC_CLOSURE);
-    let object = if scope.is_some() && !is_static_closure { t.this.clone() } else { None };
+    let object = if !is_static_closure { t.this.clone() } else { None };
+    if scope.is_none() && object.is_some() {
+        // zend_create_closure_ex: a dummy scope when binding an object.
+        scope = vm.find_class(b"Closure");
+    }
 
     // zp_bind: type-check and bind the pre-bound arguments.
     let mut bound = Vec::with_capacity(code.uses.len());

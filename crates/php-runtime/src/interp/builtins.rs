@@ -1150,15 +1150,17 @@ fn do_assert(vm: &mut Vm, v: Value, desc: Option<Value>) -> PResult<Value> {
             return Err(Flow::Exception(o));
         }
     }
+    // A dynamic call has no compiler-provided description.
     let msg = match &desc {
-        Some(Value::Null) | None => PhpStr::from("assert(false)"),
-        Some(d) => vm.to_php_string(&d.unref())?,
+        Some(Value::Null) | None => None,
+        Some(d) => Some(vm.to_php_string(&d.unref())?),
     };
     if vm.ini_bool("assert.exception") {
-        return Err(vm.throw_error("AssertionError", msg));
+        return Err(vm.throw_error("AssertionError", msg.unwrap_or_default()));
     }
     if vm.ini_bool("assert.warning") {
-        vm.warning(msg)?;
+        let d = msg.map_or_else(|| "Assertion".to_string(), |m| m.to_string());
+        vm.warning(format!("{d} failed"))?;
     }
     if vm.ini_bool("assert.bail") {
         vm.exit_status = 255;
@@ -1376,6 +1378,46 @@ static EMPTY_CTOR: NativeFunction = NativeFunction {
     handler: attr_construct,
 };
 
+fn spv_construct(_vm: &mut Vm, a: &mut Args) -> PResult<Value> {
+    if let Some(o) = a.this() {
+        o.set_prop(b"value", a.get(0).unref());
+    }
+    Ok(Value::Null)
+}
+
+fn spv_get_value(_vm: &mut Vm, a: &mut Args) -> PResult<Value> {
+    Ok(a.this().and_then(|o| o.get_prop(b"value")).unwrap_or(Value::Null))
+}
+
+fn spv_debug_info(_vm: &mut Vm, _a: &mut Args) -> PResult<Value> {
+    Ok(Value::array(PhpArray::new()))
+}
+
+static SPV_CTOR: NativeFunction = NativeFunction {
+    sig: "public function __construct(mixed $value) {}",
+    handler: spv_construct,
+};
+static SPV_GET_VALUE: NativeFunction = NativeFunction {
+    sig: "public function getValue(): mixed {}",
+    handler: spv_get_value,
+};
+static SPV_DEBUG_INFO: NativeFunction = NativeFunction {
+    sig: "public function __debugInfo(): array {}",
+    handler: spv_debug_info,
+};
+
+/// `SensitiveParameterValue` wrapping `v` (`zend_sensitive_parameter_value_init`).
+pub(crate) fn sensitive_parameter_value(vm: &Vm, v: Value) -> Value {
+    match vm.find_class(b"SensitiveParameterValue") {
+        Some(c) => {
+            let o = ObjRef::new(c);
+            o.set_prop(b"value", v.unref());
+            Value::Object(o)
+        }
+        None => v,
+    }
+}
+
 fn register_attributes(r: &mut Registry<'_>) {
     use crate::class::{ClassConstant, PropertyInfo};
     let mut attr = ClassEntry::new("Attribute", class_flags::FINAL);
@@ -1420,11 +1462,18 @@ fn register_attributes(r: &mut Registry<'_>) {
     nd.add_method(Function::native_method(&NODISCARD_CTOR, "NoDiscard", member_flags::PUBLIC));
     r.class(nd);
     // SensitiveParameterValue.
-    let mut spv = ClassEntry::new("SensitiveParameterValue", class_flags::FINAL | class_flags::NOT_SERIALIZABLE);
+    let mut spv = ClassEntry::new(
+        "SensitiveParameterValue",
+        class_flags::FINAL | class_flags::NOT_SERIALIZABLE | class_flags::NO_DYNAMIC_PROPERTIES,
+    );
     let mut v = PropertyInfo::new("value", "SensitiveParameterValue", member_flags::PRIVATE | member_flags::READONLY);
     v.ty = Some(crate::types::TypeDecl::mixed());
     v.default = Value::Undef;
     spv.declare_property(v);
+    let pub_ = member_flags::PUBLIC;
+    spv.add_method(Function::native_method(&SPV_CTOR, "SensitiveParameterValue", pub_));
+    spv.add_method(Function::native_method(&SPV_GET_VALUE, "SensitiveParameterValue", pub_));
+    spv.add_method(Function::native_method(&SPV_DEBUG_INFO, "SensitiveParameterValue", pub_));
     r.class(spv);
     let _ = ObjRef::ptr_eq;
 }
