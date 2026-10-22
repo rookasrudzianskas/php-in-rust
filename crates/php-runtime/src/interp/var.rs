@@ -297,12 +297,18 @@ impl Dumper {
                 let count = props.iter().filter(|p| p.value.is_some()).count();
                 out.extend_from_slice(amp);
                 let shown_name = super::decl::display_class_name(&class.name).into_bytes();
+                if class.is_enum() && !self.debug_zval {
+                    // An enum with __debugInfo().
+                    let case = crate::enums::enum_case_name(o).unwrap_or_default();
+                    out.extend_from_slice(format!("enum({}::{}) ({}) {{\n", class.name, case, count).as_bytes());
+                } else {
                 out.extend_from_slice(b"object(");
                 out.extend_from_slice(&shown_name);
                 if self.debug_zval {
                     out.extend_from_slice(format!(")#{} ({}) refcount({}){{\n", o.id(), count, o.refcount().saturating_sub(1).max(1)).as_bytes());
                 } else {
                     out.extend_from_slice(format!(")#{} ({}) {{\n", o.id(), count).as_bytes());
+                }
                 }
                 for p in props {
                     spaces(out, level + 1);

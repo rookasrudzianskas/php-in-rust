@@ -2158,6 +2158,26 @@ fn implement_interface_hook(vm: &mut Vm, def: &ClassDef, ce: &ClassEntry, iface:
                 }
             }
         }
+        b"throwable" => {
+            // zend_implement_throwable: only via Exception or Error.
+            let mut root = ce.parent.clone();
+            while let Some(p) = root.as_ref().and_then(|r| r.parent.clone()) {
+                root = Some(p);
+            }
+            let ok = root.is_some_and(|r| matches!(r.name.as_bytes(), b"Exception" | b"Error"));
+            if !ok {
+                let msg = if def.kind == ClassKindIr::Enum {
+                    format!("{} {cname} cannot implement interface {}", kind_word(def.kind), iface.name)
+                } else {
+                    format!(
+                        "{} {cname} cannot implement interface {}, extend Exception or Error instead",
+                        kind_word(def.kind),
+                        iface.name
+                    )
+                };
+                return Err(vm.fatal_error(msg));
+            }
+        }
         b"serializable" => {
             // zend_implement_serializable.
             let has = |n: &[u8]| ce.methods.contains_key(n);
