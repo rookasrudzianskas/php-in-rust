@@ -812,3 +812,112 @@ fn feof_detects_closed_peer() {
     );
     assert_eq!(t.call("feof", vec![b]).unwrap().as_bool(), Some(true));
 }
+
+#[test]
+fn php_filter_urls_apply_read_and_write_chains() {
+    let mut t = TestVm::new();
+    let d = scratch("phpfilter");
+    let f = format!("{d}/x");
+    std::fs::write(&f, "Hello World").unwrap();
+    let r = t
+        .call(
+            "file_get_contents",
+            vec![Value::from(format!(
+                "php://filter/read=string.toupper|string.rot13/resource={f}"
+            ))],
+        )
+        .unwrap();
+    assert_eq!(bytes(&r), b"URYYB JBEYQ");
+    let r = t
+        .call(
+            "file_put_contents",
+            vec![
+                Value::from(format!(
+                    "php://filter/write=convert.base64-encode/resource={f}"
+                )),
+                s("abcd"),
+            ],
+        )
+        .unwrap();
+    assert_eq!(r.as_int(), Some(4));
+    assert_eq!(std::fs::read(&f).unwrap(), b"YWJjZA==");
+    let r = t
+        .call(
+            "fopen",
+            vec![
+                Value::from(format!("php://filter/read=no.such/resource={f}")),
+                s("r"),
+            ],
+        )
+        .unwrap();
+    assert!(matches!(r, Value::Resource(_)));
+    assert_eq!(
+        t.output(),
+        "\nWarning: fopen(): Unable to locate filter \"no.such\" in /t.php on line 3\n\nWarning: fopen(): Unable to create filter (no.such) in /t.php on line 3\n"
+    );
+}
+
+#[test]
+fn filter_append_remove_and_meta() {
+    let mut t = TestVm::new();
+    let fp = t.call("fopen", vec![s("php://memory"), s("w+")]).unwrap();
+    let flt = t
+        .call(
+            "stream_filter_append",
+            vec![fp.clone(), s("convert.base64-encode"), Value::Int(2)],
+        )
+        .unwrap();
+    assert!(matches!(flt, Value::Resource(_)));
+    t.call("fwrite", vec![fp.clone(), s("abcd")]).unwrap();
+    // the pending "d" is flushed when the filter is removed
+    assert_eq!(
+        t.call("stream_filter_remove", vec![flt.clone()])
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+    t.call("rewind", vec![fp.clone()]).unwrap();
+    assert_eq!(
+        bytes(&t.call("stream_get_contents", vec![fp.clone()]).unwrap()),
+        b"YWJjZA=="
+    );
+    let (cls, _) = thrown(t.call("stream_filter_remove", vec![flt]));
+    assert_eq!(cls, "TypeError");
+    // read chain on buffered data
+    let fp = t.call("fopen", vec![s("php://memory"), s("w+")]).unwrap();
+    t.call("fwrite", vec![fp.clone(), s("abc")]).unwrap();
+    t.call("rewind", vec![fp.clone()]).unwrap();
+    t.call(
+        "stream_filter_prepend",
+        vec![fp.clone(), s("string.toupper"), Value::Int(1)],
+    )
+    .unwrap();
+    assert_eq!(
+        bytes(&t.call("fread", vec![fp, Value::Int(10)]).unwrap()),
+        b"ABC"
+    );
+}
+
+#[test]
+fn implicitly_dropped_filtered_stream_flushes_its_filters() {
+    let mut t = TestVm::new();
+    let d = scratch("dropflush");
+    let f = format!("{d}/y");
+    let fp = t
+        .call(
+            "fopen",
+            vec![
+                Value::from(format!(
+                    "php://filter/write=convert.base64-encode/resource={f}"
+                )),
+                s("w"),
+            ],
+        )
+        .unwrap();
+    t.call("fwrite", vec![fp.clone(), s("abcd")]).unwrap();
+    assert_eq!(std::fs::read(&f).unwrap(), b"YWJj");
+    drop(fp);
+    // the next stream call finishes the close (filter flush + close)
+    let r = t.call("file_get_contents", vec![s(&f)]).unwrap();
+    assert_eq!(bytes(&r), b"YWJjZA==");
+}
