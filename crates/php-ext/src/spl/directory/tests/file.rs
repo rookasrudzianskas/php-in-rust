@@ -1329,6 +1329,38 @@ fn file_class_with_default_properties() {
     );
 }
 
+fn noop(_vm: &mut Vm, _args: &mut Args) -> PResult<Value> {
+    Ok(Value::Null)
+}
+
+static DESTRUCT: NativeFunction = NativeFunction {
+    sig: "public function __destruct() {}",
+    handler: noop,
+};
+
+#[test]
+fn destructors_close_the_stream() {
+    // spl_filesystem_object_destroy_object; with a userland __destruct the
+    // stream stays open (Host::run_destructor runs dtor_obj first).
+    let d = TempDir::new("dtor");
+    let p = d.file("a.txt", "one\n");
+    let mut t = TestVm::new();
+    let f = open(&mut t, &p);
+    (f.class().handlers.dtor_obj.unwrap())(&mut t.vm, &f).unwrap();
+    let (_, msg) = thrown(try_m(&mut t, &f, "fgets", vec![]));
+    assert_eq!(msg, "Object not initialized");
+    user_class(&mut t.vm, "WithDestructor", "SplFileObject", &[&DESTRUCT]);
+    let f = new(&mut t, "WithDestructor", vec![s(&p)]);
+    (f.class().handlers.dtor_obj.unwrap())(&mut t.vm, &f).unwrap();
+    assert_eq!(str_of(&m(&mut t, &f, "fgets", vec![])), "one\n");
+    crate::spl::directory::close_streams(&mut t.vm, &f).unwrap();
+    assert!(try_m(&mut t, &f, "fgets", vec![]).is_err());
+    let it = new(&mut t, "DirectoryIterator", vec![s(&d.root())]);
+    (it.class().handlers.dtor_obj.unwrap())(&mut t.vm, &it).unwrap();
+    let (_, msg) = thrown(try_m(&mut t, &it, "valid", vec![]));
+    assert_eq!(msg, "Object not initialized");
+}
+
 #[test]
 fn open_basedir_warnings_become_exceptions() {
     let allowed = TempDir::new("basedir-in");
