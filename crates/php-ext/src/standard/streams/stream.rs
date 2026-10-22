@@ -376,11 +376,17 @@ impl Drop for Stream {
             let placeholder = Stream::raw(Box::new(ClosedOps), b"r", 0);
             let mut taken = std::mem::replace(self, placeholder);
             taken.res = None;
+            let mut taken = Some(taken);
             let _ = DEFERRED.try_with(|d| {
                 if let Ok(mut d) = d.try_borrow_mut() {
-                    d.push(taken);
+                    d.extend(taken.take());
                 }
             });
+            // No VM left to finish the close (thread shutdown): drop it as is
+            // instead of deferring it again.
+            if let Some(t) = taken.as_mut() {
+                t.closed = true;
+            }
         }
         self.closed = true;
     }
