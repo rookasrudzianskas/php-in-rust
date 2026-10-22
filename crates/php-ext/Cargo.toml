@@ -12,3 +12,4 @@ php-runtime.workspace = true
 php-regex.workspace = true
 php-timelib.workspace = true
 php-hash.workspace = true
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }

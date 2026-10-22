@@ -10,6 +10,7 @@ pub mod ctype;
 pub mod date;
 pub mod filter;
 pub mod hash;
+pub mod internal_iterator;
 pub mod json;
 pub mod mbstring;
 pub mod pcre;

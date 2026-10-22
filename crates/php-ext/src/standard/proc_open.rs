@@ -1827,11 +1827,15 @@ mod tests {
         let master = pipe_at(&pipes, 0);
         let mode = handle_of(&master).unwrap().borrow().st.mode.clone();
         assert_eq!(mode.as_bytes(), b"r+");
+        // The child may not have written yet under load: retry empty reads
+        // until a deadline instead of giving up on the first one.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut data = Vec::new();
-        while !data.ends_with(b"\n") {
+        while !data.ends_with(b"\n") && std::time::Instant::now() < deadline {
             match streams::read(&mut t.vm, &master, 1000).unwrap() {
                 Some(chunk) if !chunk.is_empty() => data.extend(chunk),
-                _ => break,
+                Some(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                None => break,
             }
         }
         assert_eq!(String::from_utf8_lossy(&data), "foo\r\n");

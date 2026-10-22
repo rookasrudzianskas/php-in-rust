@@ -5,8 +5,11 @@
 //! `date_period_it_*` callbacks, so `foreach` over a period works through the
 //! regular `IteratorAggregate` protocol.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use php_runtime::class::{
-    ClassConstant, ClassEntry, PropPurpose, PropertyInfo, class_flags, fn_flags, member_flags,
+    ClassConstant, ClassEntry, PropPurpose, PropertyInfo, fn_flags, member_flags,
 };
 use php_runtime::types::TypeDecl;
 use php_runtime::value::convert::object_property_table;
@@ -14,6 +17,8 @@ use php_runtime::{
     Args, ClassRef, Flow, NativeFunction, ObjRef, PResult, PhpArray, PhpStr, Registry, Value, Vm,
 };
 use php_timelib::{RelTime, Time, strtointerval};
+
+use crate::internal_iterator::{self, ObjectIterator, create_internal_iterator};
 
 use super::common::{
     DATE_INTERFACE, IMMUTABLE_CLASS, INTERVAL_CLASS, MALFORMED_PERIOD_STRING_EXCEPTION,
@@ -30,7 +35,6 @@ pub const EXCLUDE_START_DATE: i64 = 0x0001;
 pub const INCLUDE_END_DATE: i64 = 0x0002;
 
 /// The iterator class returned by `getIterator()`.
-pub const ITERATOR_CLASS: &str = "InternalIterator";
 
 /// The state of a `DatePeriod` (`php_period_obj`).
 #[derive(Clone, Debug, Default)]
@@ -622,173 +626,97 @@ fn wakeup(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
 }
 
 // ---------------------------------------------------------------------------
-// Iteration (date_period_it_* + InternalIterator)
+// Iteration (date_period_it_*)
 // ---------------------------------------------------------------------------
 
-/// The state of an `InternalIterator` over a period.
-#[derive(Clone, Debug)]
-pub struct PeriodIterator {
+/// `date_period_it_*`: the iterator `getIterator()` wraps in an
+/// `InternalIterator`.
+struct PeriodIterator {
     period: ObjRef,
-    current_index: i64,
-    rewind_called: bool,
+    current_index: Cell<i64>,
 }
 
-/// The `InternalIterator` class used by `getIterator()`.
-#[derive(Default)]
-struct IteratorClass(Option<ClassRef>);
-
-/// `date_period_it_rewind`.
-fn it_rewind(vm: &mut Vm, it: &mut PeriodIterator) -> PResult<()> {
-    it.current_index = 0;
-    let mut p = period_of(&it.period);
-    p.current = None;
-    let Some(start) = p.start.clone() else {
-        set_period_of(&it.period, p);
-        let ce = class(vm, PERIOD_CLASS);
-        return Err(uninitialized_error(vm, &ce));
-    };
-    let mut current = start;
-    if !p.include_start_date
-        && let Some(interval) = &p.interval
-    {
-        period_advance(&mut current, interval);
-    }
-    p.current = Some(current);
-    set_period_of(&it.period, p);
-    Ok(())
-}
-
-/// `date_period_it_has_more`.
-fn it_valid(it: &PeriodIterator) -> bool {
-    let p = period_of(&it.period);
-    let Some(current) = &p.current else {
-        return false;
-    };
-    match &p.end {
-        Some(end) => {
-            if current.sse == end.sse {
-                if p.include_end_date {
-                    current.us <= end.us
+impl ObjectIterator for PeriodIterator {
+    /// `date_period_it_has_more`.
+    fn valid(&self, _vm: &mut Vm) -> PResult<bool> {
+        let p = period_of(&self.period);
+        let Some(current) = &p.current else {
+            return Ok(false);
+        };
+        Ok(match &p.end {
+            Some(end) => {
+                if current.sse == end.sse {
+                    if p.include_end_date {
+                        current.us <= end.us
+                    } else {
+                        current.us < end.us
+                    }
                 } else {
-                    current.us < end.us
+                    current.sse < end.sse
                 }
-            } else {
-                current.sse < end.sse
             }
+            None => self.current_index.get() < p.recurrences,
+        })
+    }
+
+    /// `date_period_it_current_data`.
+    fn current(&self, vm: &mut Vm) -> PResult<Option<Value>> {
+        let p = period_of(&self.period);
+        let Some(current) = p.current else {
+            return Ok(None);
+        };
+        let ce = match &p.start_ce {
+            Some(ce) => base_date_class(ce),
+            None => class(vm, super::common::DATE_CLASS),
+        };
+        Ok(Some(Value::Object(new_date_object(vm, &ce, current)?)))
+    }
+
+    /// `date_period_it_current_key`.
+    fn key(&self, _vm: &mut Vm) -> PResult<Option<Value>> {
+        Ok(Some(Value::Int(self.current_index.get())))
+    }
+
+    /// `date_period_it_move_forward`.
+    fn move_forward(&self, _vm: &mut Vm) -> PResult<()> {
+        let mut p = period_of(&self.period);
+        if let (Some(current), Some(interval)) = (p.current.as_mut(), p.interval) {
+            period_advance(current, &interval);
         }
-        None => it.current_index < p.recurrences,
+        set_period_of(&self.period, p);
+        self.current_index.set(self.current_index.get() + 1);
+        Ok(())
     }
-}
 
-/// `date_period_it_current_data`.
-fn it_current(vm: &mut Vm, it: &PeriodIterator) -> PResult<Value> {
-    let p = period_of(&it.period);
-    let Some(current) = p.current else {
-        return Ok(Value::Null);
-    };
-    let ce = match &p.start_ce {
-        Some(ce) => base_date_class(ce),
-        None => class(vm, super::common::DATE_CLASS),
-    };
-    Ok(Value::Object(new_date_object(vm, &ce, current)?))
-}
-
-/// `date_period_it_move_forward`.
-fn it_move_forward(it: &mut PeriodIterator) {
-    let mut p = period_of(&it.period);
-    if let (Some(current), Some(interval)) = (p.current.as_mut(), p.interval) {
-        period_advance(current, &interval);
+    /// `date_period_it_rewind`.
+    fn rewind(&self, vm: &mut Vm) -> PResult<()> {
+        self.current_index.set(0);
+        let mut p = period_of(&self.period);
+        p.current = None;
+        let Some(start) = p.start.clone() else {
+            set_period_of(&self.period, p);
+            let ce = class(vm, PERIOD_CLASS);
+            return Err(uninitialized_error(vm, &ce));
+        };
+        let mut current = start;
+        if !p.include_start_date
+            && let Some(interval) = &p.interval
+        {
+            period_advance(&mut current, interval);
+        }
+        p.current = Some(current);
+        set_period_of(&self.period, p);
+        Ok(())
     }
-    set_period_of(&it.period, p);
-    it.current_index += 1;
-}
-
-fn iterator_state(vm: &mut Vm, args: &Args) -> PResult<(ObjRef, PeriodIterator)> {
-    let obj = this(args);
-    let state = obj.native::<PeriodIterator>().map(|s| s.clone());
-    match state {
-        Some(s) => Ok((obj, s)),
-        None => Err(vm.throw_error(
-            "Error",
-            "The InternalIterator object has not been properly initialized",
-        )),
-    }
-}
-
-/// `zend_internal_iterator_ensure_rewound`.
-fn ensure_rewound(vm: &mut Vm, it: &mut PeriodIterator) -> PResult<()> {
-    if !it.rewind_called {
-        it.rewind_called = true;
-        it_rewind(vm, it)?;
-    }
-    Ok(())
-}
-
-fn iter_current(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
-    let (obj, mut it) = iterator_state(vm, args)?;
-    let r = ensure_rewound(vm, &mut it);
-    obj.set_native(it.clone());
-    r?;
-    it_current(vm, &it)
-}
-
-fn iter_key(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
-    let (obj, mut it) = iterator_state(vm, args)?;
-    let r = ensure_rewound(vm, &mut it);
-    obj.set_native(it.clone());
-    r?;
-    Ok(Value::Int(it.current_index))
-}
-
-fn iter_next(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
-    let (obj, mut it) = iterator_state(vm, args)?;
-    let r = ensure_rewound(vm, &mut it);
-    if r.is_ok() {
-        it_move_forward(&mut it);
-    }
-    obj.set_native(it);
-    r?;
-    Ok(Value::Null)
-}
-
-fn iter_valid(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
-    let (obj, mut it) = iterator_state(vm, args)?;
-    let r = ensure_rewound(vm, &mut it);
-    obj.set_native(it.clone());
-    r?;
-    Ok(Value::Bool(it_valid(&it)))
-}
-
-fn iter_rewind(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
-    let (obj, mut it) = iterator_state(vm, args)?;
-    it.rewind_called = true;
-    let r = it_rewind(vm, &mut it);
-    obj.set_native(it);
-    r?;
-    Ok(Value::Null)
-}
-
-fn iter_construct(vm: &mut Vm, _args: &mut Args) -> PResult<Value> {
-    Err(vm.throw_error(
-        "Error",
-        "Call to private InternalIterator::__construct() from global scope",
-    ))
 }
 
 /// `DatePeriod::getIterator()` (`zend_create_internal_iterator_zval`).
 fn get_iterator(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
-    let period = this(args);
-    let ce = match &vm.ext_data::<IteratorClass>().0 {
-        Some(ce) => ce.clone(),
-        None => class(vm, ITERATOR_CLASS),
+    let iter = PeriodIterator {
+        period: this(args),
+        current_index: Cell::new(0),
     };
-    let it = ObjRef::new(ce);
-    it.set_native(PeriodIterator {
-        period,
-        current_index: 0,
-        rewind_called: false,
-    });
-    Ok(Value::Object(it))
+    Ok(Value::Object(create_internal_iterator(vm, Rc::new(iter))?))
 }
 
 nf!(
@@ -842,21 +770,6 @@ nf!(
     "public function getIterator(): Iterator {}",
     get_iterator
 );
-
-nf!(
-    II_CONSTRUCT,
-    "private function __construct() {}",
-    iter_construct
-);
-nf!(
-    II_CURRENT,
-    "public function current(): mixed {}",
-    iter_current
-);
-nf!(II_KEY, "public function key(): mixed {}", iter_key);
-nf!(II_NEXT, "public function next(): void {}", iter_next);
-nf!(II_VALID, "public function valid(): bool {}", iter_valid);
-nf!(II_REWIND, "public function rewind(): void {}", iter_rewind);
 
 fn virtual_property(name: &str, ty: &str) -> PropertyInfo {
     let mut info = PropertyInfo::new(
@@ -922,36 +835,6 @@ pub fn register(r: &mut Registry) {
     ce.handlers.write_property = Some(period_write_property);
     r.class(ce);
 
-    // InternalIterator (Zend/zend_interfaces.c), unless the engine provides it.
-    let iterator = r
-        .find_class("Iterator")
-        .expect("Iterator is a core interface");
-    let mut it = ClassEntry::new(
-        ITERATOR_CLASS,
-        class_flags::FINAL | class_flags::NOT_SERIALIZABLE,
-    );
-    it.interfaces.push(iterator.clone());
-    for parent in iterator.interfaces.iter() {
-        it.interfaces.push(parent.clone());
-    }
-    add_methods(
-        &mut it,
-        ITERATOR_CLASS,
-        &[
-            (&II_CONSTRUCT, member_flags::PRIVATE | fn_flags::CTOR),
-            (&II_CURRENT, PUB),
-            (&II_KEY, PUB),
-            (&II_NEXT, PUB),
-            (&II_VALID, PUB),
-            (&II_REWIND, PUB),
-        ],
-    );
-    let ce = if r.find_class(ITERATOR_CLASS).is_some() {
-        it.flags |= class_flags::INTERNAL;
-        it.link_magic_methods();
-        std::rc::Rc::new(it)
-    } else {
-        r.class(it)
-    };
-    r.vm.ext_data::<IteratorClass>().0 = Some(ce);
+    // InternalIterator (Zend/zend_interfaces.c), shared with SPL.
+    internal_iterator::register(r);
 }
