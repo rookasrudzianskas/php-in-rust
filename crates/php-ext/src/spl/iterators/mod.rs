@@ -1,11 +1,48 @@
 //! ext/spl/spl_iterators.c — the iterator interfaces (`RecursiveIterator`,
 //! `OuterIterator`, `SeekableIterator`), the iterator classes and
 //! `iterator_to_array()`, `iterator_count()`, `iterator_apply()`.
+//!
+//! * [`dual`] — `spl_dual_it`: `IteratorIterator`, `FilterIterator`,
+//!   `RecursiveFilterIterator`, `ParentIterator`, `CallbackFilterIterator`,
+//!   `RecursiveCallbackFilterIterator`, `NoRewindIterator`,
+//!   `InfiniteIterator`; [`limit`] (`LimitIterator`), [`caching`]
+//!   (`CachingIterator`, `RecursiveCachingIterator`), [`append`]
+//!   (`AppendIterator`), [`regex`] (`RegexIterator`,
+//!   `RecursiveRegexIterator`).
+//! * [`recursive`] — `RecursiveIteratorIterator`, `RecursiveTreeIterator`.
+//! * [`empty`] — `EmptyIterator`.
+//! * [`inner`] — the inner-iterator plumbing (`zend_user_iterator`).
+//!
+//! # Interpreter contract
+//! * Every class's state is created by its `create_object` handler (user
+//!   subclasses inherit it); `clone` is forbidden (`clone_obj` handler).
+//! * `foreach` reaches these objects through their `Iterator` methods.
+//!   Before iterating a `RecursiveIteratorIterator`, call
+//!   [`recursive::recursive_it_check_foreach`].
+//! * Unknown methods are forwarded to the inner iterator: see
+//!   [`dual::dual_it_forward_target`] and
+//!   [`recursive::recursive_it_forward_target`] (the latter must also be
+//!   consulted before *every* method call on a `RecursiveIteratorIterator`
+//!   for its "wasn't initialized properly" error).
+//! * `CachingIterator`'s `ArrayAccess`, `Countable` and `Stringable`
+//!   behaviour comes from the standard handlers calling its methods.
 
 use php_runtime::value::convert::OffsetKind;
 use php_runtime::{Args, NativeFunction, PResult, PhpArray, Registry, Value, Vm};
 
 use super::engine::{abstract_method, interface, iterator_apply};
+
+pub mod append;
+pub mod caching;
+pub mod dual;
+pub mod empty;
+pub mod inner;
+pub mod limit;
+pub mod recursive;
+pub mod regex;
+
+#[cfg(test)]
+mod tests;
 
 pub const RECURSIVE_ITERATOR: &str = "RecursiveIterator";
 pub const OUTER_ITERATOR: &str = "OuterIterator";
@@ -134,5 +171,16 @@ pub static ITERATOR_TO_ARRAY: NativeFunction = NativeFunction {
 /// `PHP_MINIT_FUNCTION(spl_iterators)` plus the functions of the file.
 pub fn register(r: &mut Registry) {
     register_interfaces(r);
+    recursive::register_recursive_iterator_iterator(r);
+    dual::register_iterator_iterator(r);
+    dual::register_filter_iterators(r);
+    limit::register(r);
+    caching::register(r);
+    dual::register_no_rewind_iterator(r);
+    append::register(r);
+    dual::register_infinite_iterator(r);
+    regex::register(r);
+    empty::register(r);
+    recursive::register_recursive_tree_iterator(r);
     r.functions(&[&ITERATOR_APPLY, &ITERATOR_COUNT, &ITERATOR_TO_ARRAY]);
 }
