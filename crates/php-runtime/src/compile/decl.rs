@@ -2021,13 +2021,12 @@ impl Lowerer<'_> {
                 let body = match &h.body {
                     ast::HookBody::Block(b) => self.block(b)?,
                     ast::HookBody::Expr(e) => {
-                        let x = self.expr(e)?;
                         if kind == HookKind::Get {
-                            vec![Stmt {
-                                kind: StmtKind::Return(Some(x)),
-                                line: e.line,
-                            }]
+                            self.line = e.line;
+                            let r = self.return_stmt(Some(e))?;
+                            vec![Stmt { kind: r, line: e.line }]
                         } else {
+                            let x = self.expr(e)?;
                             // `set => expr` assigns the backing value.
                             vec![Stmt {
                                 kind: StmtKind::Expr(Expr::Assign(

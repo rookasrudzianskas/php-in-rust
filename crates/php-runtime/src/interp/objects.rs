@@ -1192,6 +1192,78 @@ pub(crate) fn incdec_prop(vm: &mut Vm, cx: &Ctx, obj: &ObjRef, name: &PhpStr, in
     Ok(if post { old } else { new })
 }
 
+/// `parent::$prop::get()` / `parent::$prop::set()`
+/// (`ZEND_INIT_PARENT_PROPERTY_HOOK_CALL`): calls the parent's hook, or the
+/// trampoline accessing the backing value (`zend_parent_hook_*_trampoline`).
+pub(crate) fn parent_hook_call(vm: &mut Vm, cx: &Ctx, s: &crate::compile::ir::StaticCallExpr, pseudo: &PhpStr) -> PResult<Value> {
+    vm.current_line = s.line;
+    let is_get = pseudo.ends_with(b"::get");
+    let prop = PhpStr::from_bytes(&pseudo[1..pseudo.len() - 5]);
+    let scope = cx.scope().cloned();
+    let Some(parent) = scope.as_ref().and_then(|c| c.parent.clone()) else {
+        return Err(vm.throw_error("Error", "Cannot use \"parent\" when current class scope has no parent"));
+    };
+    let Some(info) = parent.properties.get(&prop).cloned() else {
+        return Err(vm.throw_error(
+            "Error",
+            format!("Undefined property {}::${}", display_class_name(&parent.name), prop),
+        ));
+    };
+    if info.flags & member_flags::PRIVATE != 0 {
+        return Err(vm.throw_error(
+            "Error",
+            format!("Cannot access private property {}::${}", display_class_name(&parent.name), prop),
+        ));
+    }
+    let Some(this) = cx.env.this.clone() else {
+        return Err(vm.throw_error("Error", "Using $this when not in object context"));
+    };
+    let hook = prop_hooks(&info).and_then(|h| if is_get { h.get.clone() } else { h.set.clone() });
+    let caller = super::call::Caller {
+        strict: cx.strict(),
+        site: Some((vm.current_file.clone(), s.line)),
+    };
+    if let Some(f) = hook {
+        let b = super::call::eval_args(vm, cx, &s.args, Some(&f))?;
+        vm.current_line = s.line;
+        return super::call::invoke(vm, &f, b, Some(this.clone()), Some(this.class().clone()), None, &caller, false);
+    }
+    // The trampoline: an internal function `P::$prop::get` / `::set` whose
+    // scope is the declaring class of the parent property.
+    let b = super::call::eval_args(vm, cx, &s.args, None)?;
+    vm.current_line = s.line;
+    let decl = vm.find_class(&info.declaring_class).unwrap_or_else(|| parent.clone());
+    let fname = format!("{}::{}", display_class_name(&info.declaring_class), pseudo);
+    let mut args = b.positional;
+    for (n, v) in b.named {
+        if !is_get && n.as_bytes() == b"value" {
+            if !args.is_empty() {
+                return Err(vm.throw_error("Error", "Named parameter $value overwrites previous argument"));
+            }
+            args.push(v);
+        } else {
+            return Err(vm.throw_error("Error", format!("Unknown named parameter ${n}")));
+        }
+    }
+    let want = if is_get { 0 } else { 1 };
+    if args.len() != want {
+        return Err(vm.throw_error(
+            "ArgumentCountError",
+            format!(
+                "{fname}() expects exactly {want} argument{}, {} given",
+                if want == 1 { "" } else { "s" },
+                args.len()
+            ),
+        ));
+    }
+    if is_get {
+        Ok(read_property(vm, Some(&decl), &this, &prop, Fetch::R)?.into_unref())
+    } else {
+        let v = args.pop().unwrap_or_default().into_unref();
+        write_prop(vm, Some(&decl), &this, &prop, v, cx.strict())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // isset / unset
 // ---------------------------------------------------------------------------

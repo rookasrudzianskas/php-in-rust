@@ -1207,6 +1207,11 @@ pub fn eval_method_call(vm: &mut Vm, cx: &Ctx, m: &MethodCallExpr) -> PResult<Va
 
 /// `A::m(...)`.
 pub fn eval_static_call(vm: &mut Vm, cx: &Ctx, s: &StaticCallExpr) -> PResult<Value> {
+    if let Member::Name(n) = &s.name {
+        if n.first() == Some(&b'$') {
+            return super::objects::parent_hook_call(vm, cx, s, n);
+        }
+    }
     let class = eval::resolve_class(vm, cx, &s.class, s.line)?;
     let name = match &s.name {
         Member::Name(n) => n.clone(),
