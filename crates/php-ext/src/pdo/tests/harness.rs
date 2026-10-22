@@ -56,7 +56,13 @@ pub fn expect_section(src: &str) -> (bool, String) {
     }
     let mut out = out.expect("phpt has an EXPECT section");
     for l in lines {
-        if l.starts_with("--") && l.ends_with("--") && l.len() > 4 && l[2..l.len() - 2].chars().all(|c| c.is_ascii_uppercase() || c == '_') {
+        if l.starts_with("--")
+            && l.ends_with("--")
+            && l.len() > 4
+            && l[2..l.len() - 2]
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c == '_')
+        {
             break;
         }
         out.push_str(l);
@@ -92,7 +98,11 @@ pub fn expectf_match(pat: &[u8], s: &[u8]) -> bool {
             }
             _ => return !s.is_empty() && s[0] == pat[0] && expectf_match(&pat[1..], &s[1..]),
         };
-        let min = if matches!(pat[1], b'S' | b'A' | b'w') { 0 } else { 1 };
+        let min = if matches!(pat[1], b'S' | b'A' | b'w') {
+            0
+        } else {
+            1
+        };
         let mut n = 0;
         while n < s.len() && class(s[n]) {
             n += 1;
@@ -127,7 +137,11 @@ impl P {
 
     /// `new $class(...$args)`.
     pub fn try_new(&mut self, class: &str, args: Vec<Value>) -> PResult<ObjRef> {
-        let ce = self.t.vm.find_class(class).unwrap_or_else(|| panic!("class {class}"));
+        let ce = self
+            .t
+            .vm
+            .find_class(class)
+            .unwrap_or_else(|| panic!("class {class}"));
         let obj = self.t.vm.instantiate(&ce)?;
         if ce.find_method(b"__construct").is_some() {
             self.t.vm.call_method(&obj, b"__construct", args)?;
@@ -177,7 +191,11 @@ impl P {
         self.m(&db, "setAttribute", vec![i(ATTR_ERRMODE), i(0)]);
         self.m(&db, "setAttribute", vec![i(ATTR_ERRMODE), i(1)]);
         self.m(&db, "setAttribute", vec![i(ATTR_CASE), i(2)]);
-        self.m(&db, "setAttribute", vec![i(ATTR_STRINGIFY_FETCHES), Value::Bool(true)]);
+        self.m(
+            &db,
+            "setAttribute",
+            vec![i(ATTR_STRINGIFY_FETCHES), Value::Bool(true)],
+        );
         db
     }
 
@@ -268,7 +286,8 @@ pub fn var_dump_into(vm: &mut Vm, out: &mut Vec<u8>, v: &Value, level: usize) {
             if let Some(debug) = class.handlers.get_debug_info {
                 if let Ok(Some(props)) = debug(vm, o, php_runtime::class::PropPurpose::Debug) {
                     out.extend_from_slice(
-                        format!("object({})#{} ({}) {{\n", class.name, o.id(), props.len()).as_bytes(),
+                        format!("object({})#{} ({}) {{\n", class.name, o.id(), props.len())
+                            .as_bytes(),
                     );
                     for (k, v) in props.iter() {
                         dump_key(out, &k, level, None);
@@ -374,16 +393,6 @@ pub static ECHO_CTOR_NAME: NativeFunction = NativeFunction {
     sig: "public function __construct($name = 'N/A')",
     handler: echo_ctor,
 };
-/// `function __construct(string $str)`.
-pub static ECHO_CTOR_STR: NativeFunction = NativeFunction {
-    sig: "public function __construct(string $str)",
-    handler: echo_ctor,
-};
-/// `function __construct(string $a, string $b)`.
-pub static ECHO_CTOR_AB: NativeFunction = NativeFunction {
-    sig: "public function __construct(string $a, string $b)",
-    handler: echo_ctor,
-};
 /// `function __construct() {}`.
 pub static EMPTY_CTOR: NativeFunction = NativeFunction {
     sig: "public function __construct()",
@@ -418,6 +427,62 @@ pub fn user_class(
     let rc = Rc::new(ce);
     vm.register_class(rc.clone());
     rc
+}
+
+/// A property of [`user_class_ex`]: name, visibility, type.
+pub type PropSpec<'a> = (&'a str, u32, Option<&'a str>);
+
+/// Like [`user_class`] with class flags, typed properties and any number of
+/// native methods (`(function, flags)`).
+pub fn user_class_ex(
+    vm: &mut Vm,
+    name: &str,
+    parent: Option<&str>,
+    flags: u32,
+    props: &[PropSpec<'_>],
+    methods: &[(&'static NativeFunction, u32)],
+) -> ClassRef {
+    let mut ce = match parent {
+        Some(p) => {
+            let parent = vm.find_class(p).expect("parent class");
+            ClassEntry::new_subclass(name, flags, &parent)
+        }
+        None => ClassEntry::new(name, flags),
+    };
+    for (p, vis, ty) in props {
+        let mut info = PropertyInfo::new(*p, name, *vis);
+        match ty {
+            Some(t) => {
+                info.ty = Some(php_runtime::types::TypeDecl::parse(t).expect("type"));
+                info.default = Value::Undef;
+            }
+            None => info.default = Value::Null,
+        }
+        ce.declare_property(info);
+    }
+    for (nf, f) in methods {
+        ce.add_method(Function::native_method(nf, name, *f));
+    }
+    ce.link_magic_methods();
+    let rc = Rc::new(ce);
+    vm.register_class(rc.clone());
+    rc
+}
+
+/// Registers a test function (a stand-in for a userland function).
+pub fn user_function(vm: &mut Vm, nf: &'static NativeFunction) {
+    vm.register_function(Rc::new(Function::native(nf)));
+}
+
+/// `var_export($v, true)` for scalars.
+pub fn export(v: &Value) -> String {
+    match v.unref() {
+        Value::Int(n) => n.to_string(),
+        Value::String(s) => format!("'{}'", s.to_string_lossy()),
+        Value::Null => "NULL".into(),
+        Value::Bool(b) => b.to_string(),
+        other => format!("{other:?}"),
+    }
 }
 
 pub const PUBLIC: u32 = member_flags::PUBLIC;

@@ -9,7 +9,7 @@
 
 use php_runtime::class::{class_flags, member_flags};
 use php_runtime::types::CoerceMode;
-use php_runtime::{ClassRef, ObjRef, PResult, PhpStr, Value, Vm};
+use php_runtime::{ArrayKey, ClassRef, ObjRef, PResult, PhpArray, PhpStr, Value, Vm};
 
 /// `zend_check_protected`: `a` and `b` are related by inheritance.
 fn related(a: &ClassRef, b_name: &[u8], vm: &Vm) -> bool {
@@ -119,18 +119,41 @@ pub fn update_property(
         return Ok(());
     }
     if dynamic {
-        if class.has_flag(class_flags::READONLY) {
-            return Err(vm.throw_error(
-                "Error",
-                format!("Cannot create dynamic property {}::${}", class.name, name),
-            ));
+        let key = ArrayKey::Str(name.clone());
+        let exists = obj
+            .obj()
+            .dyn_props
+            .borrow()
+            .as_ref()
+            .is_some_and(|d| d.contains_key(&key));
+        if !exists {
+            if class.has_flag(class_flags::READONLY) {
+                return Err(vm.throw_error(
+                    "Error",
+                    format!("Cannot create dynamic property {}::${}", class.name, name),
+                ));
+            }
+            if !class.has_flag(class_flags::ALLOW_DYNAMIC_PROPERTIES) {
+                vm.engine_deprecated(format!(
+                    "Creation of dynamic property {}::${} is deprecated",
+                    class.name, name
+                ))?;
+            }
         }
-        if !class.has_flag(class_flags::ALLOW_DYNAMIC_PROPERTIES) {
-            vm.engine_deprecated(format!(
-                "Creation of dynamic property {}::${} is deprecated",
-                class.name, name
-            ))?;
+        // Written to the dynamic table even when an invisible private
+        // property of a parent class has the same name.
+        let mut d = obj.obj().dyn_props.borrow_mut();
+        let table = d.get_or_insert_with(PhpArray::new);
+        match table.get_mut(&key) {
+            Some(Value::Ref(r)) => {
+                r.set(value);
+            }
+            Some(slot) => *slot = value.into_unref(),
+            None => {
+                table.insert(key, value.into_unref());
+            }
         }
+        return Ok(());
     }
     obj.set_prop(name, value);
     Ok(())
