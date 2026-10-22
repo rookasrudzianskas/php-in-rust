@@ -362,7 +362,7 @@ fn get_class_vars(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
     let mut out = PhpArray::new();
     for statics in [false, true] {
         for info in class.properties.values() {
-            if info.is_static() != statics {
+            if info.is_static() != statics || info.flags & member_flags::VIRTUAL != 0 {
                 continue;
             }
             if !prop_visible(vm, info, scope.as_ref()) {
