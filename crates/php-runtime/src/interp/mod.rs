@@ -26,6 +26,7 @@ pub mod exec;
 pub mod fiber;
 pub mod generator;
 pub mod include;
+pub mod internal_iterator;
 pub mod objects;
 pub mod place;
 pub mod var;

@@ -209,22 +209,7 @@ fn wm_count_m(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
 
 fn wm_get_iterator(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
     let o = a.this().cloned().expect("this");
-    // Materialise as a generator-like array iterator: [key objects, values].
-    let pairs: Vec<(ObjRef, Value)> = {
-        let mut m = map_of(&o);
-        m.purge();
-        m.entries.iter().filter_map(|(w, _, v)| w.upgrade().map(|k| (k, v.unref()))).collect()
-    };
-    let class = vm.find_class(b"InternalIterator").or_else(|| vm.find_class(b"ArrayIterator"));
-    let _ = class;
-    let mut arr = PhpArray::new();
-    for (k, v) in pairs {
-        let mut pair = PhpArray::new();
-        let _ = pair.append(Value::Object(k));
-        let _ = pair.append(v);
-        let _ = arr.append(Value::array(pair));
-    }
-    Ok(Value::array(arr))
+    vm.create_internal_iterator(&o)
 }
 
 fn wm_debug_info(vm: &mut Vm, o: &ObjRef, _p: crate::class::PropPurpose) -> PResult<Option<PhpArray>> {
@@ -236,7 +221,7 @@ fn wm_debug_info(vm: &mut Vm, o: &ObjRef, _p: crate::class::PropPurpose) -> PRes
         if let Some(k) = w.upgrade() {
             let mut e = PhpArray::new();
             e.insert_str("key", Value::Object(k));
-            e.insert_str("value", v.unref());
+            e.insert_str("value", v.clone());
             let _ = out.append(Value::array(e));
         }
     }
@@ -265,10 +250,10 @@ impl crate::class::InternalIterator for WeakMapIter {
         Ok(self.pos < self.pairs.len())
     }
     fn current(&mut self, _vm: &mut Vm) -> PResult<Value> {
-        Ok(self.pairs[self.pos].1.clone())
+        Ok(self.pairs.get(self.pos).map_or(Value::Null, |p| p.1.clone()))
     }
     fn key(&mut self, _vm: &mut Vm) -> PResult<Value> {
-        Ok(Value::Object(self.pairs[self.pos].0.clone()))
+        Ok(self.pairs.get(self.pos).map_or(Value::Null, |p| Value::Object(p.0.clone())))
     }
     fn next(&mut self, _vm: &mut Vm) -> PResult<()> {
         self.pos += 1;
@@ -276,11 +261,26 @@ impl crate::class::InternalIterator for WeakMapIter {
     }
 }
 
-fn wm_iterator(_vm: &mut Vm, o: &ObjRef, _by_ref: bool) -> PResult<Rc<dyn std::any::Any>> {
+fn wm_iterator(_vm: &mut Vm, o: &ObjRef, by_ref: bool) -> PResult<Rc<dyn std::any::Any>> {
+    // By-reference iteration turns the stored values into references.
     let pairs: Vec<(ObjRef, Value)> = {
         let mut m = map_of(o);
         m.purge();
-        m.entries.iter().filter_map(|(w, _, v)| w.upgrade().map(|k| (k, v.unref()))).collect()
+        m.entries
+            .iter_mut()
+            .filter_map(|(w, _, v)| {
+                w.upgrade().map(|k| {
+                    if by_ref {
+                        if !matches!(v, Value::Ref(_)) {
+                            *v = Value::Ref(crate::value::PhpRef::new(std::mem::take(v)));
+                        }
+                        (k, v.clone())
+                    } else {
+                        (k, v.unref())
+                    }
+                })
+            })
+            .collect()
     };
     let it: Box<dyn crate::class::InternalIterator> = Box::new(WeakMapIter { pairs, pos: 0 });
     Ok(Rc::new(RefCell::new(it)))

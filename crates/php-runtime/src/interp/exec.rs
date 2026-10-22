@@ -555,6 +555,24 @@ pub fn iterate_object(
     iterate_object_ex(vm, o, by_ref, scope.as_ref(), true, f)
 }
 
+/// Whether a user class replaced the iteration methods of the internal
+/// class whose `get_iterator` handler it inherited.
+fn overrides_iteration(class: &crate::class::ClassRef) -> bool {
+    let user = |name: &[u8]| {
+        class
+            .methods
+            .get(name)
+            .is_some_and(|m| super::user_fn(m).is_some())
+    };
+    if class.instance_of_name(b"Iterator") {
+        [b"rewind".as_slice(), b"valid", b"key", b"current", b"next"]
+            .iter()
+            .any(|n| user(n))
+    } else {
+        user(b"getiterator")
+    }
+}
+
 fn iterate_object_ex(
     vm: &mut Vm,
     o: &ObjRef,
@@ -566,6 +584,29 @@ fn iterate_object_ex(
     let class = o.class().clone();
     if super::generator::is_generator(o) {
         return super::generator::iterate(vm, o, by_ref, f);
+    }
+    // ce->get_iterator: an internal class's native iterator, kept by
+    // subclasses unless they override the iteration methods
+    // (zend_implement_iterator / zend_implement_aggregate).
+    if let Some(gi) = class.handlers.get_iterator {
+        if !overrides_iteration(&class) {
+            let it = gi(vm, o, by_ref)?;
+            if let Some(cell) = it.downcast_ref::<super::internal_iterator::IteratorCell>() {
+                cell.borrow_mut().rewind(vm)?;
+                loop {
+                    if !cell.borrow_mut().valid(vm)? {
+                        break;
+                    }
+                    let v = cell.borrow_mut().current(vm)?;
+                    let k = if want_key { cell.borrow_mut().key(vm)? } else { Value::Null };
+                    if !f(vm, k, v)? {
+                        return Ok(());
+                    }
+                    cell.borrow_mut().next(vm)?;
+                }
+                return Ok(());
+            }
+        }
     }
     if class.instance_of_name(b"Iterator") {
         if by_ref {
@@ -604,24 +645,6 @@ fn iterate_object_ex(
                 ),
             )),
         };
-    }
-    if let Some(gi) = class.handlers.get_iterator {
-        let it = gi(vm, o, by_ref)?;
-        if let Some(cell) = it.downcast_ref::<std::cell::RefCell<Box<dyn crate::class::InternalIterator>>>() {
-            cell.borrow_mut().rewind(vm)?;
-            loop {
-                if !cell.borrow_mut().valid(vm)? {
-                    break;
-                }
-                let v = cell.borrow_mut().current(vm)?;
-                let k = if want_key { cell.borrow_mut().key(vm)? } else { Value::Null };
-                if !f(vm, k, v)? {
-                    return Ok(());
-                }
-                cell.borrow_mut().next(vm)?;
-            }
-            return Ok(());
-        }
     }
     // Plain object: visible properties.
     let names: Vec<(PhpStr, bool)> = {
