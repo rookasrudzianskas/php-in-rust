@@ -85,18 +85,20 @@ mod creds {
     }
 
     unsafe extern "C" {
-        safe fn getuid() -> u32;
-        safe fn getgid() -> u32;
+        fn getuid() -> u32;
+        fn getgid() -> u32;
         fn getgroups(size: c_int, list: *mut u32) -> c_int;
         fn utime(path: *const c_char, times: *const UtimBuf) -> c_int;
     }
 
     pub fn uid() -> u32 {
-        getuid()
+        // SAFETY: getuid() takes no arguments and cannot fail.
+        unsafe { getuid() }
     }
 
     pub fn gid() -> u32 {
-        getgid()
+        // SAFETY: getgid() takes no arguments and cannot fail.
+        unsafe { getgid() }
     }
 
     /// The supplementary group IDs (`getgroups`).

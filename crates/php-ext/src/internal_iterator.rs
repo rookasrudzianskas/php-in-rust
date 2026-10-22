@@ -8,9 +8,10 @@
 //! (`Rc`) and re-entered from PHP code.
 //!
 //! `InternalIterator` wraps such an iterator in a PHP object
-//! ([`create_internal_iterator`]); `SplFixedArray::getIterator()` returns
-//! one. The class belongs to Core; it is registered here (owned by "Core")
-//! only when the runtime does not provide it yet.
+//! ([`create_internal_iterator`]); `SplFixedArray::getIterator()` and
+//! `DatePeriod::getIterator()` return one. The class belongs to Core; every
+//! extension that needs it calls [`register`], which registers it once
+//! (owned by "Core") unless the runtime already provides it.
 
 use std::cell::Cell;
 use std::rc::Rc;

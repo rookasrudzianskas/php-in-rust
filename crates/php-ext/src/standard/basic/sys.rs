@@ -121,6 +121,14 @@ mod ffi {
         pub domainname: [c_char; UTS_LEN],
     }
 
+    /// `mode_t`: 16 bits on macOS, 32 bits on Linux.
+    #[cfg(target_os = "macos")]
+    #[allow(non_camel_case_types)]
+    pub type mode_t = u16;
+    #[cfg(not(target_os = "macos"))]
+    #[allow(non_camel_case_types)]
+    pub type mode_t = u32;
+
     unsafe extern "C" {
         pub fn clock_gettime(clk_id: c_int, tp: *mut timespec) -> c_int;
         pub fn getuid() -> u32;
@@ -140,7 +148,7 @@ mod ffi {
         pub fn closelog();
         pub fn syslog(priority: c_int, format: *const c_char, ...);
         pub fn strptime(s: *const c_char, format: *const c_char, tm: *mut tm) -> *mut c_char;
-        pub fn umask(mask: u32) -> u32;
+        pub fn umask(mask: mode_t) -> mode_t;
         pub fn getpwuid(uid: u32) -> *mut *mut c_char;
     }
 
@@ -274,7 +282,7 @@ pub fn current_umask() -> u32 {
         unsafe {
             let old = ffi::umask(0o022);
             ffi::umask(old);
-            old
+            u32::from(old)
         }
     }
     #[cfg(not(unix))]

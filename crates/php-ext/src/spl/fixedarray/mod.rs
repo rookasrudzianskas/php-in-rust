@@ -44,7 +44,7 @@
 //! `spl_fixedarray_get_iterator`): the interpreter can call
 //! [`get_iterator`] with `by_ref = true` to get that error.
 
-pub mod internal_iterator;
+pub use crate::internal_iterator;
 pub mod support;
 
 #[cfg(test)]
