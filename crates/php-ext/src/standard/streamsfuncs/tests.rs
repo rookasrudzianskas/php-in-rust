@@ -596,3 +596,83 @@ fn socket_pair_fread() {
     );
     assert_eq!(t.call("fclose", vec![x]).unwrap().as_bool(), Some(true));
 }
+
+#[test]
+fn context_param_errors() {
+    // stream_context_create_error.phpt, stream_context_set_params_notification_error.phpt
+    let mut t = TestVm::new();
+    let mut ssl = PhpArray::new();
+    ssl.insert_str("verify_peer", false);
+    let mut opts = PhpArray::new();
+    opts.insert_str("ssl", Value::from(ssl));
+    let mut bad = PhpArray::new();
+    bad.insert_str("ssl", "abc");
+    let mut params = PhpArray::new();
+    params.insert_str("options", Value::from(bad.clone()));
+    let (cls, msg) = thrown(t.call(
+        "stream_context_create",
+        vec![Value::from(opts.clone()), Value::from(params)],
+    ));
+    assert_eq!(cls, "ValueError");
+    assert_eq!(
+        msg,
+        "Options should have the form [\"wrappername\"][\"optionname\"] = $value"
+    );
+    let mut params = PhpArray::new();
+    params.insert_str("options", false);
+    let (cls, msg) = thrown(t.call(
+        "stream_context_create",
+        vec![Value::from(opts), Value::from(params)],
+    ));
+    assert_eq!(
+        (cls.as_str(), msg.as_str()),
+        ("TypeError", "Invalid stream/context parameter")
+    );
+    let ctx = t.call("stream_context_create", vec![]).unwrap();
+    let mut p = PhpArray::new();
+    p.insert_str("notification", "fn_not_exist");
+    let (cls, msg) = thrown(t.call("stream_context_set_params", vec![ctx, Value::from(p)]));
+    assert_eq!(cls, "TypeError");
+    assert_eq!(
+        msg,
+        "stream_context_set_params(): Argument #1 ($context) must be an array with valid callbacks as values, function \"fn_not_exist\" not found or invalid function name"
+    );
+}
+
+#[test]
+fn timeout_on_closed_and_plain_streams() {
+    // stream_set_timeout_error.phpt
+    let mut t = TestVm::new();
+    let srv = t
+        .call("stream_socket_server", vec![s("tcp://127.0.0.1:0")])
+        .unwrap();
+    let name = bytes(
+        &t.call(
+            "stream_socket_get_name",
+            vec![srv.clone(), Value::Bool(false)],
+        )
+        .unwrap(),
+    );
+    let client = t
+        .call(
+            "fsockopen",
+            vec![Value::from(format!(
+                "tcp://{}",
+                String::from_utf8_lossy(&name)
+            ))],
+        )
+        .unwrap();
+    assert_eq!(
+        t.call("stream_set_timeout", vec![client.clone(), Value::Int(10)])
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+    t.call("fclose", vec![client.clone()]).unwrap();
+    let (cls, msg) = thrown(t.call("stream_set_timeout", vec![client, Value::Int(10)]));
+    assert_eq!(cls, "TypeError");
+    assert_eq!(
+        msg,
+        "stream_set_timeout(): Argument #1 ($stream) must be an open stream resource"
+    );
+}
