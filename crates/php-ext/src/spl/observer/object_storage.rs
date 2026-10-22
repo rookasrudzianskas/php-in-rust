@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use php_runtime::class::{ClassEntry, Function, fn_flags};
-use php_runtime::value::convert::{proptable_to_symtable, to_int_silent};
+use php_runtime::value::convert::proptable_to_symtable;
 use php_runtime::{Args, NativeFunction, ObjRef, PResult, PhpArray, PhpStr, Registry, Value, Vm};
 
 use super::super::engine::{self, method_flags, this};
@@ -192,12 +192,11 @@ fn sos_count(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
 }
 
 /// `count_elements`: `count($storage)`. php-src has no handler and calls
-/// `Countable::count()`; this is the same, minus the call when `count()`
-/// is not overridden.
-fn count_elements(vm: &mut Vm, obj: &ObjRef) -> PResult<Option<i64>> {
+/// `Countable::count()`; this answers directly unless `count()` is
+/// overridden, where `None` (FAILURE) makes `count()` call the override.
+fn count_elements(_vm: &mut Vm, obj: &ObjRef) -> PResult<Option<i64>> {
     if engine::is_overridden(obj.class(), b"count", SPL_OBJECT_STORAGE) {
-        let r = vm.call_method(obj, b"count", Vec::new())?;
-        return Ok(Some(to_int_silent(&r)));
+        return Ok(None);
     }
     Ok(Some(len(obj) as i64))
 }

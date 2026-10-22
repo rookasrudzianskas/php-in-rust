@@ -23,8 +23,9 @@
 //! * `compare(a, b)` — `==`/`<=>`; `1` also means "uncomparable".
 //! * `clone_obj(obj)` — returns the new object with storage and properties
 //!   copied; the interpreter then calls `__clone()`.
-//! * `count_elements(obj)` (`SplObjectStorage` only) — always `Some(n)`;
-//!   a user `count()` override is called by the handler.
+//! * `count_elements(obj)` (`SplObjectStorage` only) — `Some(n)`, or `None`
+//!   when a subclass overrides `count()`: `count()` must then call
+//!   `Countable::count()` (php_count's fallback, as `standard::array` does).
 //!
 //! `var_dump()` reaches the storage through the `__debugInfo()` methods
 //! (php-src's standard `get_debug_info` handler calls them, so user
