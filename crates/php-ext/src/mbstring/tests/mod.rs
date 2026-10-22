@@ -1,12 +1,14 @@
 //! Unit tests of the mbstring functions, with expectations taken from
 //! php-src's `ext/mbstring/tests/*.phpt`.
 
-pub mod encoding_tests;
 mod case_width;
+mod check_encoding;
+pub mod encoding_tests;
 mod functions;
 mod info;
 mod mime;
 mod numericentity;
+mod strcut;
 mod strings;
 
 use php_runtime::{PhpArray, Value};
