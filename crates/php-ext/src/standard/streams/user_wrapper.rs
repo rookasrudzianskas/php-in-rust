@@ -1376,3 +1376,1448 @@ static STREAM_WRAPPER_RESTORE: NativeFunction = NativeFunction {
     sig: "stream_wrapper_restore(string $protocol): bool",
     handler: stream_wrapper_restore,
 };
+
+#[cfg(test)]
+mod tests {
+    //! Expectations from ext/standard/tests/file/userstreams*.phpt,
+    //! userwrapper.phpt, userdirstream.phpt and streams/bug76943.phpt, driven
+    //! through internal classes whose methods are native.
+
+    use super::*;
+    use crate::standard::streams::{self as streams, wrappers::StatResult};
+    use crate::testing::{TestVm, thrown};
+    use php_runtime::Function;
+    use php_runtime::class::PropertyInfo;
+    use php_runtime::types::TypeDecl;
+    use php_runtime::vm::Frame;
+
+    // ----- helpers ---------------------------------------------------------
+
+    fn this(args: &Args) -> ObjRef {
+        args.this().cloned().expect("method called without $this")
+    }
+
+    fn sprop(o: &ObjRef, name: &str) -> Vec<u8> {
+        match o.get_prop(name.as_bytes()) {
+            Some(Value::String(s)) => s.to_vec(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn iprop(o: &ObjRef, name: &str) -> i64 {
+        o.get_prop(name.as_bytes())
+            .map_or(0, |v| php_runtime::value::convert::to_int_silent(&v))
+    }
+
+    fn has(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    fn show(v: &Value) -> String {
+        match v {
+            Value::Null => "null".into(),
+            Value::Bool(b) => b.to_string(),
+            Value::Int(i) => i.to_string(),
+            Value::String(s) => s.to_string(),
+            Value::Array(a) => {
+                let parts: Vec<String> = a.iter().map(|(_, v)| show(v)).collect();
+                format!("[{}]", parts.join(","))
+            }
+            other => other.type_name().into_owned(),
+        }
+    }
+
+    fn echo(vm: &mut Vm, line: String) -> PResult<()> {
+        vm.echo(line.as_bytes())?;
+        vm.echo(b"\n")
+    }
+
+    /// Runs `f` inside a pseudo frame of the built-in function `name`, so that
+    /// warnings read "name(): ...".
+    fn in_vm_fn<R>(vm: &mut Vm, name: &str, f: impl FnOnce(&mut Vm) -> R) -> R {
+        let site = (vm.current_file.clone(), vm.current_line);
+        vm.push_frame(Frame {
+            function: None,
+            name: PhpStr::from(name),
+            class: None,
+            call_type: None,
+            this: None,
+            call_site: Some(site),
+            args: Vec::new(),
+            is_internal: true,
+        });
+        let r = f(vm);
+        vm.pop_frame();
+        r
+    }
+
+    fn in_fn<R>(t: &mut TestVm, name: &str, f: impl FnOnce(&mut Vm) -> R) -> R {
+        in_vm_fn(&mut t.vm, name, f)
+    }
+
+    /// `fopen($path, 'r')` called from inside a user method.
+    fn nested_fopen(vm: &mut Vm, path: &[u8]) -> PResult<bool> {
+        let r = in_vm_fn(vm, "fopen", |vm| streams::open(vm, path, b"r", false, None))?;
+        Ok(r.is_some())
+    }
+
+    fn warning(func: &str, msg: &str) -> String {
+        format!("\nWarning: {func}(): {msg} in /t.php on line 3\n")
+    }
+
+    fn notice(func: &str, msg: &str) -> String {
+        format!("\nNotice: {func}(): {msg} in /t.php on line 3\n")
+    }
+
+    fn register(t: &mut TestVm, protocol: &str, class: &str) -> Value {
+        t.call(
+            "stream_wrapper_register",
+            vec![Value::from(protocol), Value::from(class)],
+        )
+        .expect("stream_wrapper_register")
+    }
+
+    fn fopen(t: &mut TestVm, path: &str, mode: &str) -> Option<ResRef> {
+        in_fn(t, "fopen", |vm| {
+            streams::open(vm, path.as_bytes(), mode.as_bytes(), false, None)
+        })
+        .expect("fopen")
+    }
+
+    fn object_of(res: &ResRef) -> ObjRef {
+        let h = handle_of(res).expect("stream");
+        let s = h.borrow();
+        match &s.wrapperdata {
+            Some(Value::Object(o)) => o.clone(),
+            other => panic!("wrapper_data is {other:?}"),
+        }
+    }
+
+    // ----- the test classes --------------------------------------------------
+
+    fn t_construct(_vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        this(args).set_prop(b"constructed", Value::Bool(true));
+        Ok(Value::Null)
+    }
+
+    fn t_open(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        let o = this(args);
+        let path = args.str(0).clone();
+        echo(vm, format!("open {path} {} {}", args.str(1), args.int(2)))?;
+        if has(&path, b"fail") {
+            return Ok(Value::Bool(false));
+        }
+        o.set_prop(b"data", Value::from("hello world"));
+        o.set_prop(b"pos", Value::Int(0));
+        if has(&path, b"opened") {
+            args.by_ref(3).set(Value::from("/real/opened"));
+        }
+        Ok(Value::Bool(true))
+    }
+
+    fn t_read(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        let o = this(args);
+        let count = args.int(0);
+        echo(vm, format!("read {count}"))?;
+        let data = sprop(&o, "data");
+        let pos = (iprop(&o, "pos") as usize).min(data.len());
+        let want = (count + iprop(&o, "extra")).max(0) as usize;
+        let end = (pos + want).min(data.len());
+        o.set_prop(b"pos", Value::Int(end as i64));
+        Ok(Value::from(&data[pos..end]))
+    }
+
+    fn t_write(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        let o = this(args);
+        let chunk = args.str(0).clone();
+        echo(vm, format!("write {}", chunk.len()))?;
+        let mut data = sprop(&o, "data");
+        data.extend_from_slice(&chunk);
+        o.set_prop(b"data", Value::from(data));
+        Ok(Value::Int(chunk.len() as i64 + iprop(&o, "extra")))
+    }
+
+    fn t_eof(_vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        let o = this(args);
+        Ok(Value::Bool(
+            iprop(&o, "pos") >= sprop(&o, "data").len() as i64,
+        ))
+    }
+
+    fn t_tell(_vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        Ok(Value::Int(iprop(&this(args), "pos")))
+    }
+
+    fn t_seek(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        let o = this(args);
+        let (offset, whence) = (args.int(0), args.int(1));
+        echo(vm, format!("seek {offset} {whence}"))?;
+        let len = sprop(&o, "data").len() as i64;
+        let pos = match whence {
+            0 => offset,
+            1 => iprop(&o, "pos") + offset,
+            _ => len + offset,
+        };
+        if pos < 0 {
+            return Ok(Value::Bool(false));
+        }
+        o.set_prop(b"pos", Value::Int(pos));
+        Ok(Value::Bool(true))
+    }
+
+    fn t_flush(vm: &mut Vm, _args: &mut Args) -> PResult<Value> {
+        echo(vm, "flush".into())?;
+        Ok(Value::Bool(true))
+    }
+
+    fn t_close(vm: &mut Vm, _args: &mut Args) -> PResult<Value> {
+        echo(vm, "close".into())?;
+        Ok(Value::Null)
+    }
+
+    fn t_stat(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        echo(vm, "stat".into())?;
+        let mut a = PhpArray::new();
+        let _ = a.append(7i64);
+        a.insert_str("size", sprop(&this(args), "data").len() as i64);
+        a.insert_str("mode", 0o100644i64);
+        Ok(Value::from(a))
+    }
+
+    fn t_lock(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        echo(vm, format!("lock {}", args.int(0)))?;
+        Ok(Value::Bool(true))
+    }
+
+    fn t_truncate(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        echo(vm, format!("truncate {}", args.int(0)))?;
+        Ok(Value::Bool(true))
+    }
+
+    fn t_set_option(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        let line = format!(
+            "set_option {} {} {}",
+            args.int(0),
+            args.int(1),
+            show(args.get(2))
+        );
+        echo(vm, line)?;
+        Ok(Value::Bool(args.int(0) != i64::from(opt::BLOCKING)))
+    }
+
+    fn t_cast(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        echo(vm, format!("cast {}", args.int(0)))?;
+        Ok(this(args).get_prop(b"cast").unwrap_or(Value::Null))
+    }
+
+    fn t_metadata(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        let line = format!(
+            "metadata {} {} {}",
+            args.str(0),
+            args.int(1),
+            show(args.get(2))
+        );
+        echo(vm, line)?;
+        Ok(Value::Bool(false))
+    }
+
+    fn t_url_stat(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        let path = args.str(0).clone();
+        echo(vm, format!("url_stat {path} {}", args.int(1)))?;
+        if has(&path, b"missing") {
+            return Ok(Value::Bool(false));
+        }
+        let mut a = PhpArray::new();
+        let _ = a.append(99i64);
+        a.insert_str("size", 42i64);
+        a.insert_str("mode", 0o040755i64);
+        a.insert_str("mtime", "123abc");
+        Ok(Value::from(a))
+    }
+
+    fn t_unlink(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        echo(vm, format!("unlink {}", args.str(0)))?;
+        Ok(Value::Bool(true))
+    }
+
+    fn t_rename(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        echo(vm, format!("rename {} {}", args.str(0), args.str(1)))?;
+        Ok(Value::Bool(true))
+    }
+
+    fn t_mkdir(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        let line = format!("mkdir {} {:o} {}", args.str(0), args.int(1), args.int(2));
+        echo(vm, line)?;
+        Ok(Value::Bool(true))
+    }
+
+    fn t_rmdir(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        echo(vm, format!("rmdir {} {}", args.str(0), args.int(1)))?;
+        // only a real `true` counts
+        Ok(Value::Int(1))
+    }
+
+    fn t_opendir(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        let path = args.str(0).clone();
+        echo(vm, format!("opendir {path} {}", args.int(1)))?;
+        let o = this(args);
+        let mut entries = PhpArray::new();
+        let _ = entries.append(".");
+        let _ = entries.append("file");
+        let _ = entries.append(Value::from(vec![b'x'; 300]));
+        let _ = entries.append(Value::from(&b"nul\0cut"[..]));
+        let _ = entries.append(Value::Null);
+        o.set_prop(b"entries", Value::from(entries));
+        o.set_prop(b"dirpos", Value::Int(0));
+        Ok(Value::Bool(!has(&path, b"fail")))
+    }
+
+    fn t_readdir(_vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        let o = this(args);
+        let pos = iprop(&o, "dirpos");
+        let next = match o.get_prop(b"entries") {
+            Some(Value::Array(a)) => a.get_int(pos).cloned(),
+            _ => None,
+        };
+        o.set_prop(b"dirpos", Value::Int(pos + 1));
+        Ok(next.unwrap_or(Value::Bool(false)))
+    }
+
+    fn t_rewinddir(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        echo(vm, "rewinddir".into())?;
+        this(args).set_prop(b"dirpos", Value::Int(0));
+        Ok(Value::Bool(true))
+    }
+
+    fn t_closedir(vm: &mut Vm, _args: &mut Args) -> PResult<Value> {
+        echo(vm, "closedir".into())?;
+        Ok(Value::Bool(true))
+    }
+
+    fn t_minimal_open(_vm: &mut Vm, _args: &mut Args) -> PResult<Value> {
+        Ok(Value::Bool(true))
+    }
+
+    fn t_bad_truncate(_vm: &mut Vm, _args: &mut Args) -> PResult<Value> {
+        Ok(Value::from("kkk"))
+    }
+
+    fn t_bad_eof(_vm: &mut Vm, _args: &mut Args) -> PResult<Value> {
+        Ok(Value::Int(1))
+    }
+
+    fn t_throwing_read(vm: &mut Vm, _args: &mut Args) -> PResult<Value> {
+        echo(vm, "stream_read".into())?;
+        Err(vm.throw_error("Exception", "Message"))
+    }
+
+    fn t_magic_call(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        let name = args.str(0).clone();
+        echo(vm, format!("__call {name} {}", args.array(1).len()))?;
+        Ok(match name.as_bytes() {
+            b"stream_open" | b"stream_eof" => Value::Bool(true),
+            b"stream_read" => Value::from("abc"),
+            _ => Value::Null,
+        })
+    }
+
+    /// `stream_open` re-opening its own path (the infinite recursion guard).
+    fn t_recursive_open(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        let path = args.str(0).clone();
+        Ok(Value::Bool(nested_fopen(vm, &path)?))
+    }
+
+    /// A local wrapper whose `stream_open` opens a URL wrapper
+    /// (include_userstream_002.phpt).
+    fn t_include_open(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+        let path = args.str(0).clone();
+        if path.starts_with(b"inc://") {
+            return Ok(Value::Bool(nested_fopen(vm, b"url://hello")?));
+        }
+        Ok(Value::Bool(true))
+    }
+
+    macro_rules! natives {
+        ($($id:ident = $sig:literal => $f:ident;)*) => {
+            $(static $id: NativeFunction = NativeFunction { sig: $sig, handler: $f };)*
+        };
+    }
+
+    natives! {
+        CONSTRUCT = "__construct()" => t_construct;
+        OPEN = "stream_open(string $path, string $mode, int $options, &$opened_path): bool" => t_open;
+        READ = "stream_read(int $count): string|false" => t_read;
+        WRITE = "stream_write(string $data): int" => t_write;
+        EOF = "stream_eof(): bool" => t_eof;
+        TELL = "stream_tell(): int" => t_tell;
+        SEEK = "stream_seek(int $offset, int $whence): bool" => t_seek;
+        FLUSH = "stream_flush(): bool" => t_flush;
+        CLOSE = "stream_close(): void" => t_close;
+        STAT = "stream_stat(): array|false" => t_stat;
+        LOCK = "stream_lock(int $operation): bool" => t_lock;
+        TRUNCATE = "stream_truncate(int $new_size): bool" => t_truncate;
+        SET_OPTION = "stream_set_option(int $option, int $arg1, ?int $arg2): bool" => t_set_option;
+        CAST = "stream_cast(int $cast_as)" => t_cast;
+        METADATA = "stream_metadata(string $path, int $option, mixed $value): bool" => t_metadata;
+        URL_STAT = "url_stat(string $path, int $flags): array|false" => t_url_stat;
+        UNLINK = "unlink(string $path): bool" => t_unlink;
+        RENAME = "rename(string $path_from, string $path_to): bool" => t_rename;
+        MKDIR = "mkdir(string $path, int $mode, int $options): bool" => t_mkdir;
+        RMDIR = "rmdir(string $path, int $options)" => t_rmdir;
+        DIR_OPEN = "dir_opendir(string $path, int $options): bool" => t_opendir;
+        DIR_READ = "dir_readdir()" => t_readdir;
+        DIR_REWIND = "dir_rewinddir(): bool" => t_rewinddir;
+        DIR_CLOSE = "dir_closedir(): bool" => t_closedir;
+        MINIMAL_OPEN = "stream_open(string $path, string $mode, int $options, &$opened_path): bool" => t_minimal_open;
+        BAD_TRUNCATE = "stream_truncate(int $new_size)" => t_bad_truncate;
+        BAD_EOF = "stream_eof()" => t_bad_eof;
+        THROWING_READ = "stream_read(int $count): string" => t_throwing_read;
+        MAGIC_CALL = "__call(string $name, array $arguments): mixed" => t_magic_call;
+        RECURSIVE_OPEN = "stream_open(string $path, string $mode, int $options, &$opened_path): bool" => t_recursive_open;
+        INCLUDE_OPEN = "stream_open(string $path, string $mode, int $options, &$opened_path): bool" => t_include_open;
+    }
+
+    const FULL: &[&NativeFunction] = &[
+        &CONSTRUCT,
+        &OPEN,
+        &READ,
+        &WRITE,
+        &EOF,
+        &TELL,
+        &SEEK,
+        &FLUSH,
+        &CLOSE,
+        &STAT,
+        &LOCK,
+        &TRUNCATE,
+        &SET_OPTION,
+        &CAST,
+        &METADATA,
+        &URL_STAT,
+        &UNLINK,
+        &RENAME,
+        &MKDIR,
+        &RMDIR,
+        &DIR_OPEN,
+        &DIR_READ,
+        &DIR_REWIND,
+        &DIR_CLOSE,
+    ];
+
+    /// Builds and registers an internal class `name` with `methods`; `context`
+    /// declares `public $context` (typed when non-empty).
+    fn class(
+        t: &mut TestVm,
+        name: &str,
+        cflags: u32,
+        context: Option<&str>,
+        methods: &[(&'static NativeFunction, u32)],
+    ) {
+        let mut ce = ClassEntry::new(name, cflags);
+        if let Some(ty) = context {
+            let mut p = PropertyInfo::new("context", name, member_flags::PUBLIC);
+            if !ty.is_empty() {
+                p.ty = Some(TypeDecl::parse(ty).expect("type"));
+                p.default = Value::Undef;
+            }
+            ce.declare_property(p);
+        }
+        for (nf, mflags) in methods {
+            ce.add_method(Function::native_method(nf, name, *mflags));
+        }
+        Registry::new(&mut t.vm, "user_wrapper_test").class(ce);
+    }
+
+    fn public(fs: &[&'static NativeFunction]) -> Vec<(&'static NativeFunction, u32)> {
+        fs.iter().map(|f| (*f, member_flags::PUBLIC)).collect()
+    }
+
+    fn setup() -> TestVm {
+        let mut t = TestVm::new();
+        class(&mut t, "TestWrapper", 0, Some(""), &public(FULL));
+        class(
+            &mut t,
+            "MinimalWrapper",
+            0,
+            Some(""),
+            &public(&[&MINIMAL_OPEN]),
+        );
+        t
+    }
+
+    // ----- registration ------------------------------------------------------
+
+    #[test]
+    fn register_unregister_and_restore() {
+        let mut t = setup();
+        assert!(matches!(
+            register(&mut t, "test", "TestWrapper"),
+            Value::Bool(true)
+        ));
+        let names = wrappers::wrapper_names(&mut t.vm);
+        assert!(names.iter().any(|n| n.as_bytes() == b"test"));
+        // the alias registers too
+        let r = t.call(
+            "stream_register_wrapper",
+            vec![
+                Value::from("test1"),
+                Value::from("testwrapper"),
+                Value::Int(PHP_STREAM_IS_URL),
+            ],
+        );
+        assert!(matches!(r, Ok(Value::Bool(true))));
+        let located = wrappers::locate_url_wrapper(&mut t.vm, b"test1://x", 0)
+            .unwrap()
+            .unwrap();
+        assert!(located.wrapper.is_url());
+        assert!(wrappers::is_user_wrapper(&located.wrapper));
+        assert_eq!(t.output(), "");
+
+        // unregistering a user wrapper releases its "stream factory" resource
+        let factory = located
+            .wrapper
+            .as_any()
+            .downcast_ref::<UserWrapper>()
+            .unwrap()
+            .resource
+            .clone();
+        assert_eq!(factory.type_name(), "stream factory");
+        drop(located);
+        let r = t.call("stream_wrapper_unregister", vec![Value::from("test1")]);
+        assert!(matches!(r, Ok(Value::Bool(true))));
+        assert!(factory.is_closed());
+
+        let r = t.call("stream_wrapper_unregister", vec![Value::from("nope")]);
+        assert!(matches!(r, Ok(Value::Bool(false))));
+        assert_eq!(
+            t.output(),
+            warning(
+                "stream_wrapper_unregister",
+                "Unable to unregister protocol nope://"
+            )
+        );
+
+        // bug76943.phpt
+        let r = t.call("stream_wrapper_restore", vec![Value::from("foo")]);
+        assert!(matches!(r, Ok(Value::Bool(false))));
+        assert_eq!(
+            t.output(),
+            warning(
+                "stream_wrapper_restore",
+                "foo:// never existed, nothing to restore"
+            )
+        );
+        let r = t.call("stream_wrapper_restore", vec![Value::from("php")]);
+        assert!(matches!(r, Ok(Value::Bool(true))));
+        assert_eq!(
+            t.output(),
+            notice(
+                "stream_wrapper_restore",
+                "php:// was never changed, nothing to restore"
+            )
+        );
+
+        // replace a built-in wrapper, then restore it
+        let r = t.call("stream_wrapper_unregister", vec![Value::from("data")]);
+        assert!(matches!(r, Ok(Value::Bool(true))));
+        assert!(matches!(
+            register(&mut t, "data", "TestWrapper"),
+            Value::Bool(true)
+        ));
+        let res = fopen(&mut t, "data://text/plain,abc", "r").unwrap();
+        assert_eq!(t.output(), "open data://text/plain,abc r 0\n");
+        streams::close(&mut t.vm, &res).unwrap();
+        assert_eq!(t.output(), "close\n");
+        let r = t.call("stream_wrapper_restore", vec![Value::from("data")]);
+        assert!(matches!(r, Ok(Value::Bool(true))));
+        let res = fopen(&mut t, "data://text/plain,abc", "r").unwrap();
+        let data = streams::read(&mut t.vm, &res, 10).unwrap().unwrap();
+        assert_eq!(data, b"abc");
+        assert_eq!(t.output(), "");
+        // merely unregistered, then restored
+        t.call("stream_wrapper_unregister", vec![Value::from("data")])
+            .unwrap();
+        let r = t.call("stream_wrapper_restore", vec![Value::from("data")]);
+        assert!(matches!(r, Ok(Value::Bool(true))));
+        assert_eq!(t.output(), "");
+    }
+
+    #[test]
+    fn registration_errors() {
+        let mut t = setup();
+        assert!(matches!(
+            register(&mut t, "file", "TestWrapper"),
+            Value::Bool(false)
+        ));
+        assert_eq!(
+            t.output(),
+            warning(
+                "stream_wrapper_register",
+                "Protocol file:// is already defined."
+            )
+        );
+        assert!(matches!(
+            register(&mut t, "test", "TestWrapper"),
+            Value::Bool(true)
+        ));
+        assert!(matches!(
+            register(&mut t, "test", "MinimalWrapper"),
+            Value::Bool(false)
+        ));
+        assert_eq!(
+            t.output(),
+            warning(
+                "stream_wrapper_register",
+                "Protocol test:// is already defined."
+            )
+        );
+        assert!(matches!(
+            register(&mut t, "te st", "TestWrapper"),
+            Value::Bool(false)
+        ));
+        assert_eq!(
+            t.output(),
+            warning(
+                "stream_wrapper_register",
+                "Invalid protocol scheme specified. Unable to register wrapper class TestWrapper to te st://"
+            )
+        );
+
+        // stream_wrapper_register_error.phpt
+        let r = t.call(
+            "stream_wrapper_register",
+            vec![Value::from("foo"), Value::from("class_not_exist")],
+        );
+        assert_eq!(
+            thrown(r),
+            (
+                "TypeError".into(),
+                "stream_wrapper_register(): Argument #2 ($class) must be a valid class name, \"class_not_exist\" given".into()
+            )
+        );
+        class(&mut t, "AbstractWrapper", class_flags::ABSTRACT, None, &[]);
+        class(
+            &mut t,
+            "WrapperInterface",
+            class_flags::INTERFACE,
+            None,
+            &[],
+        );
+        for c in ["AbstractWrapper", "WrapperInterface"] {
+            let r = t.call(
+                "stream_wrapper_register",
+                vec![Value::from("foo"), Value::from(c)],
+            );
+            assert_eq!(
+                thrown(r),
+                (
+                    "ValueError".into(),
+                    "stream_wrapper_register(): Argument #2 ($class) must be a concrete class"
+                        .into()
+                )
+            );
+        }
+        assert_eq!(t.output(), "");
+    }
+
+    // ----- stream ops --------------------------------------------------------
+
+    #[test]
+    fn read_write_seek_and_close() {
+        let mut t = setup();
+        register(&mut t, "test", "TestWrapper");
+        let res = fopen(&mut t, "test://hello", "r+").unwrap();
+        assert_eq!(res.type_name(), "stream");
+        assert_eq!(t.output(), "open test://hello r+ 0\n");
+
+        let obj = object_of(&res);
+        assert_eq!(obj.class().name.as_bytes(), b"TestWrapper");
+        assert!(matches!(
+            obj.get_prop(b"constructed"),
+            Some(Value::Bool(true))
+        ));
+        assert!(matches!(obj.get_prop(b"context"), Some(Value::Null)));
+
+        let vm = &mut t.vm;
+        assert_eq!(streams::read(vm, &res, 5).unwrap().unwrap(), b"hello");
+        assert_eq!(streams::tell(&res), Some(5));
+        // the second read drains the buffer, then asks the object again
+        assert_eq!(streams::read(vm, &res, 100).unwrap().unwrap(), b" world");
+        assert!(streams::eof(vm, &res).unwrap());
+        assert_eq!(t.output(), "read 8192\nread 8192\n");
+
+        let vm = &mut t.vm;
+        assert_eq!(streams::seek(vm, &res, 6, 0).unwrap(), 0);
+        assert_eq!(streams::tell(&res), Some(6));
+        assert!(!streams::eof(vm, &res).unwrap());
+        assert_eq!(streams::read(vm, &res, 3).unwrap().unwrap(), b"wor");
+        assert_eq!(streams::write(vm, &res, b"!!").unwrap(), Some(2));
+        assert_eq!(t.output(), "seek 6 0\nread 8192\nseek 9 0\nwrite 2\n");
+        assert!(streams::flush(&mut t.vm, &res).unwrap());
+        // nothing written since the flush: closing does not flush again
+        assert!(streams::close(&mut t.vm, &res).unwrap());
+        assert_eq!(t.output(), "flush\nclose\n");
+        assert!(res.is_closed());
+    }
+
+    #[test]
+    fn opened_path_and_options() {
+        let mut t = setup();
+        register(&mut t, "test", "TestWrapper");
+        let mut opened = None;
+        let res = in_fn(&mut t, "fopen", |vm| {
+            wrappers::open_wrapper(
+                vm,
+                b"test://opened",
+                b"rb",
+                open::REPORT_ERRORS | open::STREAM_MUST_SEEK,
+                Some(&mut opened),
+                None,
+            )
+        })
+        .unwrap();
+        assert!(res.is_some());
+        assert_eq!(opened.unwrap().as_bytes(), b"/real/opened");
+        assert_eq!(t.output(), "open test://opened rb 16\n");
+
+        // append mode asks the object where it is
+        let res = fopen(&mut t, "test://x", "a").unwrap();
+        assert_eq!(t.output(), "open test://x a 0\nseek 0 1\n");
+        assert_eq!(streams::tell(&res), Some(0));
+    }
+
+    #[test]
+    fn open_failures() {
+        let mut t = setup();
+        register(&mut t, "test", "TestWrapper");
+        class(&mut t, "EmptyWrapper", 0, Some(""), &[]);
+        register(&mut t, "empty", "EmptyWrapper");
+        assert!(fopen(&mut t, "test://fail", "r").is_none());
+        assert_eq!(
+            t.output(),
+            format!(
+                "open test://fail r 0\n{}",
+                warning(
+                    "fopen",
+                    "Failed to open stream: \"TestWrapper::stream_open\" call failed"
+                )
+            )
+        );
+        assert!(fopen(&mut t, "empty://x", "r").is_none());
+        assert_eq!(
+            t.output(),
+            warning(
+                "fopen",
+                "Failed to open stream: \"EmptyWrapper::stream_open\" is not implemented"
+            )
+        );
+        // with REPORT_ERRORS the opener reports right away
+        let r = in_fn(&mut t, "fopen", |vm| {
+            let mut op = None;
+            let w = wrappers::locate_url_wrapper(vm, b"empty://x", 0)?.unwrap();
+            w.wrapper
+                .open(vm, b"empty://x", b"r", open::REPORT_ERRORS, &mut op, None)
+        })
+        .unwrap();
+        assert!(r.is_none());
+        assert_eq!(
+            t.output(),
+            warning("fopen", "\"EmptyWrapper::stream_open\" is not implemented")
+        );
+    }
+
+    #[test]
+    fn infinite_recursion_is_prevented() {
+        let mut t = TestVm::new();
+        let methods = public(&[&RECURSIVE_OPEN]);
+        class(&mut t, "RecursiveWrapper", 0, Some(""), &methods);
+        register(&mut t, "rec", "RecursiveWrapper");
+        assert!(fopen(&mut t, "rec://loop", "r").is_none());
+        assert_eq!(
+            t.output(),
+            format!(
+                "{}{}",
+                warning(
+                    "fopen",
+                    "Failed to open stream: infinite recursion prevented"
+                ),
+                warning(
+                    "fopen",
+                    "Failed to open stream: \"RecursiveWrapper::stream_open\" call failed"
+                )
+            )
+        );
+        let g = t.vm.ext_data::<UserStreamGlobals>();
+        assert!(g.current_filename.is_none());
+    }
+
+    #[test]
+    fn local_wrapper_in_include_obeys_allow_url_include() {
+        // include_userstream_002.phpt
+        let mut t = TestVm::new();
+        let methods = public(&[&INCLUDE_OPEN]);
+        class(&mut t, "IncludeWrapper", 0, Some(""), &methods);
+        let r = t.call(
+            "stream_wrapper_register",
+            vec![
+                Value::from("url"),
+                Value::from("IncludeWrapper"),
+                Value::Int(PHP_STREAM_IS_URL),
+            ],
+        );
+        assert!(matches!(r, Ok(Value::Bool(true))));
+        register(&mut t, "inc", "IncludeWrapper");
+        let opts = open::REPORT_ERRORS | open::STREAM_OPEN_FOR_INCLUDE;
+        let r = in_fn(&mut t, "include", |vm| {
+            wrappers::open_wrapper(vm, b"inc://hello", b"rb", opts, None, None)
+        })
+        .unwrap();
+        assert!(r.is_none());
+        assert_eq!(
+            t.output(),
+            format!(
+                "{}{}{}",
+                warning(
+                    "fopen",
+                    "url:// wrapper is disabled in the server configuration by allow_url_include=0"
+                ),
+                warning(
+                    "fopen",
+                    "Failed to open stream: no suitable wrapper could be found"
+                ),
+                warning(
+                    "include",
+                    "Failed to open stream: \"IncludeWrapper::stream_open\" call failed"
+                )
+            )
+        );
+        assert!(!wrappers::globals(&mut t.vm).in_user_include);
+        // outside of include the nested URL open is fine
+        assert!(fopen(&mut t, "inc://hello", "r").is_some());
+        assert_eq!(t.output(), "");
+    }
+
+    #[test]
+    fn oversized_returns_are_clamped() {
+        let mut t = setup();
+        register(&mut t, "test", "TestWrapper");
+        let res = fopen(&mut t, "test://big", "r+").unwrap();
+        let obj = object_of(&res);
+        obj.set_prop(b"data", Value::from(vec![b'a'; 9000]));
+        obj.set_prop(b"extra", Value::Int(10));
+        t.output();
+        let data = in_fn(&mut t, "fread", |vm| streams::read(vm, &res, 8192));
+        assert_eq!(data.unwrap().unwrap().len(), 8192);
+        assert_eq!(
+            t.output(),
+            format!(
+                "read 8192\n{}",
+                warning(
+                    "fread",
+                    "TestWrapper::stream_read - read 10 bytes more data than requested (8202 read, 8192 max) - excess data will be lost"
+                )
+            )
+        );
+        let n = in_fn(&mut t, "fwrite", |vm| streams::write(vm, &res, b"xyz"));
+        assert_eq!(n.unwrap(), Some(3));
+        assert_eq!(
+            t.output(),
+            format!(
+                "write 3\n{}",
+                warning(
+                    "fwrite",
+                    "TestWrapper::stream_write wrote 10 bytes more data than requested (13 written, 3 max)"
+                )
+            )
+        );
+    }
+
+    #[test]
+    fn write_chunks_follow_the_chunk_size() {
+        // userstreams_006.phpt
+        let mut t = setup();
+        register(&mut t, "test", "TestWrapper");
+        let res = fopen(&mut t, "test://foo", "r").unwrap();
+        t.output();
+        let old = with_stream(&mut t.vm, &res, |vm, s| {
+            let mut size = OptParam::Size(50);
+            let w = s.set_option(vm, opt::WRITE_BUFFER, opt::BUFFER_FULL, &mut size)?;
+            assert_eq!(w, opt::RETURN_OK);
+            s.set_option(vm, opt::SET_CHUNK_SIZE, 42, &mut OptParam::None)
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(old, 8192);
+        let n = streams::write(&mut t.vm, &res, &[b'0'; 70]).unwrap();
+        assert_eq!(n, Some(70));
+        assert_eq!(t.output(), "set_option 3 2 50\nwrite 42\nwrite 28\n");
+    }
+
+    #[test]
+    fn set_option_mapping() {
+        let mut t = setup();
+        register(&mut t, "test", "TestWrapper");
+        let res = fopen(&mut t, "test://foo", "r").unwrap();
+        t.output();
+        let rets = with_stream(&mut t.vm, &res, |vm, s| {
+            Ok([
+                s.set_option(vm, opt::BLOCKING, 0, &mut OptParam::None)?,
+                s.set_option(vm, opt::READ_TIMEOUT, 0, &mut OptParam::Timeout(5, 10))?,
+                s.set_option(vm, opt::READ_BUFFER, opt::BUFFER_NONE, &mut OptParam::None)?,
+                s.set_option(vm, opt::META_DATA_API, 0, &mut OptParam::None)?,
+            ])
+        })
+        .unwrap()
+        .unwrap();
+        // the user's `false` for BLOCKING is an error; READ_BUFFER is not
+        // applied by the core because the wrapper handled it
+        assert_eq!(
+            rets,
+            [
+                opt::RETURN_ERR,
+                opt::RETURN_OK,
+                opt::RETURN_OK,
+                opt::RETURN_NOTIMPL
+            ]
+        );
+        assert_eq!(
+            t.output(),
+            format!("set_option 1 0 null\nset_option 4 5 10\nset_option 2 0 {BUFSIZ}\n")
+        );
+        let sflags = handle_of(&res).unwrap().borrow().st.flags;
+        assert_eq!(sflags & flags::NO_BUFFER, 0);
+    }
+
+    #[test]
+    fn lock_operations_are_mapped() {
+        // userstreams_004.phpt
+        let mut t = setup();
+        register(&mut t, "test", "TestWrapper");
+        let res = fopen(&mut t, "test://foo", "r").unwrap();
+        t.output();
+        let rets = with_stream(&mut t.vm, &res, |vm, s| {
+            Ok([
+                i32::from(s.supports_lock(vm)?),
+                s.lock(vm, sys::LOCK_SH)?,
+                s.lock(vm, sys::LOCK_EX | sys::LOCK_NB)?,
+                s.lock(vm, sys::LOCK_UN)?,
+            ])
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(rets, [1, 0, 0, 0]);
+        assert_eq!(t.output(), "lock 0\nlock 1\nlock 6\nlock 3\n");
+    }
+
+    #[test]
+    fn truncate() {
+        // userstreams_005.phpt
+        let mut t = setup();
+        let bad = [
+            (&MINIMAL_OPEN, member_flags::PUBLIC),
+            (&BAD_TRUNCATE, member_flags::PUBLIC),
+        ];
+        class(&mut t, "BadWrapper", 0, Some(""), &bad);
+        register(&mut t, "test", "TestWrapper");
+        register(&mut t, "test2", "MinimalWrapper");
+        register(&mut t, "test3", "BadWrapper");
+        let fd = fopen(&mut t, "test://foo", "r").unwrap();
+        let fd2 = fopen(&mut t, "test2://foo", "r").unwrap();
+        let fd3 = fopen(&mut t, "test3://foo", "r").unwrap();
+        t.output();
+        let supported = |t: &mut TestVm, r: &ResRef| {
+            with_stream(&mut t.vm, r, |vm, s| s.truncate_supported(vm))
+                .unwrap()
+                .unwrap()
+        };
+        assert!(!supported(&mut t, &fd2));
+        assert!(supported(&mut t, &fd));
+        let set = |t: &mut TestVm, r: &ResRef, n: i64| {
+            in_fn(t, "ftruncate", |vm| {
+                with_stream(vm, r, |vm, s| s.truncate_set_size(vm, n))
+            })
+            .unwrap()
+            .unwrap()
+        };
+        assert_eq!(set(&mut t, &fd, 0), opt::RETURN_OK);
+        assert_eq!(set(&mut t, &fd, 10), opt::RETURN_OK);
+        assert_eq!(set(&mut t, &fd, -1), opt::RETURN_ERR);
+        assert_eq!(t.output(), "truncate 0\ntruncate 10\n");
+        assert_eq!(set(&mut t, &fd3, 0), opt::RETURN_ERR);
+        assert_eq!(
+            t.output(),
+            warning(
+                "ftruncate",
+                "BadWrapper::stream_truncate value must be of type bool, string given"
+            )
+        );
+        assert_eq!(set(&mut t, &fd2, 0), opt::RETURN_ERR);
+        assert_eq!(
+            t.output(),
+            warning(
+                "ftruncate",
+                "MinimalWrapper::stream_truncate is not implemented!"
+            )
+        );
+    }
+
+    #[test]
+    fn cast_returns_the_inner_stream() {
+        // userstreams_002.phpt
+        let mut t = setup();
+        register(&mut t, "test", "TestWrapper");
+        register(&mut t, "test2", "MinimalWrapper");
+        let fd = fopen(&mut t, "test://foo", "r").unwrap();
+        let fd2 = fopen(&mut t, "test2://foo", "r").unwrap();
+        t.output();
+        let obj = object_of(&fd);
+        let cast = |t: &mut TestVm, r: &ResRef| {
+            in_fn(t, "stream_select", |vm| {
+                with_stream(vm, r, |vm, s| s.cast(vm, CastAs::FdForSelect, true))
+            })
+            .unwrap()
+            .unwrap()
+        };
+
+        let stdin = t.vm.constant("STDIN").unwrap();
+        let stdin_fd = with_stream(&mut t.vm, stdin.as_resource().unwrap(), |_, s| {
+            Ok(s.cast_fd(CastAs::FdForSelect))
+        });
+        let stdin_fd = stdin_fd.unwrap().unwrap();
+        assert!(stdin_fd.is_some());
+        obj.set_prop(b"cast", stdin);
+        assert_eq!(cast(&mut t, &fd), stdin_fd);
+        assert_eq!(t.output(), "cast 3\n");
+
+        assert_eq!(cast(&mut t, &fd2), None);
+        assert_eq!(
+            t.output(),
+            warning(
+                "stream_select",
+                "MinimalWrapper::stream_cast is not implemented!"
+            )
+        );
+        // probing does not report
+        let probe = with_stream(&mut t.vm, &fd2, |vm, s| {
+            s.cast(vm, CastAs::FdForSelect, false)
+        });
+        assert_eq!(probe.unwrap().unwrap(), None);
+        assert_eq!(t.output(), "");
+
+        obj.set_prop(b"cast", Value::Bool(false));
+        assert_eq!(cast(&mut t, &fd), None);
+        assert_eq!(t.output(), "cast 3\n");
+
+        obj.set_prop(b"cast", Value::from("foo"));
+        assert_eq!(cast(&mut t, &fd), None);
+        assert_eq!(
+            t.output(),
+            format!(
+                "cast 3\n{}",
+                warning(
+                    "stream_select",
+                    "TestWrapper::stream_cast must return a stream resource"
+                )
+            )
+        );
+
+        obj.set_prop(b"cast", Value::Resource(fd.clone()));
+        assert_eq!(cast(&mut t, &fd), None);
+        assert_eq!(
+            t.output(),
+            format!(
+                "cast 3\n{}",
+                warning(
+                    "stream_select",
+                    "TestWrapper::stream_cast must not return itself"
+                )
+            )
+        );
+
+        obj.set_prop(b"cast", Value::Resource(fd2.clone()));
+        assert_eq!(cast(&mut t, &fd), None);
+        assert_eq!(
+            t.output(),
+            format!(
+                "cast 3\n{}{}",
+                warning(
+                    "stream_select",
+                    "MinimalWrapper::stream_cast is not implemented!"
+                ),
+                warning(
+                    "stream_select",
+                    "Cannot represent a stream of type user-space as a select()able descriptor"
+                )
+            )
+        );
+        // other casts are offered as STREAM_CAST_AS_STREAM
+        obj.set_prop(b"cast", Value::Null);
+        let r = with_stream(&mut t.vm, &fd, |vm, s| s.cast(vm, CastAs::Fd, true));
+        assert_eq!(r.unwrap().unwrap(), None);
+        assert_eq!(t.output(), "cast 0\n");
+    }
+
+    #[test]
+    fn stat_and_url_stat() {
+        let mut t = setup();
+        register(&mut t, "test", "TestWrapper");
+        let res = fopen(&mut t, "test://foo", "r").unwrap();
+        t.output();
+        let sb = streams::stat(&mut t.vm, &res).unwrap().unwrap();
+        assert_eq!((sb.size, sb.mode, sb.dev), (11, 0o100644, 0));
+        assert_eq!(t.output(), "stat\n");
+
+        let quiet = wrappers::URL_STAT_QUIET;
+        let r = wrappers::stat_path(&mut t.vm, b"test://dir", quiet, None);
+        let StatResult::Ok(sb) = r.unwrap() else {
+            panic!("url_stat failed")
+        };
+        assert!(sb.is_dir());
+        assert_eq!((sb.size, sb.mtime, sb.dev), (42, 123, 0));
+        assert!(matches!(
+            wrappers::stat_path(&mut t.vm, b"test://missing", 0, None).unwrap(),
+            StatResult::Failed
+        ));
+        assert_eq!(
+            t.output(),
+            "url_stat test://dir 2\nurl_stat test://missing 0\n"
+        );
+    }
+
+    #[test]
+    fn wrapper_ops_and_metadata() {
+        // userstreams_007.phpt
+        let mut t = setup();
+        register(&mut t, "test", "TestWrapper");
+        let w = wrappers::locate_url_wrapper(&mut t.vm, b"test://x", 0)
+            .unwrap()
+            .unwrap()
+            .wrapper;
+        let vm = &mut t.vm;
+        assert!(
+            w.unlink(vm, b"test://a", open::REPORT_ERRORS, None)
+                .unwrap()
+        );
+        assert!(w.rename(vm, b"test://a", b"test://b", 0, None).unwrap());
+        let recursive = wrappers::MKDIR_RECURSIVE;
+        assert!(w.mkdir(vm, b"test://d", 0o755, recursive, None).unwrap());
+        // rmdir returns 1, not true
+        assert!(!w.rmdir(vm, b"test://d", 0, None).unwrap());
+        for v in [
+            MetaValue::Touch(None),
+            MetaValue::Touch(Some((1, 2))),
+            MetaValue::OwnerName(PhpStr::from("test")),
+            MetaValue::Owner(42),
+            MetaValue::GroupName(PhpStr::from("test")),
+            MetaValue::Group(42),
+            MetaValue::Access(0o755),
+        ] {
+            assert!(!w.metadata(vm, b"test://testdir/touch", &v, None).unwrap());
+        }
+        assert_eq!(
+            t.output(),
+            "unlink test://a\n\
+             rename test://a test://b\n\
+             mkdir test://d 755 1\n\
+             rmdir test://d 0\n\
+             metadata test://testdir/touch 1 []\n\
+             metadata test://testdir/touch 1 [1,2]\n\
+             metadata test://testdir/touch 2 test\n\
+             metadata test://testdir/touch 3 42\n\
+             metadata test://testdir/touch 4 test\n\
+             metadata test://testdir/touch 5 42\n\
+             metadata test://testdir/touch 6 493\n"
+        );
+    }
+
+    #[test]
+    fn missing_methods_warn() {
+        let mut t = setup();
+        register(&mut t, "test2", "MinimalWrapper");
+        let res = fopen(&mut t, "test2://foo", "r+").unwrap();
+        assert_eq!(t.output(), "");
+        // php_userstreamop_read fails silently
+        assert_eq!(streams::read(&mut t.vm, &res, 10).unwrap(), None);
+        assert_eq!(t.output(), "");
+        let vm = &mut t.vm;
+        assert_eq!(streams::write(vm, &res, b"abc").unwrap(), None);
+        assert!(streams::eof(vm, &res).unwrap());
+        assert_eq!(streams::stat(vm, &res).unwrap(), None);
+        let lock = with_stream(vm, &res, |vm, s| {
+            Ok((s.supports_lock(vm)?, s.lock(vm, sys::LOCK_EX)?))
+        });
+        assert_eq!(lock.unwrap().unwrap(), (true, opt::RETURN_ERR));
+        let blocking = with_stream(vm, &res, |vm, s| {
+            s.set_option(vm, opt::BLOCKING, 1, &mut OptParam::None)
+        });
+        assert_eq!(blocking.unwrap().unwrap(), opt::RETURN_ERR);
+        assert_eq!(
+            t.output(),
+            [
+                warning("main", "MinimalWrapper::stream_write is not implemented!"),
+                warning(
+                    "main",
+                    "MinimalWrapper::stream_eof is not implemented! Assuming EOF"
+                ),
+                warning("main", "MinimalWrapper::stream_stat is not implemented!"),
+                warning("main", "MinimalWrapper::stream_lock is not implemented!"),
+                warning(
+                    "main",
+                    "MinimalWrapper::stream_set_option is not implemented!"
+                ),
+            ]
+            .concat()
+        );
+        // no stream_seek: seeking gets disabled
+        assert_eq!(streams::seek(&mut t.vm, &res, 0, 0).unwrap(), -1);
+        let sflags = handle_of(&res).unwrap().borrow().st.flags;
+        assert_ne!(sflags & flags::NO_SEEK, 0);
+        assert_eq!(
+            t.output(),
+            warning("main", "Stream does not support seeking")
+        );
+        // stream_close is optional, but the failed write left the stream
+        // dirty and the final flush (no stream_flush) fails fclose()
+        assert!(!streams::close(&mut t.vm, &res).unwrap());
+        assert!(res.is_closed());
+
+        let w = wrappers::locate_url_wrapper(&mut t.vm, b"test2://x", 0)
+            .unwrap()
+            .unwrap()
+            .wrapper;
+        let vm = &mut t.vm;
+        assert!(w.url_stat(vm, b"test2://x", 0, None).unwrap().is_none());
+        assert!(!w.unlink(vm, b"test2://x", 0, None).unwrap());
+        assert!(!w.rename(vm, b"test2://x", b"test2://y", 0, None).unwrap());
+        assert!(!w.mkdir(vm, b"test2://x", 0o777, 0, None).unwrap());
+        assert!(!w.rmdir(vm, b"test2://x", 0, None).unwrap());
+        let access = MetaValue::Access(0);
+        assert!(!w.metadata(vm, b"test2://x", &access, None).unwrap());
+        assert_eq!(
+            t.output(),
+            [
+                warning("main", "MinimalWrapper::url_stat is not implemented!"),
+                warning("main", "MinimalWrapper::unlink is not implemented!"),
+                warning("main", "MinimalWrapper::rename is not implemented!"),
+                warning("main", "MinimalWrapper::mkdir is not implemented!"),
+                warning("main", "MinimalWrapper::rmdir is not implemented!"),
+                warning(
+                    "main",
+                    "MinimalWrapper::stream_metadata is not implemented!"
+                ),
+            ]
+            .concat()
+        );
+        let d = in_fn(&mut t, "opendir", |vm| {
+            wrappers::opendir(vm, b"test2://dir", open::REPORT_ERRORS, None)
+        });
+        assert!(d.unwrap().is_none());
+        assert_eq!(
+            t.output(),
+            warning(
+                "opendir",
+                "Failed to open directory: \"MinimalWrapper::dir_opendir\" is not implemented"
+            )
+        );
+    }
+
+    #[test]
+    fn eof_must_return_bool() {
+        let mut t = TestVm::new();
+        let methods = [
+            (&MINIMAL_OPEN, member_flags::PUBLIC),
+            (&BAD_EOF, member_flags::PUBLIC),
+        ];
+        class(&mut t, "BadEof", 0, Some(""), &methods);
+        register(&mut t, "test", "BadEof");
+        let res = fopen(&mut t, "test://x", "r").unwrap();
+        assert!(in_fn(&mut t, "feof", |vm| streams::eof(vm, &res)).unwrap());
+        assert_eq!(
+            t.output(),
+            warning(
+                "feof",
+                "BadEof::stream_eof value must be of type bool, int given"
+            )
+        );
+    }
+
+    #[test]
+    fn directory_streams() {
+        // userdirstream.phpt
+        let mut t = setup();
+        register(&mut t, "test", "TestWrapper");
+        let path = b"test://example.com/path/to/test.php";
+        let d = in_fn(&mut t, "opendir", |vm| {
+            wrappers::opendir(vm, path, open::REPORT_ERRORS, None)
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            t.output(),
+            "opendir test://example.com/path/to/test.php 0\n"
+        );
+        let h = handle_of(&d).unwrap();
+        assert_eq!(h.borrow().ops.label(), "user-space-dir");
+        drop(h);
+        let mut names = Vec::new();
+        while let Some(n) = with_stream(&mut t.vm, &d, |vm, s| s.readdir(vm))
+            .unwrap()
+            .unwrap()
+        {
+            names.push(n);
+        }
+        assert_eq!(
+            names,
+            vec![
+                b".".to_vec(),
+                b"file".to_vec(),
+                vec![b'x'; 255],
+                b"nul".to_vec(),
+                Vec::new()
+            ]
+        );
+        let rewound = with_stream(&mut t.vm, &d, |vm, s| s.rewind(vm));
+        assert_eq!(rewound.unwrap(), Some(0));
+        let first = with_stream(&mut t.vm, &d, |vm, s| s.readdir(vm)).unwrap();
+        assert_eq!(first, Some(Some(b".".to_vec())));
+        // directory streams are not writable
+        assert_eq!(streams::write(&mut t.vm, &d, b"x").unwrap(), None);
+        assert!(streams::close(&mut t.vm, &d).unwrap());
+        assert_eq!(
+            t.output(),
+            format!(
+                "rewinddir\n{}closedir\n",
+                notice("main", "Stream is not writable")
+            )
+        );
+
+        let failed = in_fn(&mut t, "opendir", |vm| {
+            wrappers::opendir(vm, b"test://fail", open::REPORT_ERRORS, None)
+        });
+        assert!(failed.unwrap().is_none());
+        assert_eq!(
+            t.output(),
+            format!(
+                "opendir test://fail 0\n{}",
+                warning(
+                    "opendir",
+                    "Failed to open directory: \"TestWrapper::dir_opendir\" call failed"
+                )
+            )
+        );
+    }
+
+    #[test]
+    fn implicit_close_is_deferred() {
+        let mut t = setup();
+        register(&mut t, "test", "TestWrapper");
+        let res = fopen(&mut t, "test://foo", "r+").unwrap();
+        streams::write(&mut t.vm, &res, b"x").unwrap();
+        assert_eq!(t.output(), "open test://foo r+ 0\nwrite 1\n");
+        drop(res);
+        assert_eq!(t.output(), "");
+        streams::process_deferred_closes(&mut t.vm).unwrap();
+        assert_eq!(t.output(), "flush\nclose\n");
+    }
+
+    #[test]
+    fn calls_through_magic_call() {
+        // Zend/tests/exceptions/exception_stream_wrapper.phpt (without the throw)
+        let mut t = TestVm::new();
+        class(&mut t, "Loader", 0, Some(""), &public(&[&MAGIC_CALL]));
+        register(&mut t, "abc", "Loader");
+        let res = fopen(&mut t, "abc://", "r").unwrap();
+        let data = streams::read(&mut t.vm, &res, 10).unwrap().unwrap();
+        assert_eq!(data, b"abc");
+        assert!(streams::stat(&mut t.vm, &res).unwrap().is_none());
+        assert_eq!(
+            t.output(),
+            "__call stream_open 4\n__call stream_read 1\n__call stream_eof 0\n__call stream_stat 0\n"
+        );
+        // __call makes every method callable
+        let supported = with_stream(&mut t.vm, &res, |vm, s| s.truncate_supported(vm));
+        assert!(supported.unwrap().unwrap());
+    }
+
+    #[test]
+    fn exceptions_propagate() {
+        let mut t = TestVm::new();
+        let methods = [
+            (&MINIMAL_OPEN, member_flags::PUBLIC),
+            (&THROWING_READ, member_flags::PUBLIC),
+            (&MAGIC_CALL, member_flags::PUBLIC),
+        ];
+        class(&mut t, "Thrower", 0, Some(""), &methods);
+        register(&mut t, "abc", "Thrower");
+        let res = fopen(&mut t, "abc://", "r").unwrap();
+        let r = streams::read(&mut t.vm, &res, 10);
+        let Err(php_runtime::Flow::Exception(e)) = r else {
+            panic!("expected an exception")
+        };
+        assert_eq!(e.class().name.as_bytes(), b"Exception");
+        assert_eq!(Vm::exception_message(&e), "Message");
+        // stream_eof is not asked after a failed read
+        assert_eq!(t.output(), "stream_read\n");
+    }
+
+    #[test]
+    fn private_methods_are_not_callable() {
+        let mut t = TestVm::new();
+        let methods = [(&OPEN, member_flags::PRIVATE)];
+        class(&mut t, "PrivateWrapper", 0, Some(""), &methods);
+        register(&mut t, "priv", "PrivateWrapper");
+        assert!(fopen(&mut t, "priv://x", "r").is_none());
+        assert_eq!(
+            t.output(),
+            warning(
+                "fopen",
+                "Failed to open stream: \"PrivateWrapper::stream_open\" is not implemented"
+            )
+        );
+    }
+
+    #[test]
+    fn context_property() {
+        let mut t = setup();
+        register(&mut t, "test", "TestWrapper");
+        let ctx = super::super::context::alloc();
+        let res = in_fn(&mut t, "fopen", |vm| {
+            streams::open(vm, b"test://ctx", b"r", false, Some(&ctx))
+        })
+        .unwrap()
+        .unwrap();
+        match object_of(&res).get_prop(b"context") {
+            Some(Value::Resource(r)) => assert!(ResRef::ptr_eq(&r, &ctx)),
+            other => panic!("context is {other:?}"),
+        }
+        assert_eq!(t.output(), "open test://ctx r 0\n");
+
+        // no declared property: a deprecated dynamic one
+        class(&mut t, "NoContext", 0, None, &public(&[&MINIMAL_OPEN]));
+        register(&mut t, "noctx", "NoContext");
+        assert!(fopen(&mut t, "noctx://x", "r").is_some());
+        assert_eq!(
+            t.output(),
+            "\nDeprecated: Creation of dynamic property NoContext::$context is deprecated in /t.php on line 3\n"
+        );
+
+        // user_streams_context_001.phpt
+        class(&mut t, "Typed", 0, Some("Foo"), &public(&[&MINIMAL_OPEN]));
+        register(&mut t, "typed", "Typed");
+        let r = in_fn(&mut t, "fopen", |vm| {
+            streams::open(vm, b"typed://x", b"r", false, Some(&ctx))
+        });
+        let Err(php_runtime::Flow::Exception(e)) = r else {
+            panic!("expected a TypeError")
+        };
+        assert_eq!(e.class().name.as_bytes(), b"TypeError");
+        assert_eq!(
+            Vm::exception_message(&e),
+            "Cannot assign resource to property Typed::$context of type Foo"
+        );
+        assert_eq!(t.output(), "");
+        // the recursion guard was reset on the way out
+        let g = t.vm.ext_data::<UserStreamGlobals>();
+        assert!(g.current_filename.is_none());
+    }
+}
