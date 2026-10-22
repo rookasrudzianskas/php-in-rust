@@ -27,6 +27,9 @@
 //! * `CachingIterator`'s `ArrayAccess`, `Countable` and `Stringable`
 //!   behaviour comes from the standard handlers calling its methods.
 
+// Nested `if let` mirrors the C control flow (same choice as php-runtime).
+#![allow(clippy::collapsible_if)]
+
 use php_runtime::value::convert::OffsetKind;
 use php_runtime::{Args, NativeFunction, PResult, PhpArray, Registry, Value, Vm};
 
