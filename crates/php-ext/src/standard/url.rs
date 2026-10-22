@@ -17,8 +17,8 @@ pub const PHP_URL_PATH: i64 = 5;
 pub const PHP_URL_QUERY: i64 = 6;
 pub const PHP_URL_FRAGMENT: i64 = 7;
 
-/// `http_build_query()` encodings (url.h). The PHP constants are registered
-/// by the http.c module that uses them.
+/// `http_build_query()` encodings (url.h), registered here next to `PHP_URL_*`
+/// as in php-src's `url.h`.
 pub const PHP_QUERY_RFC1738: i64 = 1;
 pub const PHP_QUERY_RFC3986: i64 = 2;
 
@@ -506,6 +506,8 @@ pub fn register(r: &mut Registry) {
     r.constant("PHP_URL_PATH", PHP_URL_PATH);
     r.constant("PHP_URL_QUERY", PHP_URL_QUERY);
     r.constant("PHP_URL_FRAGMENT", PHP_URL_FRAGMENT);
+    r.constant("PHP_QUERY_RFC1738", PHP_QUERY_RFC1738);
+    r.constant("PHP_QUERY_RFC3986", PHP_QUERY_RFC3986);
 }
 
 #[cfg(test)]

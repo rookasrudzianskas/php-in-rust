@@ -368,3 +368,36 @@ fn str_pad_and_misc_defaults() {
         b"abc\r\nd\r\n"
     );
 }
+
+/// Every function of the string-functions package resolves in a fresh VM.
+#[test]
+fn package_functions_are_registered() {
+    let t = TestVm::new();
+    let names = "bin2hex hex2bin strspn strcspn nl_langinfo strcoll trim rtrim chop ltrim wordwrap \
+        explode implode join strtok strtoupper strtolower str_increment str_decrement basename \
+        dirname pathinfo stristr strstr strchr strpos stripos strrpos strripos strrchr str_contains \
+        str_starts_with str_ends_with chunk_split substr substr_replace quotemeta ord chr ucfirst \
+        lcfirst ucwords strtr strrev similar_text addcslashes addslashes stripcslashes stripslashes \
+        str_replace str_ireplace hebrev nl2br strip_tags setlocale parse_str str_repeat count_chars \
+        localeconv substr_count str_pad sscanf str_rot13 str_word_count str_split strpbrk \
+        substr_compare utf8_encode utf8_decode htmlspecialchars htmlspecialchars_decode \
+        html_entity_decode htmlentities get_html_translation_table base64_encode base64_decode \
+        convert_uuencode convert_uudecode quoted_printable_encode quoted_printable_decode \
+        version_compare soundex levenshtein metaphone parse_url urlencode urldecode rawurlencode \
+        rawurldecode pack unpack sprintf printf vsprintf vprintf fprintf vfprintf";
+    for name in names.split_whitespace() {
+        assert!(
+            t.vm.find_function(name).is_some(),
+            "{name}() is not registered"
+        );
+    }
+    for name in [
+        "STR_PAD_LEFT",
+        "ENT_QUOTES",
+        "PHP_URL_HOST",
+        "PATHINFO_ALL",
+        "LC_ALL",
+    ] {
+        assert!(t.vm.constant(name).is_some(), "{name} is not defined");
+    }
+}
