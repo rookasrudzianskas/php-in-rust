@@ -47,14 +47,10 @@ struct Running {
     fiber: Rc<FiberObj>,
     obj: ObjRef,
     yielder: *const Yielder<(usize, FiberIn), Value>,
-    /// Generator nesting level when the fiber body started.
-    depth: usize,
 }
 
 thread_local! {
     static CURRENT: RefCell<Vec<Running>> = const { RefCell::new(Vec::new()) };
-    /// Nesting of generator coroutines (fibers cannot switch from inside one).
-    pub(crate) static GEN_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 
 fn fiber_of(o: &ObjRef) -> Option<Rc<FiberObj>> {
@@ -165,7 +161,6 @@ fn f_start(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
                 fiber: fiber_rc.clone(),
                 obj: obj2.clone(),
                 yielder: y as *const _,
-                depth: GEN_DEPTH.with(Cell::get),
             })
         });
         let r = vm.call(&callable, args);
@@ -233,23 +228,29 @@ fn f_is_terminated(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
 
 fn f_suspend(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     let v = args.get(0).clone();
-    let cur = CURRENT.with(|c| c.borrow().last().map(|r| (r.fiber.clone(), r.yielder, r.depth)));
-    let Some((fiber, yielder, depth)) = cur else {
+    let cur = CURRENT.with(|c| c.borrow().last().map(|r| (r.fiber.clone(), r.yielder)));
+    let Some((fiber, yielder)) = cur else {
         return Err(fiber_error(vm, "Cannot suspend outside of fiber"));
     };
     if fiber.destroying.get() {
         return Err(fiber_error(vm, "Cannot suspend in a force-closed fiber"));
     }
-    if GEN_DEPTH.with(Cell::get) != depth {
-        return Err(fiber_error(vm, "Cannot switch fibers in current execution context"));
-    }
     // The current fiber is no longer "current" while suspended.
     let running = CURRENT.with(|c| c.borrow_mut().pop()).expect("running fiber");
-    // SAFETY: the yielder belongs to the fiber coroutine we are running on.
+    // The fiber may be suspended from a generator running inside it: its
+    // stack (and stack limit) is the one the fiber comes back to.
+    let saved_limit = vm.interp.stack_limit.get();
+    let saved_file = vm.current_file.clone();
+    let saved_line = vm.current_line;
+    // SAFETY: the yielder belongs to the fiber coroutine whose logical stack
+    // we are running on (possibly through nested generator stacks).
     let y = unsafe { &*yielder };
     let (ptr, input) = y.suspend(v);
     CURRENT.with(|c| c.borrow_mut().push(running));
     let vm: &mut Vm = unsafe { &mut *(ptr as *mut Vm) };
+    vm.interp.stack_limit.set(saved_limit);
+    vm.current_file = saved_file;
+    vm.current_line = saved_line;
     match input {
         FiberIn::Resume(v) => Ok(v),
         FiberIn::Throw(e) => Err(Flow::Exception(e)),
