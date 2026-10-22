@@ -1,0 +1,28 @@
+# phpt files that cannot pass yet, with the reason (not ext/date bugs).
+# Used to generate phpt_list.rs.
+DatePeriod_IteratorAggregate SPL: IteratorIterator is not available
+DatePeriod_wrong_constructor runtime: arity is checked before DatePeriod's custom ZPP
+DateTimeImmutable_constants runtime: deprecated constant message reads 'is deprecated, since'
+DateTimeInterface_constants runtime: deprecated constant message reads 'is deprecated, since'
+DateTime_constants runtime: deprecated constant message reads 'is deprecated, since'
+date_constants runtime: deprecated constant message reads 'is deprecated, since'
+date_sunrise_and_sunset_basic runtime: deprecated constant message reads 'is deprecated, since'
+gh14732 runtime: deprecated constant message reads 'is deprecated, since'
+gh16454 runtime: deprecated constant message reads 'is deprecated, since'
+gh18481 runtime: deprecated constant message reads 'is deprecated, since'
+ExtendDateTime runtime: compile errors are reported with a stack trace
+bug-gh11416 Reflection: ReflectionClass is not available
+bug-gh8471 Reflection: ReflectionClass is not available
+bug70266 Reflection: ReflectionParameter is not available
+date_period_is_property Reflection: ReflectionClass is not available
+bug-gh11600 intl: IntlDateFormatter is out of scope
+bug-gh20503 json: recursion detection differs for get_properties tables that are rebuilt
+bug73239 runtime: ini validators cannot emit the date.timezone warning
+ini_set_incorrect runtime: ini validators cannot emit the date.timezone warning
+ini_set_incorrect-002 runtime: ini validators cannot emit the date.timezone warning
+date_default_timezone_get-1 runtime: startup ini values are not validated (no startup warning)
+date_default_timezone_get-2 runtime: startup ini values are not validated (no startup warning)
+date_default_timezone_get-4 runtime: startup ini values are not validated (no startup warning)
+date_default_timezone_set-1 runtime: startup ini values are not validated (no startup warning)
+bug75002 harness: foreach drives InternalIterator through method calls (extra trace frame)
+gettimeofday_basic standard: gettimeofday() ignores the date.timezone setting
