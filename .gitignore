@@ -8,3 +8,5 @@
 /tests/phpt/**/*.php
 !/tests/phpt/**/*.inc
 /.claude/
+/tests/phpt/**/*.sh
+/tests/phpt/**/*.stdin
