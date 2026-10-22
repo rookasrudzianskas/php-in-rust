@@ -966,3 +966,38 @@ fn filter_params_reach_the_factory() {
     t.call("fclose", vec![fp]).unwrap();
     assert_eq!(std::fs::read(&f).unwrap(), b"YWJjZGVm\nZ2hpamts");
 }
+
+#[test]
+fn dechunk_on_data_streams() {
+    // filters/chunked_001.phpt
+    let mut t = TestVm::new();
+    let cases: [(&str, &str); 7] = [
+        ("data://text/plain,0\r\n", ""),
+        ("data://text/plain,2\r\nte\r\n2\r\nst\r\n0\r\n", "test"),
+        ("data://text/plain,2\nte\n2\nst\n0\n", "test"),
+        ("data://text/plain,2;a=1\nte\n2;a=2;b=3\r\nst\n0\n", "test"),
+        (
+            "data://text/plain,2\nte\n2\nst\n0\na=b\r\nc=d\n\r\n",
+            "test",
+        ),
+        (
+            "data://text/plain,1f\n0123456789abcdef0123456789abcde\n1\nf\n0\n",
+            "0123456789abcdef0123456789abcdef",
+        ),
+        (
+            "data://text/plain,1E\n0123456789abcdef0123456789abcd\n2\nef\n0\n",
+            "0123456789abcdef0123456789abcdef",
+        ),
+    ];
+    for (url, want) in cases {
+        let fp = t.call("fopen", vec![s(url), s("r")]).unwrap();
+        t.call(
+            "stream_filter_append",
+            vec![fp.clone(), s("dechunk"), Value::Int(1)],
+        )
+        .unwrap();
+        let r = t.call("stream_get_contents", vec![fp.clone()]).unwrap();
+        assert_eq!(bytes(&r), want.as_bytes(), "{url:?}");
+        t.call("fclose", vec![fp]).unwrap();
+    }
+}
