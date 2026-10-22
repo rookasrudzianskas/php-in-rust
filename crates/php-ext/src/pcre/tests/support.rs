@@ -466,6 +466,32 @@ pub fn show(v: &Value) -> String {
     }
 }
 
+/// Like [`show`], but arrays whose keys are `0..n` are rendered as lists:
+/// `[["a", 0], "k" => null]`.
+pub fn sh(v: &Value) -> String {
+    match v {
+        Value::Array(a) => {
+            let is_list = a
+                .keys()
+                .enumerate()
+                .all(|(i, k)| k == ArrayKey::Int(i as i64));
+            let items: Vec<String> = a
+                .iter()
+                .map(|(k, v)| match (is_list, k) {
+                    (true, _) => sh(&v.unref()),
+                    (false, ArrayKey::Int(i)) => format!("{i} => {}", sh(&v.unref())),
+                    (false, ArrayKey::Str(s)) => {
+                        format!("{:?} => {}", s.to_string(), sh(&v.unref()))
+                    }
+                })
+                .collect();
+            format!("[{}]", items.join(", "))
+        }
+        Value::Ref(r) => sh(&r.get()),
+        other => show(other),
+    }
+}
+
 // ----- native callbacks for preg_replace_callback ------------------------
 
 fn matches_arg(args: &Args) -> PhpArray {

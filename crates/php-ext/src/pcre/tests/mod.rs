@@ -7,6 +7,7 @@ mod support;
 
 mod basic;
 mod errors;
+mod semantics;
 
 mod ported_a;
 mod ported_b;
