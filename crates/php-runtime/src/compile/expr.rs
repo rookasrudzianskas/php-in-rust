@@ -87,6 +87,17 @@ impl Lowerer<'_> {
         self.expr_inner(e)
     }
 
+    /// The operand of a property/dim fetch inside a constant expression: a
+    /// nullsafe short-circuit in it must skip the whole chain, so it is not
+    /// wrapped in its own [`Expr::Chain`].
+    fn const_chain_operand(&mut self, e: &ast::Expr) -> CResult<Expr> {
+        if is_chain_kind(e) {
+            self.expr_inner(e)
+        } else {
+            self.expr(e)
+        }
+    }
+
     pub(crate) fn boxed(&mut self, e: &ast::Expr) -> CResult<Box<Expr>> {
         Ok(Box::new(self.expr(e)?))
     }
@@ -176,6 +187,25 @@ impl Lowerer<'_> {
             }
             K::Dim { index: None, .. } => {
                 return self.error("Cannot use [] for reading");
+            }
+            K::Prop {
+                object,
+                name,
+                nullsafe,
+            } if self.in_const_expr => {
+                let obj = Box::new(self.const_chain_operand(object)?);
+                let m = self.member(name)?;
+                Expr::ConstProp(obj, m, *nullsafe, line)
+            }
+            K::Dim {
+                base,
+                index: Some(index),
+            } if self.in_const_expr => {
+                // zend_ast_evaluate: the base is evaluated as an expression
+                // (so property fetches in it get the enum check).
+                let b = LVal::Temp(Box::new(self.const_chain_operand(base)?));
+                let i = self.boxed(index)?;
+                Expr::Place(Box::new(LVal::Dim(Box::new(b), Some(i), line)))
             }
             K::Dim { .. } | K::Prop { .. } | K::StaticProp { .. } => {
                 Expr::Place(Box::new(self.lval_read(e)?))
@@ -632,7 +662,7 @@ impl Lowerer<'_> {
             },
             M::Property => match &self.fs.hook_prop {
                 Some(p) => s(&p.clone()),
-                None => self.error("Cannot use __PROPERTY__ outside a property hook"),
+                None => s(&PhpStr::new()),
             },
         }
     }
@@ -1132,6 +1162,11 @@ impl Lowerer<'_> {
                 }
                 let b = if is_this(object) {
                     self.fs.flags |= code_flags::USES_THIS;
+                    if let (Some(hp), ast::MemberName::Ident(n)) = (&self.fs.hook_prop, name) {
+                        if hp.as_bytes() == n.as_bytes() {
+                            self.fs.hook_uses_prop = true;
+                        }
+                    }
                     LVal::This
                 } else {
                     self.lval_base(object, mode)?

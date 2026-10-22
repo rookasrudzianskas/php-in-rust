@@ -385,6 +385,7 @@ pub fn class_constant_value(vm: &mut Vm, class: &ClassRef, name: &PhpStr, scope:
 // ---------------------------------------------------------------------------
 
 /// Hooks of a property (`PropertyInfo::hooks` payload).
+#[derive(Clone)]
 pub struct HookSet {
     pub get: Option<Rc<Function>>,
     pub set: Option<Rc<Function>>,
@@ -396,26 +397,573 @@ pub fn prop_hooks(info: &PropertyInfo) -> Option<&HookSet> {
     info.hooks.as_ref().and_then(|h| h.downcast_ref::<HookSet>())
 }
 
-/// Whether code is currently running inside a hook of `prop` on `obj`.
+/// Whether the running function (`EG(current_execute_data)`) is a hook of
+/// property `prop` on `obj` (`zend_is_in_hook` + the `$this` check of
+/// `zend_should_call_hook`). Closures, included files and internal functions
+/// called from a hook are not "in" the hook.
 pub fn in_hook_of(vm: &Vm, obj: &ObjRef, prop: &[u8]) -> bool {
-    for f in vm.frames.iter().rev() {
-        if f.is_internal {
+    let Some(f) = vm.frames.last() else { return false };
+    let Some(func) = &f.function else { return false };
+    let n: &[u8] = match super::user_fn(func) {
+        Some(ufn) if ufn.code.kind == FuncKind::Hook => &ufn.code.name,
+        Some(_) => return false,
+        // The parent hook trampolines (`parent::$prop::get()`).
+        None if f.is_internal && func.name.first() == Some(&b'$') => &func.name,
+        None => return false,
+    };
+    // `$prop::get` / `$prop::set`
+    let matches = n.len() > prop.len() + 1 && n[0] == b'$' && &n[1..1 + prop.len()] == prop && n[1 + prop.len()] == b':';
+    matches && f.this.as_ref().is_some_and(|t| ObjRef::ptr_eq(t, obj))
+}
+
+
+// ---------------------------------------------------------------------------
+// Properties (zend_declare_typed_property, do_inherit_property,
+// inherit_property_hook, zend_verify_hooked_property)
+// ---------------------------------------------------------------------------
+
+const SET_MASK: u32 = member_flags::PUBLIC_SET | member_flags::PROTECTED_SET | member_flags::PRIVATE_SET;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PropVariance {
+    Invariant,
+    Covariant,
+    Contravariant,
+}
+
+fn hook_of(h: &HookSet, get: bool) -> Option<&Rc<Function>> {
+    if get { h.get.as_ref() } else { h.set.as_ref() }
+}
+
+fn hook_slot(h: &mut HookSet, get: bool) -> &mut Option<Rc<Function>> {
+    if get { &mut h.get } else { &mut h.set }
+}
+
+/// `property_has_operation`: backed properties implement get, and set when
+/// they are not readonly.
+fn property_has_operation(info: &PropertyInfo, hooks: Option<&HookSet>, get: bool) -> bool {
+    (info.flags & member_flags::VIRTUAL == 0 && (get || !info.is_readonly())) || hooks.is_some_and(|h| hook_of(h, get).is_some())
+}
+
+/// `prop_get_variance`.
+fn prop_variance(info: &PropertyInfo) -> PropVariance {
+    if info.flags & member_flags::VIRTUAL != 0 {
+        if let Some(h) = prop_hooks(info) {
+            if h.set.is_none() {
+                return PropVariance::Covariant;
+            }
+            if h.get.is_none() {
+                return PropVariance::Contravariant;
+            }
+        }
+    }
+    PropVariance::Invariant
+}
+
+fn set_visibility_word(flags: u32) -> &'static str {
+    if flags & member_flags::PRIVATE_SET != 0 {
+        "private(set)"
+    } else if flags & member_flags::PROTECTED_SET != 0 {
+        "protected(set)"
+    } else {
+        "omitted"
+    }
+}
+
+/// The parameter type of a set hook.
+fn set_hook_type(f: &Function) -> Option<TypeDecl> {
+    f.signature().params.first().and_then(|p| p.ty.clone())
+}
+
+/// The function objects of a property's hooks.
+fn build_hooks(def: &ClassDef, p: &PropDef) -> Option<HookSet> {
+    if p.hooks.is_empty() {
+        return None;
+    }
+    let mut set = HookSet {
+        get: None,
+        set: None,
+        virtual_: p.flags & member_flags::VIRTUAL != 0,
+    };
+    for h in &p.hooks {
+        let Some(code) = &h.code else { continue };
+        let mut flags = h.flags;
+        if code.attributes.iter().any(|a| a.name.eq_ignore_ascii_case(b"Override")) {
+            flags |= member_flags::OVERRIDE;
+        }
+        let f = Rc::new(make_function(code, code.name.clone(), flags, Some(def.name.clone())));
+        match h.kind {
+            HookKind::Get => set.get = Some(f),
+            HookKind::Set => set.set = Some(f),
+        }
+    }
+    Some(set)
+}
+
+/// Declares the class's own properties and checks them against inherited
+/// ones (`zend_compile_prop_decl` + `do_inherit_property`).
+fn link_own_properties(vm: &mut Vm, ce: &mut ClassEntry, def: &ClassDef, data: &mut ClassData, cname: &str) -> PResult<()> {
+    for p in &def.props {
+        let mut info = PropertyInfo::new(p.name.clone(), def.name.clone(), p.flags);
+        info.ty = p.ty.as_ref().map(|t| t.decl.clone());
+        info.doc_comment = p.doc_comment.clone();
+        info.attributes = p.attributes.iter().map(|a| a.clone() as Rc<dyn Any>).collect();
+        let mut needs_eval = None;
+        info.default = match &p.default {
+            Some(d) => match &d.literal {
+                Some(v) => v.clone(),
+                None => {
+                    needs_eval = Some(d.clone());
+                    Value::Undef
+                }
+            },
+            None => {
+                if p.ty.is_some() || !p.hooks.is_empty() {
+                    Value::Undef
+                } else {
+                    Value::Null
+                }
+            }
+        };
+        let has_default = p.default.is_some();
+        let mut hooks = build_hooks(def, p);
+        if info.is_static() {
+            if let Some(existing) = ce.properties.get(&p.name).cloned() {
+                check_redeclared_property(vm, ce, &existing, &mut info, None, cname, false)?;
+            }
+            ce.declare_property(info);
+            let slot = ce.properties.get(&p.name).map(|i| i.slot).unwrap_or(0);
+            if let Some(e) = needs_eval {
+                data.static_inits.push((slot, e, def.name.clone(), p.ty.as_ref().map(|t| t.decl.clone()), p.name.clone()));
+            }
             continue;
         }
-        let Some(func) = &f.function else { continue };
-        if let Some(ufn) = super::user_fn(func) {
-            if ufn.code.kind == FuncKind::Hook {
-                let n = &ufn.code.name;
-                // `$prop::get` / `$prop::set`
-                let matches = n.len() > prop.len() + 1 && n[0] == b'$' && &n[1..1 + prop.len()] == prop && n[1 + prop.len()] == b':';
-                if matches && f.this.as_ref().is_some_and(|t| ObjRef::ptr_eq(t, obj)) {
-                    return true;
+        // Own slot unless the property shares the parent's.
+        let mut slot: Option<usize> = None;
+        let mut parent_slot_default: Option<(usize, Value)> = None;
+        if let Some(existing) = ce.properties.get(&p.name).cloned() {
+            let shared = check_redeclared_property(vm, ce, &existing, &mut info, hooks.as_mut(), cname, false)?;
+            if !existing.is_static() && existing.flags & member_flags::PRIVATE == 0 && existing.flags & member_flags::VIRTUAL == 0 {
+                match shared {
+                    SlotShare::UseChild => {
+                        parent_slot_default = Some((existing.slot, Value::Undef));
+                    }
+                    SlotShare::Parent => {
+                        let is_virtual_no_default = p.flags & member_flags::VIRTUAL != 0 && !has_default;
+                        let d = if is_virtual_no_default {
+                            if info.ty.is_some() { Value::Undef } else { Value::Null }
+                        } else {
+                            info.default.clone()
+                        };
+                        if is_virtual_no_default {
+                            info.default = d.clone();
+                        }
+                        slot = Some(existing.slot);
+                        parent_slot_default = Some((existing.slot, d));
+                    }
                 }
             }
         }
-        return false;
+        if let Some((s, d)) = parent_slot_default {
+            ce.default_properties[s] = d;
+        }
+        let slot = match slot {
+            Some(s) => s,
+            None => {
+                ce.default_properties.push(info.default.clone());
+                ce.default_properties.len() - 1
+            }
+        };
+        info.slot = slot;
+        if let Some(h) = hooks {
+            info.hooks = Some(Rc::new(HookSet {
+                virtual_: info.flags & member_flags::VIRTUAL != 0,
+                ..h
+            }));
+        }
+        ce.properties.insert(p.name.clone(), info);
+        if data.user_slots.len() <= slot {
+            data.user_slots.resize(slot + 1, false);
+        }
+        data.user_slots[slot] = true;
+        data.const_defaults.retain(|(s, _, _)| *s != slot);
+        if let Some(e) = needs_eval {
+            data.const_defaults.push((slot, e, def.name.clone()));
+        }
     }
-    false
+    if data.user_slots.len() < ce.default_properties.len() {
+        data.user_slots.resize(ce.default_properties.len(), true);
+    }
+    Ok(())
+}
+
+enum SlotShare {
+    /// The child uses the parent's slot.
+    Parent,
+    /// The child added hooks: it uses its own slot.
+    UseChild,
+}
+
+/// `do_inherit_property` for a property redeclared in the child.
+fn check_redeclared_property(
+    vm: &mut Vm,
+    ce: &ClassEntry,
+    parent: &PropertyInfo,
+    child: &mut PropertyInfo,
+    mut child_hooks: Option<&mut HookSet>,
+    cname: &str,
+    parent_is_iface: bool,
+) -> PResult<SlotShare> {
+    let key = child.name.clone();
+    let pname = display_class_name(&parent.declaring_class);
+    if parent.flags & (member_flags::PRIVATE | member_flags::CHANGED) != 0 {
+        child.flags |= member_flags::CHANGED;
+    }
+    if parent.flags & member_flags::FINAL != 0 {
+        return Err(fatal(vm, format!("Cannot override final property {pname}::${key}")));
+    }
+    if parent.flags & member_flags::PRIVATE != 0 {
+        return Ok(SlotShare::UseChild);
+    }
+    if parent.is_static() != child.is_static() {
+        return Err(fatal(vm, format!(
+            "Cannot redeclare {}{pname}::${key} as {}{cname}::${key}",
+            if parent.is_static() { "static " } else { "non static " },
+            if child.is_static() { "static " } else { "non static " },
+        )));
+    }
+    if parent.is_readonly() != child.is_readonly() && parent.flags & member_flags::ABSTRACT == 0 {
+        return Err(fatal(vm, format!(
+            "Cannot redeclare {} property {pname}::${key} as {} {cname}::${key}",
+            if parent.is_readonly() { "readonly" } else { "non-readonly" },
+            if child.is_readonly() { "readonly" } else { "non-readonly" },
+        )));
+    }
+    let parent_hooks = prop_hooks(parent);
+    if child.flags & SET_MASK != 0
+        && !(parent_hooks.is_some_and(|h| h.set.is_none()) && parent.flags & member_flags::VIRTUAL != 0)
+    {
+        let mut parent_set = parent.flags & SET_MASK;
+        if parent_set == 0 {
+            parent_set = (parent.flags & member_flags::PPP_MASK) << 7;
+        }
+        if child.flags & SET_MASK > parent_set {
+            return Err(fatal(vm, format!(
+                "Set access level of {cname}::${key} must be {} (as in class {pname}){}",
+                set_visibility_word(parent.flags),
+                if parent.flags & SET_MASK == 0 { "" } else { " or weaker" }
+            )));
+        }
+    }
+    if child.flags & member_flags::PPP_MASK > parent.flags & member_flags::PPP_MASK {
+        return Err(fatal(vm, format!(
+            "Access level to {cname}::${key} must be {} (as in class {pname}){}",
+            vis_name(parent.flags),
+            if parent.flags & member_flags::PUBLIC != 0 { "" } else { " or weaker" }
+        )));
+    }
+    let mut share = SlotShare::UseChild;
+    if !child.is_static() && parent.flags & member_flags::VIRTUAL == 0 {
+        let use_child_prop = parent_hooks.is_none() && child_hooks.is_some();
+        share = if use_child_prop { SlotShare::UseChild } else { SlotShare::Parent };
+        child.flags &= !member_flags::VIRTUAL;
+    }
+    // Hooks.
+    if parent_hooks.is_some() || child_hooks.is_some() {
+        let mut new_hooks: Option<HookSet> = None;
+        for get in [true, false] {
+            let parent_hook = parent_hooks.and_then(|h| hook_of(h, get)).cloned();
+            let child_hook = child_hooks.as_deref().and_then(|h| hook_of(h, get)).cloned();
+            let Some(ph) = parent_hook else { continue };
+            match child_hook {
+                None => {
+                    if ph.has_flag(member_flags::ABSTRACT) && property_has_operation(child, child_hooks.as_deref(), get) {
+                        continue;
+                    }
+                    match child_hooks.as_deref_mut() {
+                        Some(h) => *hook_slot(h, get) = Some(ph.clone()),
+                        None => {
+                            let h = new_hooks.get_or_insert(HookSet {
+                                get: None,
+                                set: None,
+                                virtual_: false,
+                            });
+                            *hook_slot(h, get) = Some(ph.clone());
+                        }
+                    }
+                }
+                Some(chk) => {
+                    if ph.has_flag(member_flags::PRIVATE) {
+                        continue;
+                    }
+                    if ph.has_flag(member_flags::FINAL) {
+                        let (file, line) = chk.location.as_ref().map(|l| (l.0.clone(), l.1)).unwrap_or_default();
+                        return Err(fatal_at(vm, &file, line, format!(
+                            "Cannot override final property hook {}::{}()",
+                            display_class_name(ph.scope.as_deref().unwrap_or(b"")),
+                            ph.name
+                        )));
+                    }
+                    check_signature(vm, &chk, &ph)?;
+                }
+            }
+        }
+        if let Some(h) = new_hooks {
+            // A plain property overriding a hooked one keeps the parent's hooks.
+            child.hooks = Some(Rc::new(h));
+        }
+    }
+    // Types.
+    let variance = prop_variance(parent);
+    let child_scope = ce.name.clone();
+    match (&parent.ty, &child.ty) {
+        (Some(pt), ct) => {
+            let ok = match ct {
+                None => false,
+                Some(ct) => match variance {
+                    PropVariance::Invariant => types_equivalent(vm, pt, ct, &parent.declaring_class, &child_scope),
+                    PropVariance::Covariant => is_subtype(vm, ct, &child_scope, pt, &parent.declaring_class),
+                    PropVariance::Contravariant => is_subtype(vm, pt, &parent.declaring_class, ct, &child_scope),
+                },
+            };
+            if !ok {
+                return Err(fatal(vm, format!(
+                    "Type of {cname}::${key} must be {}{} (as in class {pname})",
+                    match variance {
+                        PropVariance::Invariant => "",
+                        PropVariance::Covariant => "subtype of ",
+                        PropVariance::Contravariant => "supertype of ",
+                    },
+                    pt.to_type_string()
+                )));
+            }
+            if parent.flags & member_flags::ABSTRACT != 0 {
+                if let Some(ps) = parent_hooks.and_then(|h| h.set.as_ref()) {
+                    let child_has_set = child_hooks.as_deref().is_some_and(|h| h.set.is_some());
+                    if !child_has_set {
+                        if let (Some(st), Some(ct)) = (set_hook_type(ps), &child.ty) {
+                            if !is_subtype(vm, &st, &parent.declaring_class, ct, &child_scope) {
+                                let kind = vm.find_class(&parent.declaring_class).map(|c| c.kind_name()).unwrap_or("class");
+                                return Err(fatal(vm, format!(
+                                    "Set type of {cname}::${key} must be supertype of {} (as in {} {pname})",
+                                    st.to_type_string(),
+                                    kind
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        (None, Some(_)) => {
+            return Err(fatal(vm, format!(
+                "Type of {cname}::${key} must be omitted to match the parent definition in class {pname}"
+            )));
+        }
+        (None, None) => {}
+    }
+    let _ = parent_is_iface;
+    child.flags &= !member_flags::OVERRIDE;
+    Ok(share)
+}
+
+/// Interface properties (`do_interface_implementation` →
+/// `do_inherit_property`).
+fn inherit_interface_properties(vm: &mut Vm, ce: &mut ClassEntry, iface: &ClassRef, cname: &str) -> PResult<()> {
+    for (key, prop) in iface.properties.iter() {
+        if prop.is_static() {
+            continue;
+        }
+        match ce.properties.get(key).cloned() {
+            Some(existing) => {
+                if existing.declaring_class.eq_ignore_ascii_case(&prop.declaring_class) {
+                    continue;
+                }
+                let mut child = existing.clone();
+                let mut hooks: Option<HookSet> = prop_hooks(&existing).cloned();
+                let had_hooks = hooks.is_some();
+                check_redeclared_property(vm, ce, prop, &mut child, hooks.as_mut(), cname, true)?;
+                if had_hooks {
+                    child.hooks = hooks.map(|h| Rc::new(h) as Rc<dyn Any>);
+                }
+                // Interface properties never share slots.
+                child.slot = existing.slot;
+                ce.properties.insert(key.clone(), child);
+            }
+            None => {
+                let mut p = prop.clone();
+                ce.default_properties.push(Value::Undef);
+                p.slot = ce.default_properties.len() - 1;
+                ce.properties.insert(key.clone(), p);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `zend_verify_hooked_property` (and the set hook variance check) for the
+/// class's own hooked properties, after inheritance.
+fn verify_own_hooked_properties(vm: &mut Vm, ce: &mut ClassEntry, def: &ClassDef, data: &ClassData) -> PResult<()> {
+    let cname = display_class_name(&def.name);
+    for p in &def.props {
+        let Some(info) = ce.properties.get(&p.name).cloned() else { continue };
+        if !info.declaring_class.eq_ignore_ascii_case(&def.name) {
+            continue;
+        }
+        let Some(hooks) = prop_hooks(&info).cloned() else { continue };
+        if p.hooks.is_empty() {
+            continue;
+        }
+        let is_virtual = info.flags & member_flags::VIRTUAL != 0;
+        let has_default = p.default.is_some() || data.const_defaults.iter().any(|(s, _, _)| *s == info.slot);
+        if is_virtual && has_default {
+            return Err(fatal(vm, format!(
+                "Cannot specify default value for virtual hooked property {cname}::${}",
+                p.name
+            )));
+        }
+        if !is_virtual && info.ty.is_none() && ce.default_properties.get(info.slot).is_some_and(Value::is_undef) {
+            ce.default_properties[info.slot] = Value::Null;
+            if let Some(i) = ce.properties.get_mut(&p.name) {
+                i.default = Value::Null;
+            }
+        }
+        let mut abstract_error = info.flags & member_flags::ABSTRACT != 0;
+        for (get, f) in [(true, &hooks.get), (false, &hooks.set)] {
+            let Some(f) = f else { continue };
+            if get && f.has_flag(fn_flags::RETURNS_REF) && !is_virtual && hooks.set.is_some() {
+                return Err(fatal(vm, format!(
+                    "Get hook of backed property {cname}::{} with set hook may not return by reference",
+                    p.name
+                )));
+            }
+            if f.has_flag(member_flags::ABSTRACT) {
+                abstract_error = false;
+            }
+        }
+        if abstract_error {
+            return Err(fatal(vm, format!(
+                "Abstract property {cname}::${} must specify at least one abstract hook",
+                p.name
+            )));
+        }
+        if is_virtual && info.flags & SET_MASK != 0 && (hooks.get.is_none() || hooks.set.is_none()) {
+            return Err(fatal(vm, format!(
+                "{} virtual property {cname}::${} must not specify asymmetric visibility",
+                if hooks.get.is_none() { "set-only" } else { "get-only" },
+                p.name
+            )));
+        }
+        // zend_verify_property_hook_variance
+        if let Some(set) = &hooks.set {
+            if set.scope.as_ref().is_some_and(|s| s.eq_ignore_ascii_case(&def.name)) {
+                if let Some(pt) = set_hook_type(set) {
+                    let ok = match &info.ty {
+                        None => false,
+                        Some(t) => {
+                            !type_classes_known(vm, t, &def.name)
+                                || !type_classes_known(vm, &pt, &def.name)
+                                || is_subtype(vm, t, &def.name, &pt, &def.name)
+                        }
+                    };
+                    if !ok {
+                        let pname = set.signature().params.first().map(|p| p.name.clone()).unwrap_or_default();
+                        let (file, line) = set.location.as_ref().map(|l| (l.0.clone(), l.1)).unwrap_or_default();
+                        return Err(fatal_at(vm, &file, line, format!(
+                            "Type of parameter ${pname} of hook {cname}::${}::set must be compatible with property type",
+                            p.name
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether every class named in `t` is declared (else the compatibility
+/// check is unresolved and deferred, `INHERITANCE_UNRESOLVED`).
+fn type_classes_known(vm: &Vm, t: &TypeDecl, scope: &[u8]) -> bool {
+    t.classes.iter().all(|c| match c {
+        ClassType::Name(n) => resolve_type_name(n, scope, vm).is_some(),
+        ClassType::Intersection(ns) => ns.iter().all(|n| resolve_type_name(n, scope, vm).is_some()),
+    })
+}
+
+/// Early binding is not possible while property types or set hook parameter
+/// types name undeclared classes (unresolved variance obligations).
+fn props_have_unresolved_types(vm: &Vm, def: &ClassDef) -> bool {
+    def.props.iter().any(|p| {
+        let ty_unknown = p.ty.as_ref().is_some_and(|t| !type_classes_known(vm, &t.decl, &def.name));
+        let set_unknown = p.hooks.iter().any(|h| {
+            h.kind == HookKind::Set
+                && h.code.as_ref().is_some_and(|c| {
+                    c.params.first().and_then(|p| p.ty.as_ref()).is_some_and(|t| !type_classes_known(vm, &t.decl, &def.name))
+                })
+        });
+        let parent_typed = def
+            .parent
+            .as_ref()
+            .and_then(|pn| vm.find_class(pn))
+            .is_some_and(|pc| pc.properties.get(&p.name).is_some_and(|pp| pp.ty.is_some()));
+        (ty_unknown && (!p.hooks.is_empty() || parent_typed)) || set_unknown
+    })
+}
+
+/// Abstract hooks of the class's properties, for the abstract-class check
+/// (`zend_verify_abstract_class`).
+fn abstract_hooks(ce: &ClassEntry) -> Vec<String> {
+    let mut out = Vec::new();
+    for info in ce.properties.values() {
+        if let Some(h) = prop_hooks(info) {
+            for f in h.get.iter().chain(h.set.iter()) {
+                if f.has_flag(member_flags::ABSTRACT) {
+                    out.push(format!("{}::{}", display_class_name(f.scope.as_deref().unwrap_or(b"")), f.name));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `#[\Override]` on properties and hooks without a parent.
+fn check_property_overrides(vm: &mut Vm, ce: &ClassEntry, def: &ClassDef) -> PResult<()> {
+    let cname = display_class_name(&def.name);
+    for p in &def.props {
+        let Some(info) = ce.properties.get(&p.name) else { continue };
+        if !info.declaring_class.eq_ignore_ascii_case(&def.name) {
+            continue;
+        }
+        if info.flags & member_flags::OVERRIDE != 0 {
+            vm.current_line = p.line;
+            return Err(fatal(vm, format!(
+                "{cname}::${} has #[\\Override] attribute, but no matching parent property exists",
+                p.name
+            )));
+        }
+        if let Some(h) = prop_hooks(info) {
+            // The parent property (class or interface) providing each operation.
+            let parents: Vec<PropertyInfo> = ce
+                .parent
+                .iter()
+                .chain(ce.interfaces.iter())
+                .filter_map(|c| c.properties.get(&p.name).cloned())
+                .filter(|pp| pp.flags & member_flags::PRIVATE == 0)
+                .collect();
+            for (get, f) in [(true, &h.get), (false, &h.set)] {
+                let Some(f) = f else { continue };
+                let has_parent = parents.iter().any(|pp| property_has_operation(pp, prop_hooks(pp), get));
+                if f.has_flag(member_flags::OVERRIDE) && !has_parent && f.scope.as_ref().is_some_and(|s| s.eq_ignore_ascii_case(&def.name)) {
+                    let (file, line) = f.location.as_ref().map(|l| (l.0.clone(), l.1)).unwrap_or_default();
+                    return Err(fatal_at(vm, &file, line, format!(
+                        "{cname}::{}() has #[\\Override] attribute, but no matching parent method exists",
+                        f.name
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Interpreter data of a userland class (`ClassEntry::ext`).
@@ -722,6 +1270,9 @@ pub(crate) fn try_early_bind(l: &mut Lowerer<'_>, def: &Rc<ClassDef>) -> CResult
         if can_early_bind(l.vm, def, &pc) == Inh::Unresolved {
             return Ok(false);
         }
+    }
+    if props_have_unresolved_types(l.vm, def) {
+        return Ok(false);
     }
     match link_class(l.vm, def) {
         Ok(_) => {
@@ -1221,152 +1772,7 @@ fn link_class_inner(
     }
 
     // ----- properties -----
-    for p in &def.props {
-        let mut flags = p.flags;
-        let virtual_ = !p.hooks.is_empty() && p.default.is_none() && hooks_are_virtual(p);
-        if virtual_ {
-            flags |= member_flags::VIRTUAL;
-        }
-        if let Some(existing) = ce.properties.get(&p.name).cloned() {
-            let parent_private = existing.flags & member_flags::PRIVATE != 0;
-            if !parent_private {
-                if existing.is_static() != (flags & member_flags::STATIC != 0) {
-                    return Err(fatal(vm, if existing.is_static() {
-                        format!(
-                            "Cannot redeclare static {}::${} as non static {}::${}",
-                            existing.declaring_class, p.name, cname, p.name
-                        )
-                    } else {
-                        format!(
-                            "Cannot redeclare non static {}::${} as static {}::${}",
-                            existing.declaring_class, p.name, cname, p.name
-                        )
-                    }));
-                }
-                if existing.is_readonly() != (flags & member_flags::READONLY != 0) {
-                    return Err(fatal(vm, if existing.is_readonly() {
-                        format!(
-                            "Cannot redeclare readonly property {}::${} as non-readonly {}::${}",
-                            existing.declaring_class, p.name, cname, p.name
-                        )
-                    } else {
-                        format!(
-                            "Cannot redeclare non-readonly property {}::${} as readonly {}::${}",
-                            existing.declaring_class, p.name, cname, p.name
-                        )
-                    }));
-                }
-                if existing.flags & member_flags::FINAL != 0 {
-                    return Err(fatal(vm, format!(
-                        "Cannot override final property {}::${}",
-                        existing.declaring_class, p.name
-                    )));
-                }
-                if vis_rank(flags) > vis_rank(existing.flags) {
-                    return Err(fatal(vm, format!(
-                        "Access level to {}::${} must be {} (as in class {}){}",
-                        cname,
-                        p.name,
-                        vis_name(existing.flags),
-                        existing.declaring_class,
-                        if existing.flags & member_flags::PUBLIC != 0 { "" } else { " or weaker" }
-                    )));
-                }
-                // Type invariance.
-                let pt = existing.ty.clone();
-                let ct = p.ty.as_ref().map(|t| t.decl.clone());
-                match (&pt, &ct) {
-                    (Some(a), Some(b)) => {
-                        if !types_equivalent(vm, a, b, &existing.declaring_class, &def.name) {
-                            return Err(fatal(vm, format!(
-                                "Type of {}::${} must be {} (as in class {})",
-                                cname,
-                                p.name,
-                                a.to_type_string(),
-                                existing.declaring_class
-                            )));
-                        }
-                    }
-                    (Some(a), None) => {
-                        return Err(fatal(vm, format!(
-                            "Type of {}::${} must be {} (as in class {})",
-                            cname,
-                            p.name,
-                            a.to_type_string(),
-                            existing.declaring_class
-                        )));
-                    }
-                    (None, Some(_)) => {
-                        return Err(fatal(vm, format!(
-                            "Type of {}::${} must not be defined (as in class {})",
-                            cname, p.name, existing.declaring_class
-                        )));
-                    }
-                    (None, None) => {}
-                }
-            } else {
-                flags |= member_flags::CHANGED;
-            }
-        }
-        let mut info = PropertyInfo::new(p.name.clone(), def.name.clone(), flags);
-        info.ty = p.ty.as_ref().map(|t| t.decl.clone());
-        info.doc_comment = p.doc_comment.clone();
-        info.attributes = p.attributes.iter().map(|a| a.clone() as Rc<dyn Any>).collect();
-        let mut needs_eval = None;
-        info.default = match &p.default {
-            Some(d) => match &d.literal {
-                Some(v) => v.clone(),
-                None => {
-                    needs_eval = Some(d.clone());
-                    Value::Undef
-                }
-            },
-            None => {
-                if p.ty.is_some() || !p.hooks.is_empty() {
-                    Value::Undef
-                } else {
-                    Value::Null
-                }
-            }
-        };
-        if !p.hooks.is_empty() {
-            let mut set = HookSet {
-                get: None,
-                set: None,
-                virtual_,
-            };
-            for h in &p.hooks {
-                if let Some(code) = &h.code {
-                    let f = Rc::new(make_function(code, code.name.clone(), member_flags::PUBLIC | h.flags, Some(def.name.clone())));
-                    match h.kind {
-                        HookKind::Get => set.get = Some(f),
-                        HookKind::Set => set.set = Some(f),
-                    }
-                }
-            }
-            info.hooks = Some(Rc::new(set));
-        }
-        let is_static = info.is_static();
-        let ty = info.ty.clone();
-        ce.declare_property(info);
-        let slot = ce.properties.get(&p.name).map(|i| i.slot).unwrap_or(0);
-        if !is_static {
-            if data.user_slots.len() <= slot {
-                data.user_slots.resize(slot + 1, false);
-            }
-            data.user_slots[slot] = true;
-            data.const_defaults.retain(|(s, _, _)| *s != slot);
-            if let Some(e) = needs_eval {
-                data.const_defaults.push((slot, e, def.name.clone()));
-            }
-        } else if let Some(e) = needs_eval {
-            data.static_inits.push((slot, e, def.name.clone(), ty, p.name.clone()));
-        }
-    }
-    if data.user_slots.len() < ce.default_properties.len() {
-        let parent_internal = parent.as_ref().is_some_and(|p| class_data(p).is_none());
-        data.user_slots.resize(ce.default_properties.len(), !parent_internal);
-    }
+    link_own_properties(vm, &mut ce, def, &mut data, &cname)?;
 
 
     // ----- methods -----
@@ -1456,6 +1862,8 @@ fn link_class_inner(
         }
     }
 
+    verify_own_hooked_properties(vm, &mut ce, def, &data)?;
+
     // ----- abstract methods (zend_verify_abstract_class) -----
     if matches!(def.kind, ClassKindIr::Class | ClassKindIr::Enum) {
         verify_abstract_class(vm, &ce, def)?;
@@ -1465,6 +1873,9 @@ fn link_class_inner(
         verify_enum(vm, &ce, def)?;
     }
 
+    if def.kind != ClassKindIr::Trait {
+        check_property_overrides(vm, &ce, def)?;
+    }
     ce.link_magic_methods();
     ce.ext = Some(Rc::new(data));
     let lc = ce.lc_name.clone();
@@ -1495,14 +1906,6 @@ fn link_class_inner(
     }
     vm.register_class(rc.clone());
     Ok((rc, st))
-}
-
-fn hooks_are_virtual(p: &PropDef) -> bool {
-    // A property is virtual when no hook references its backing value
-    // (approximation: get-only or both hooks with explicit bodies).
-    let has_get = p.hooks.iter().any(|h| h.kind == HookKind::Get && h.code.is_some());
-    let has_set = p.hooks.iter().any(|h| h.kind == HookKind::Set);
-    has_get && !has_set
 }
 
 /// `do_interface_implementation`.
@@ -1569,6 +1972,9 @@ fn interface_implementation(
             }
         }
     }
+    // Properties.
+    let cname = display_class_name(&def.name);
+    inherit_interface_properties(vm, ce, iface, &cname)?;
     implement_interface_hook(vm, def, ce, iface)
 }
 
@@ -1636,6 +2042,14 @@ fn verify_abstract_class(vm: &mut Vm, ce: &ClassEntry, def: &ClassDef) -> PResul
         if m.has_flag(member_flags::ABSTRACT) && (!explicit || m.has_flag(member_flags::PRIVATE)) {
             if cnt < 3 {
                 names.push(format!("{}::{}", display_class_name(m.scope.as_deref().unwrap_or(b"")), m.name));
+            }
+            cnt += 1;
+        }
+    }
+    if !explicit {
+        for h in abstract_hooks(ce) {
+            if cnt < 3 {
+                names.push(h);
             }
             cnt += 1;
         }
@@ -1833,7 +2247,9 @@ fn check_override(vm: &mut Vm, def: &ClassDef, rc: &ClassRef, st: &LinkState) ->
         }
     }
     for p in rc.properties.values() {
-        if !p.declaring_class.eq_ignore_ascii_case(&def.name) {
+        // Own properties are checked by `check_property_overrides`; this
+        // covers properties imported from traits.
+        if !p.declaring_class.eq_ignore_ascii_case(&def.name) || def.props.iter().any(|d| d.name == p.name) {
             continue;
         }
         let has = p
@@ -2258,6 +2674,32 @@ fn const_expr_text(e: &crate::native::ConstExpr) -> String {
         C::ClassName(c) => format!("{c}::class"),
         _ => "<expression>".into(),
     }
+}
+
+/// Signature check of a hook against the parent's hook
+/// (`do_inheritance_check_on_method` + `perform_delayable_implementation_check`).
+fn check_signature(vm: &mut Vm, child: &Rc<Function>, proto: &Rc<Function>) -> PResult<()> {
+    let cs = child.scope.clone().unwrap_or_default();
+    let ps = proto.scope.clone().unwrap_or_default();
+    perform_delayable_check(vm, child, &cs, proto, &ps)
+}
+
+/// Whether `a` (in `a_scope`) is a subtype of `b` (in `b_scope`); checks
+/// that cannot be decided yet (undeclared classes) pass.
+fn is_subtype(vm: &Vm, a: &TypeDecl, a_scope: &[u8], b: &TypeDecl, b_scope: &[u8]) -> bool {
+    let mut ck = variance::Checker::new(vm);
+    let st = ck.covariant(a_scope, a, b_scope, b);
+    st != Inh::Error
+}
+
+fn resolve_type_name(n: &[u8], scope: &[u8], vm: &Vm) -> Option<ClassRef> {
+    if n.eq_ignore_ascii_case(b"self") {
+        return vm.find_class(scope);
+    }
+    if n.eq_ignore_ascii_case(b"parent") {
+        return vm.find_class(scope).and_then(|c| c.parent.clone());
+    }
+    vm.find_class(n)
 }
 
 /// Property type invariance used by the property inheritance checks.

@@ -189,6 +189,43 @@ pub(crate) fn member_name(vm: &mut Vm, cx: &Ctx, m: &Member) -> PResult<PhpStr> 
     }
 }
 
+/// `ZEND_AST_PROP`/`ZEND_AST_NULLSAFE_PROP` in `zend_ast_evaluate`: property
+/// fetches in constant expressions only work on enum cases.
+pub(crate) fn const_prop(
+    vm: &mut Vm,
+    cx: &Ctx,
+    obj: &Expr,
+    member: &Member,
+    nullsafe: bool,
+    line: u32,
+) -> PResult<Value> {
+    let o = eval(vm, cx, obj)?.into_unref();
+    if nullsafe && o.is_null() {
+        return Err(Flow::Break(SHORT_CIRCUIT));
+    }
+    let name = member_name(vm, cx, member)?;
+    vm.current_line = line;
+    match o {
+        Value::Object(o) => {
+            if !o.class().is_enum() {
+                return Err(vm.throw_error(
+                    "Error",
+                    "Fetching properties on non-enums in constant expressions is not allowed",
+                ));
+            }
+            objects::read_prop(vm, cx.scope(), &o, &name, false)
+        }
+        other => {
+            vm.engine_warning(format!(
+                "Attempt to read property \"{}\" on {}",
+                name,
+                other.value_name()
+            ))?;
+            Ok(Value::Null)
+        }
+    }
+}
+
 fn undefined_key_warning(vm: &mut Vm, k: &ArrayKey) -> PResult<()> {
     match k {
         ArrayKey::Int(i) => vm.engine_warning(format!("Undefined array key {i}")),

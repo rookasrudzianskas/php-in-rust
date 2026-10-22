@@ -191,6 +191,48 @@ fn op_name(op: IncludeOp) -> &'static str {
     }
 }
 
+fn active_include(vm: &Vm, op: &'static str, path: &PhpStr) -> crate::vm::ActiveInclude {
+    crate::vm::ActiveInclude {
+        op,
+        depth: vm.frames.len(),
+        filename: path.clone(),
+        file: vm.current_file.clone(),
+        line: vm.current_line,
+    }
+}
+
+/// `php_error_docref` while the `ZEND_INCLUDE_OR_EVAL` opline is current:
+/// the origin is `include()` (`include('path')` with `error_include_args`).
+fn include_docref(
+    vm: &mut Vm,
+    fname: &'static str,
+    path: &PhpStr,
+    docref: Option<&str>,
+    msg: impl Into<PhpStr>,
+) -> PResult<()> {
+    let active = active_include(vm, fname, path);
+    let saved = vm.include_or_eval.replace(active);
+    let r = vm.php_error_docref_ref(docref, crate::errors::level::E_WARNING, msg);
+    vm.include_or_eval = saved;
+    r
+}
+
+/// `zend_message_dispatcher(ZMSG_FAILED_{INCLUDE,REQUIRE}_FOPEN)`.
+fn failed_open(vm: &mut Vm, fname: &'static str, path: &PhpStr, required: bool) -> PResult<Value> {
+    let ip = vm.ini_get("include_path").map(|v| v.to_string()).unwrap_or_default();
+    if required {
+        let mut m = b"Failed opening required '".to_vec();
+        m.extend_from_slice(path);
+        m.extend_from_slice(format!("' (include_path='{ip}')").as_bytes());
+        return Err(vm.throw_error("Error", PhpStr::from_vec(m)));
+    }
+    let mut m = b"Failed opening '".to_vec();
+    m.extend_from_slice(path);
+    m.extend_from_slice(format!("' for inclusion (include_path='{ip}')").as_bytes());
+    include_docref(vm, fname, path, Some("function.include"), PhpStr::from_vec(m))?;
+    Ok(Value::Bool(false))
+}
+
 /// `include`/`require`(`_once`) (`ZEND_INCLUDE_OR_EVAL`).
 pub fn include(vm: &mut Vm, cx: &Ctx, op: IncludeOp, path: Value) -> PResult<Value> {
     let path = super::eval::to_str(vm, &path.into_unref())?;
@@ -209,27 +251,18 @@ pub fn include(vm: &mut Vm, cx: &Ctx, op: IncludeOp, path: Value) -> PResult<Val
                     }
                 }
             }
-            return match opener(vm, &path, true)? {
+            let active = active_include(vm, fname, &path);
+            let saved = vm.include_or_eval.replace(active);
+            let opened = opener(vm, &path, true);
+            vm.include_or_eval = saved;
+            return match opened? {
                 Some((resolved, source)) => {
                     if once && vm.interp.is_included(&resolved) {
                         return Ok(Value::Bool(true));
                     }
                     run_included(vm, cx, fname, resolved, source)
                 }
-                None => {
-                    let ip = vm.ini_get("include_path").map(|v| v.to_string()).unwrap_or_default();
-                    if required {
-                        let mut m = b"Failed opening required '".to_vec();
-                        m.extend_from_slice(&path);
-                        m.extend_from_slice(format!("' (include_path='{ip}')").as_bytes());
-                        return Err(vm.throw_error("Error", PhpStr::from_vec(m)));
-                    }
-                    let mut m = format!("{fname}(): Failed opening '").into_bytes();
-                    m.extend_from_slice(&path);
-                    m.extend_from_slice(format!("' for inclusion (include_path='{ip}')").as_bytes());
-                    vm.engine_warning(PhpStr::from_vec(m))?;
-                    Ok(Value::Bool(false))
-                }
+                None => failed_open(vm, fname, &path, required),
             };
         }
     }
@@ -240,25 +273,11 @@ pub fn include(vm: &mut Vm, cx: &Ctx, op: IncludeOp, path: Value) -> PResult<Val
     };
     let Some(resolved) = resolved else {
         if path.is_empty() {
-            vm.engine_warning(format!("{fname}(): Filename cannot be empty"))?;
+            include_docref(vm, fname, &path, None, "Filename cannot be empty")?;
         } else {
-            let mut m = format!("{fname}(").into_bytes();
-            m.extend_from_slice(&path);
-            m.extend_from_slice(b"): Failed to open stream: No such file or directory");
-            vm.engine_warning(PhpStr::from_vec(m))?;
+            include_docref(vm, fname, &path, None, "Failed to open stream: No such file or directory")?;
         }
-        let ip = vm.ini_get("include_path").map(|v| v.to_string()).unwrap_or_default();
-        if required {
-            let mut m = b"Failed opening required '".to_vec();
-            m.extend_from_slice(&path);
-            m.extend_from_slice(format!("' (include_path='{ip}')").as_bytes());
-            return Err(vm.throw_error("Error", PhpStr::from_vec(m)));
-        }
-        let mut m = format!("{fname}(): Failed opening '").into_bytes();
-        m.extend_from_slice(&path);
-        m.extend_from_slice(format!("' for inclusion (include_path='{ip}')").as_bytes());
-        vm.engine_warning(PhpStr::from_vec(m))?;
-        return Ok(Value::Bool(false));
+        return failed_open(vm, fname, &path, required);
     };
     if once && vm.interp.is_included(&resolved) {
         return Ok(Value::Bool(true));
@@ -266,18 +285,8 @@ pub fn include(vm: &mut Vm, cx: &Ctx, op: IncludeOp, path: Value) -> PResult<Val
     let source = match std::fs::read(resolved.to_string_lossy().as_ref()) {
         Ok(s) => s,
         Err(e) => {
-            let mut m = format!("{fname}(").into_bytes();
-            m.extend_from_slice(&path);
-            m.extend_from_slice(format!("): Failed to open stream: {}", io_error_text(&e)).as_bytes());
-            vm.engine_warning(PhpStr::from_vec(m))?;
-            if required {
-                let ip = vm.ini_get("include_path").map(|v| v.to_string()).unwrap_or_default();
-                let mut m = b"Failed opening required '".to_vec();
-                m.extend_from_slice(&path);
-                m.extend_from_slice(format!("' (include_path='{ip}')").as_bytes());
-                return Err(vm.throw_error("Error", PhpStr::from_vec(m)));
-            }
-            return Ok(Value::Bool(false));
+            include_docref(vm, fname, &path, None, format!("Failed to open stream: {}", io_error_text(&e)))?;
+            return failed_open(vm, fname, &path, required);
         }
     };
     run_included(vm, cx, fname, resolved, source)
@@ -378,7 +387,9 @@ pub fn eval_string(vm: &mut Vm, cx: &Ctx, code: Value) -> PResult<Value> {
 /// php-src's "Uncaught ..." fatal error.
 pub fn handle_uncaught(vm: &mut Vm, ex: crate::object::ObjRef) -> PResult<()> {
     if let Some(h) = vm.errors.exception_handler.take() {
+        let detached = std::mem::replace(&mut vm.interp.detached, vm.frames.is_empty());
         let r = vm.call(&h, vec![Value::Object(ex)]);
+        vm.interp.detached = detached;
         // The handler is restored only if it was not replaced.
         if vm.errors.exception_handler.is_none() {
             vm.errors.exception_handler = None;

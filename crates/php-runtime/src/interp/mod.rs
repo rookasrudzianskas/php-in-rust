@@ -82,6 +82,10 @@ pub struct State {
     pub depth: u32,
     /// Running shutdown functions.
     pub in_shutdown: bool,
+    /// No user code is executing (`EG(current_execute_data) == NULL`), as
+    /// when the user exception handler runs after the script: functions the
+    /// engine calls then have no call site.
+    pub detached: bool,
 }
 
 impl State {

@@ -353,23 +353,37 @@ fn try_stmt(vm: &mut Vm, cx: &Ctx, t: &TryStmt) -> PResult<()> {
     }
 }
 
-/// `zend_exception_set_previous`: appends `prev` at the end of `ex`'s chain.
+/// `zend_exception_set_previous`: appends `prev` at the end of `ex`'s chain,
+/// unless that would create a cycle (`ex`'s chain meets `prev`'s).
 pub fn chain_previous(ex: &ObjRef, prev: ObjRef) {
+    fn previous_of(o: &ObjRef) -> Option<ObjRef> {
+        match o.get_prop(b"previous").map(Value::into_unref) {
+            Some(Value::Object(p)) => Some(p),
+            _ => None,
+        }
+    }
     if ObjRef::ptr_eq(ex, &prev) {
         return;
     }
     let mut cur = ex.clone();
     loop {
-        match cur.get_prop(b"previous") {
-            Some(Value::Object(p)) => {
+        let mut ancestor = previous_of(&prev);
+        while let Some(a) = ancestor {
+            if ObjRef::ptr_eq(&a, &cur) {
+                return;
+            }
+            ancestor = previous_of(&a);
+        }
+        match previous_of(&cur) {
+            None => {
+                cur.set_prop(b"previous", Value::Object(prev));
+                return;
+            }
+            Some(p) => {
                 if ObjRef::ptr_eq(&p, &prev) {
                     return;
                 }
                 cur = p;
-            }
-            _ => {
-                cur.set_prop(b"previous", Value::Object(prev));
-                return;
             }
         }
     }
