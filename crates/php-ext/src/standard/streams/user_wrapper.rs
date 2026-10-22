@@ -3,9 +3,14 @@
 
 use std::any::Any;
 
-use php_runtime::{PResult, PhpStr, ResRef, Vm};
+use php_runtime::{PResult, PhpStr, Registry, ResRef, Vm};
 
 use super::wrappers::Wrapper;
+
+/// Registers `stream_wrapper_register` & co. (main/streams/userspace.c).
+pub fn register(r: &mut Registry) {
+    let _ = r;
+}
 
 /// A wrapper implemented by a PHP class.
 pub struct UserWrapper {

@@ -233,6 +233,8 @@ pub fn read_all(vm: &mut Vm, path: &[u8]) -> PResult<Option<Vec<u8>>> {
 }
 
 pub fn register(r: &mut Registry) {
+    user_wrapper::register(r);
+
     // main/streams/userspace.stub.php
     for (n, v) in [
         ("STREAM_USE_PATH", 1i64),
