@@ -124,10 +124,9 @@ fn period_properties_for(
     obj: &ObjRef,
     purpose: PropPurpose,
 ) -> PResult<Option<PhpArray>> {
-    match purpose {
-        PropPurpose::Debug if has_debug_info(obj.class()) => return Ok(None),
-        PropPurpose::GetObjectVars => return Ok(None),
-        _ => {}
+    // Every purpose (get_object_vars() included) sees the virtual properties.
+    if purpose == PropPurpose::Debug && has_debug_info(obj.class()) {
+        return Ok(None);
     }
     let mut props = object_property_table(obj);
     let p = period_of(obj);
