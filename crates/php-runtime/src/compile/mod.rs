@@ -118,6 +118,11 @@ pub(crate) struct FnState {
     loop_ids: Vec<u32>,
     next_loop_id: u32,
     finally_depth: u32,
+    /// Finally depth at which each loop (by id) was entered.
+    loop_fdepth: HashMap<u32, u32>,
+    /// Lines of `break`/`continue` leaving a finally block (reported by
+    /// pass_two, after the function is compiled).
+    finally_breakouts: Vec<u32>,
     /// Return type (for `return` checks).
     return_type: Option<ast::TypeHint>,
     is_generator: bool,
@@ -127,6 +132,9 @@ pub(crate) struct FnState {
     /// Property hook context: property name.
     hook_prop: Option<PhpStr>,
     hook_kind: Option<HookKind>,
+    /// The hook body accesses `$this->{hook_prop}` (the property is backed;
+    /// `zend_property_hook_uses_property`).
+    hook_uses_prop: bool,
 }
 
 impl FnState {
@@ -145,12 +153,15 @@ impl FnState {
             loop_ids: Vec::new(),
             next_loop_id: 1,
             finally_depth: 0,
+            loop_fdepth: HashMap::new(),
+            finally_breakouts: Vec::new(),
             return_type: None,
             is_generator: false,
             is_method: false,
             is_static: false,
             hook_prop: None,
             hook_kind: None,
+            hook_uses_prop: false,
         }
     }
 }
@@ -465,6 +476,7 @@ impl<'v> Lowerer<'v> {
         let id = self.fs.next_loop_id;
         self.fs.next_loop_id += 1;
         self.fs.loop_ids.push(id);
+        self.fs.loop_fdepth.insert(id, self.fs.finally_depth);
         let r = self.block(body);
         self.fs.loop_ids.pop();
         self.fs.loops.pop();
@@ -535,6 +547,7 @@ impl<'v> Lowerer<'v> {
                 let id = self.fs.next_loop_id;
                 self.fs.next_loop_id += 1;
                 self.fs.loop_ids.push(id);
+                self.fs.loop_fdepth.insert(id, self.fs.finally_depth);
                 for (i, c) in cases.iter().enumerate() {
                     self.line = c.line;
                     if c.cond.is_none() {
@@ -718,6 +731,9 @@ impl<'v> Lowerer<'v> {
 
     /// `zend_resolve_goto_label` checks, done once the function is compiled.
     fn finish_gotos(&mut self) -> CResult<()> {
+        if let Some(&line) = self.fs.finally_breakouts.first() {
+            return err("jump out of a finally block is disallowed", line);
+        }
         let gotos = std::mem::take(&mut self.fs.gotos);
         for (id, line, path, fdepth) in gotos {
             let name = self.fs.labels[id as usize].clone();
@@ -765,6 +781,10 @@ impl<'v> Lowerer<'v> {
                 "Cannot '{name}' {depth} level{}",
                 if depth == 1 { "" } else { "s" }
             ));
+        }
+        let target_id = self.fs.loop_ids[(n - depth) as usize];
+        if self.fs.loop_fdepth.get(&target_id).copied().unwrap_or(0) < self.fs.finally_depth {
+            self.fs.finally_breakouts.push(self.line);
         }
         if !is_break {
             let target = self.fs.loops[(n - depth) as usize];
@@ -832,6 +852,16 @@ impl<'v> Lowerer<'v> {
                 }
             }
         };
+        if v.is_some() && self.class.is_some() && self.fs.kind == FuncKind::Method {
+            if self.fs.name.eq_ignore_ascii_case(b"__construct") {
+                self.diag(level::E_DEPRECATED, "Returning a value from a constructor is deprecated")?;
+            } else if self.fs.name.eq_ignore_ascii_case(b"__destruct") {
+                self.diag(level::E_DEPRECATED, "Returning a value from a destructor is deprecated")?;
+            }
+        }
+        if self.fs.finally_depth > 0 {
+            self.diag(level::E_DEPRECATED, "Returning from a finally block is deprecated")?;
+        }
         Ok(StmtKind::Return(v))
     }
 

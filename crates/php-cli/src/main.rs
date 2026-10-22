@@ -77,11 +77,30 @@ fn new_vm(config: &args::CliConfig, out: &SharedOut) -> Vm {
     vm.hooks.on_request_shutdown(deferred_closes);
     for e in &config.ini_entries {
         let name = to_bytes(&e.name);
-        let value = to_bytes(&e.value);
+        let value = ini_entry_value(&mut vm, e).unwrap_or_else(|| to_bytes(&e.value));
         php_ext::standard::basic::set_cfg_entry(&mut vm, PhpStr::from_vec(name.clone()), Value::String(PhpStr::from_vec(value.clone())));
         vm.ini_set_system(&name, PhpStr::from_vec(value));
     }
     vm
+}
+
+/// The value of a `-d name=value` entry as php's ini scanner reads the line
+/// it builds for it (quotes stripped, constants such as `E_ALL` and
+/// expressions evaluated).
+fn ini_entry_value(vm: &mut Vm, e: &args::IniEntry) -> Option<Vec<u8>> {
+    let line = to_bytes(&e.to_ini_line());
+    let mut out = None;
+    let ok = php_ext::standard::streams::ini::parse_ini_with(vm, &line, Some(b"Unknown"), 0, &mut |vm, ev| {
+        if let php_ext::standard::streams::ini::IniEvent::Entry { value, .. } = ev {
+            out = Some(match value {
+                Some(v) => vm.to_php_string(v)?.to_vec(),
+                None => Vec::new(),
+            });
+        }
+        Ok(())
+    })
+    .ok()?;
+    if ok { out } else { None }
 }
 
 /// `$_SERVER`, `$argv`, `$argc` and the other superglobals.

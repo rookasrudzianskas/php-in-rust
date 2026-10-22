@@ -1,13 +1,14 @@
-//! Objects: property access (`zend_std_{read,write,has,unset}_property`),
-//! visibility, magic `__get/__set/__isset/__unset` with recursion guards,
-//! typed and readonly properties, `ArrayAccess`, static properties,
-//! `clone`, instantiation and destructors.
+//! Objects: property access (`zend_std_{read,write,has,unset}_property`,
+//! `get_property_ptr_ptr`), visibility, asymmetric visibility, readonly and
+//! typed properties, property hooks, magic `__get/__set/__isset/__unset`
+//! with recursion guards, `ArrayAccess`, static properties, `clone`,
+//! instantiation and destructors.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::class::{ClassRef, PropPurpose, PropertyInfo, class_flags, member_flags};
+use crate::class::{ClassRef, Function, PropPurpose, PropertyInfo, class_flags, member_flags};
 use crate::errors::level;
 use crate::object::{ObjRef, obj_flags};
 use crate::types::CoerceMode;
@@ -17,6 +18,7 @@ use crate::value::{PhpArray, PhpRef, PhpStr, Value};
 use crate::vm::{Flow, PResult, Vm};
 
 use super::Ctx;
+use super::decl::{HookSet, display_class_name, prop_hooks};
 
 // ---------------------------------------------------------------------------
 // Per-object interpreter state
@@ -27,13 +29,19 @@ const IN_SET: u8 = 2;
 const IN_ISSET: u8 = 4;
 const IN_UNSET: u8 = 8;
 
+const SET_MASK: u32 = member_flags::PUBLIC_SET | member_flags::PROTECTED_SET | member_flags::PRIVATE_SET;
+
 /// Interpreter data attached to objects (`PhpObject::extra`).
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ObjExtra {
     /// Magic-method recursion guards per property name.
     guards: HashMap<PhpStr, u8>,
-    /// Declared slots that were `unset()` (as opposed to never initialised).
+    /// Declared slots that were `unset()` (as opposed to never initialised:
+    /// the inverse of `IS_PROP_UNINIT`).
     unset_slots: Vec<usize>,
+    /// Readonly slots that may be re-initialised once (`IS_PROP_REINITABLE`,
+    /// set while `__clone` / clone-with runs).
+    reinitable: Vec<usize>,
 }
 
 fn with_extra<R>(obj: &ObjRef, f: impl FnOnce(&mut ObjExtra) -> R) -> R {
@@ -45,8 +53,12 @@ fn with_extra<R>(obj: &ObjRef, f: impl FnOnce(&mut ObjExtra) -> R) -> R {
     f(x)
 }
 
+fn has_extra(obj: &ObjRef) -> bool {
+    obj.obj().extra.borrow().is_some()
+}
+
 fn guard_get(obj: &ObjRef, name: &PhpStr, bit: u8) -> bool {
-    if obj.obj().extra.borrow().is_none() {
+    if !has_extra(obj) {
         return false;
     }
     with_extra(obj, |x| x.guards.get(name).is_some_and(|g| g & bit != 0))
@@ -64,14 +76,14 @@ fn guard_set(obj: &ObjRef, name: &PhpStr, bit: u8, on: bool) {
 }
 
 fn slot_was_unset(obj: &ObjRef, slot: usize) -> bool {
-    if obj.obj().extra.borrow().is_none() {
+    if !has_extra(obj) {
         return false;
     }
     with_extra(obj, |x| x.unset_slots.contains(&slot))
 }
 
 fn mark_slot_unset(obj: &ObjRef, slot: usize, on: bool) {
-    if !on && obj.obj().extra.borrow().is_none() {
+    if !on && !has_extra(obj) {
         return;
     }
     with_extra(obj, |x| {
@@ -85,6 +97,50 @@ fn mark_slot_unset(obj: &ObjRef, slot: usize, on: bool) {
     });
 }
 
+fn slot_reinitable(obj: &ObjRef, slot: usize) -> bool {
+    if !has_extra(obj) {
+        return false;
+    }
+    with_extra(obj, |x| x.reinitable.contains(&slot))
+}
+
+fn clear_reinitable(obj: &ObjRef, slot: usize) {
+    if !has_extra(obj) {
+        return;
+    }
+    with_extra(obj, |x| x.reinitable.retain(|s| *s != slot));
+}
+
+/// `zend_object_set_properties_reinitable`.
+fn set_properties_reinitable(obj: &ObjRef, on: bool) {
+    let class = obj.class().clone();
+    let has_readonly = class.properties.values().any(|p| p.is_readonly() && !p.is_static());
+    if !has_readonly {
+        return;
+    }
+    if !on {
+        if has_extra(obj) {
+            with_extra(obj, |x| x.reinitable.clear());
+        }
+        return;
+    }
+    let slots: Vec<usize> = {
+        let props = obj.obj().props.borrow();
+        (0..props.len()).filter(|&i| !props[i].is_undef()).collect()
+    };
+    with_extra(obj, |x| x.reinitable = slots);
+}
+
+/// Whether a declared slot is uninitialised (`IS_PROP_UNINIT`): undefined and
+/// never `unset()`.
+fn slot_uninit(obj: &ObjRef, slot: usize) -> bool {
+    obj.obj().props.borrow().get(slot).is_none_or(Value::is_undef) && !slot_was_unset(obj, slot)
+}
+
+fn slot_value(obj: &ObjRef, slot: usize) -> Value {
+    obj.obj().props.borrow().get(slot).cloned().unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 // Lookup (zend_get_property_offset)
 // ---------------------------------------------------------------------------
@@ -94,12 +150,14 @@ pub(crate) enum Lookup {
     Dynamic,
     /// Declared but not accessible from the scope.
     Denied(PropertyInfo),
+    /// A name starting with `"\0"`.
+    BadName,
 }
 
 /// `is_protected_compatible_scope`.
 pub(crate) fn protected_ok(decl_class: &[u8], scope: Option<&ClassRef>, vm: &Vm) -> bool {
     let Some(scope) = scope else { return false };
-    if scope.lc_name.eq_ignore_ascii_case(decl_class) {
+    if scope.lc_name.eq_ignore_ascii_case(decl_class) || scope.name.eq_ignore_ascii_case(decl_class) {
         return true;
     }
     if scope.instance_of_name(decl_class) {
@@ -111,7 +169,8 @@ pub(crate) fn protected_ok(decl_class: &[u8], scope: Option<&ClassRef>, vm: &Vm)
     }
 }
 
-/// Root declaring class of a protected property (the topmost declaration).
+/// Class of the root declaration (`prop_info->prototype->ce`): the topmost
+/// non-private declaration of the property in the class hierarchy.
 fn prop_root_class(class: &ClassRef, name: &[u8]) -> PhpStr {
     let mut root = None;
     let mut c = Some(class.clone());
@@ -119,7 +178,11 @@ fn prop_root_class(class: &ClassRef, name: &[u8]) -> PhpStr {
         if let Some(p) = ce.properties.get(name) {
             if p.flags & member_flags::PRIVATE == 0 {
                 root = Some(p.declaring_class.clone());
+            } else {
+                break;
             }
+        } else {
+            break;
         }
         c = ce.parent.clone();
     }
@@ -128,40 +191,34 @@ fn prop_root_class(class: &ClassRef, name: &[u8]) -> PhpStr {
 
 pub(crate) fn lookup_prop(vm: &Vm, class: &ClassRef, name: &[u8], scope: Option<&ClassRef>) -> Lookup {
     let Some(info) = class.properties.get(name) else {
-        // A private property of the scope class, shadowed away in the object's class?
-        if let Some(s) = scope {
-            if !std::ptr::eq(&**s, &**class) && class.instance_of(s) {
-                if let Some(p) = s.properties.get(name) {
-                    if p.flags & member_flags::PRIVATE != 0
-                        && p.declaring_class.eq_ignore_ascii_case(&s.name)
-                        && !p.is_static()
-                    {
-                        return Lookup::Declared(p.clone());
-                    }
-                }
-            }
+        if name.first() == Some(&0) {
+            return Lookup::BadName;
         }
         return Lookup::Dynamic;
     };
-    if info.is_static() {
-        return Lookup::Dynamic;
-    }
     let flags = info.flags;
     if flags & (member_flags::PRIVATE | member_flags::PROTECTED | member_flags::CHANGED) != 0 {
         let same = scope.is_some_and(|s| s.name.eq_ignore_ascii_case(&info.declaring_class));
         if !same {
             if flags & member_flags::CHANGED != 0 {
+                // zend_get_parent_private_property
                 if let Some(s) = scope {
-                    if class.instance_of(s) {
+                    if !std::ptr::eq(&**s, &**class) && class.instance_of(s) {
                         if let Some(p) = s.properties.get(name) {
-                            if p.flags & member_flags::PRIVATE != 0 && p.declaring_class.eq_ignore_ascii_case(&s.name) {
+                            if p.flags & member_flags::PRIVATE != 0
+                                && p.declaring_class.eq_ignore_ascii_case(&s.name)
+                                && (!p.is_static() || info.is_static())
+                            {
+                                if p.is_static() {
+                                    return Lookup::Dynamic;
+                                }
                                 return Lookup::Declared(p.clone());
                             }
                         }
                     }
                 }
                 if flags & member_flags::PUBLIC != 0 {
-                    return Lookup::Declared(info.clone());
+                    return found(info);
                 }
             }
             if flags & member_flags::PRIVATE != 0 {
@@ -177,6 +234,17 @@ pub(crate) fn lookup_prop(vm: &Vm, class: &ClassRef, name: &[u8], scope: Option<
                 }
             }
         }
+    } else if let Some(s) = scope {
+        // A private property of the scope class shadowed by a public one
+        // redeclared in a subclass without ZEND_ACC_CHANGED.
+        let _ = s;
+    }
+    found(info)
+}
+
+fn found(info: &PropertyInfo) -> Lookup {
+    if info.is_static() {
+        return Lookup::Dynamic;
     }
     Lookup::Declared(info.clone())
 }
@@ -191,17 +259,29 @@ fn visibility_word(flags: u32) -> &'static str {
     }
 }
 
+/// `zend_bad_property_access`.
 fn denied_error(vm: &mut Vm, info: &PropertyInfo, class: &ClassRef) -> Flow {
-    let _ = class;
     vm.throw_error(
         "Error",
         format!(
             "Cannot access {} property {}::${}",
             visibility_word(info.flags),
-            crate::interp::decl::display_class_name(&class.name),
+            display_class_name(&class.name),
             info.name
         ),
     )
+}
+
+fn bad_name_error(vm: &mut Vm) -> Flow {
+    vm.throw_error("Error", "Cannot access property starting with \"\\0\"")
+}
+
+/// The error of a wrong (inaccessible) property offset (`zend_wrong_offset`).
+fn wrong_offset_error(vm: &mut Vm, lookup: &Lookup, class: &ClassRef) -> Flow {
+    match lookup {
+        Lookup::Denied(info) => denied_error(vm, info, class),
+        _ => bad_name_error(vm),
+    }
 }
 
 fn uninit_error(vm: &mut Vm, info: &PropertyInfo) -> Flow {
@@ -209,19 +289,182 @@ fn uninit_error(vm: &mut Vm, info: &PropertyInfo) -> Flow {
         "Error",
         format!(
             "Typed property {}::${} must not be accessed before initialization",
-            crate::interp::decl::display_class_name(&info.declaring_class),
+            display_class_name(&info.declaring_class),
             info.name
         ),
     )
+}
+
+fn readonly_modification_error(vm: &mut Vm, info: &PropertyInfo) -> Flow {
+    vm.throw_error(
+        "Error",
+        format!(
+            "Cannot modify readonly property {}::${}",
+            display_class_name(&info.declaring_class),
+            info.name
+        ),
+    )
+}
+
+fn readonly_indirect_modification_error(vm: &mut Vm, info: &PropertyInfo) -> Flow {
+    vm.throw_error(
+        "Error",
+        format!(
+            "Cannot indirectly modify readonly property {}::${}",
+            display_class_name(&info.declaring_class),
+            info.name
+        ),
+    )
+}
+
+/// The called scope of the running code (`zend_get_called_scope`).
+fn called_scope(vm: &Vm) -> Option<ClassRef> {
+    for f in vm.frames.iter().rev() {
+        if let Some(env) = &f.env {
+            return env.called.clone().or_else(|| env.scope.clone());
+        }
+    }
+    None
+}
+
+/// `zend_asymmetric_visibility_property_modification_error`.
+fn asymmetric_error(vm: &mut Vm, info: &PropertyInfo, op: &str) -> Flow {
+    let vis = if info.flags & member_flags::PRIVATE_SET != 0 {
+        "private(set)"
+    } else if info.is_readonly() {
+        "protected(set) readonly"
+    } else {
+        "protected(set)"
+    };
+    let from = match called_scope(vm) {
+        Some(s) => format!("scope {}", display_class_name(&s.name)),
+        None => "global scope".to_string(),
+    };
+    vm.throw_error(
+        "Error",
+        format!(
+            "Cannot {op} {vis} property {}::${} from {from}",
+            display_class_name(&info.declaring_class),
+            info.name
+        ),
+    )
+}
+
+/// `zend_asymmetric_property_has_set_access` (for properties with a
+/// restricted set visibility).
+fn has_set_access(vm: &Vm, class: &ClassRef, info: &PropertyInfo, scope: Option<&ClassRef>) -> bool {
+    if scope.is_some_and(|s| s.name.eq_ignore_ascii_case(&info.declaring_class)) {
+        return true;
+    }
+    info.flags & member_flags::PROTECTED_SET != 0 && protected_ok(&prop_root_class(class, &info.name), scope, vm)
+}
+
+/// Whether a write to `info` needs the readonly / set-visibility checks and
+/// they fail.
+fn set_restricted(vm: &Vm, class: &ClassRef, info: &PropertyInfo, scope: Option<&ClassRef>) -> bool {
+    info.is_readonly() || (info.flags & SET_MASK != 0 && !has_set_access(vm, class, info, scope))
+}
+
+// ---------------------------------------------------------------------------
+// Hooks
+// ---------------------------------------------------------------------------
+
+fn is_virtual(info: &PropertyInfo) -> bool {
+    info.flags & member_flags::VIRTUAL != 0
+}
+
+/// `zend_should_call_hook`: hooks are bypassed inside the property's own
+/// hooks on the same object (backing value access).
+fn should_call_hook(vm: &Vm, info: &PropertyInfo, obj: &ObjRef) -> bool {
+    !super::decl::in_hook_of(vm, obj, &info.name)
+}
+
+fn hook_caller(vm: &Vm, strict: bool) -> super::call::Caller {
+    super::call::Caller {
+        strict,
+        site: Some((vm.current_file.clone(), vm.current_line)),
+    }
+}
+
+fn caller_strict(vm: &mut Vm) -> bool {
+    super::call::calling_env(vm).strict
+}
+
+/// Calls a hook or magic method of `obj` from the current location.
+fn call_on(vm: &mut Vm, obj: &ObjRef, f: &Rc<Function>, args: Vec<Value>, strict: bool) -> PResult<Value> {
+    let caller = hook_caller(vm, strict);
+    let b = super::call::Bound {
+        positional: args,
+        named: Vec::new(),
+    };
+    super::call::invoke(vm, f, b, Some(obj.clone()), Some(obj.class().clone()), None, &caller, false)
+}
+
+fn no_backing_error(vm: &mut Vm, class: &ClassRef, name: &[u8], read: bool) -> Flow {
+    vm.throw_error(
+        "Error",
+        format!(
+            "Must not {} virtual property {}::${}",
+            if read { "read from" } else { "write to" },
+            display_class_name(&class.name),
+            String::from_utf8_lossy(name)
+        ),
+    )
+}
+
+fn set_only_error(vm: &mut Vm, class: &ClassRef, name: &[u8]) -> Flow {
+    vm.throw_error(
+        "Error",
+        format!(
+            "Cannot read from set-only virtual property {}::${}",
+            display_class_name(&class.name),
+            String::from_utf8_lossy(name)
+        ),
+    )
+}
+
+fn indirect_hook_error(vm: &mut Vm, class: &ClassRef, name: &[u8]) -> Flow {
+    vm.throw_error(
+        "Error",
+        format!(
+            "Indirect modification of {}::${} is not allowed",
+            display_class_name(&class.name),
+            String::from_utf8_lossy(name)
+        ),
+    )
+}
+
+/// How a property is resolved after looking at its hooks.
+enum Resolved {
+    /// The property slot; the info is kept only for typed properties
+    /// (php-src's `prop_info`).
+    Slot(usize, Option<PropertyInfo>),
+    /// A hook call produced this value.
+    Value(Value),
 }
 
 // ---------------------------------------------------------------------------
 // Read
 // ---------------------------------------------------------------------------
 
-fn call_magic(vm: &mut Vm, obj: &ObjRef, method: &[u8], args: Vec<Value>) -> PResult<Value> {
-    let m = obj.class().find_method(method).cloned().expect("magic method present");
-    super::call::call_method_fn(vm, obj, &m, args, None)
+/// Fetch type (`BP_VAR_*`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Fetch {
+    R,
+    Is,
+    W,
+    Rw,
+    Unset,
+}
+
+impl Fetch {
+    fn is_write(self) -> bool {
+        matches!(self, Fetch::W | Fetch::Rw | Fetch::Unset)
+    }
+}
+
+fn typed(info: &PropertyInfo) -> Option<PropertyInfo> {
+    info.ty.is_some().then(|| info.clone())
 }
 
 /// `$obj->name` (`zend_std_read_property`).
@@ -231,164 +474,254 @@ pub fn read_prop(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &Php
             return Ok(v.into_unref());
         }
     }
+    let v = read_property(vm, scope, obj, name, if is { Fetch::Is } else { Fetch::R })?;
+    Ok(v.into_unref())
+}
+
+pub(crate) fn read_property(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &PhpStr, ty: Fetch) -> PResult<Value> {
     let class = obj.class().clone();
-    match lookup_prop(vm, &class, name, scope) {
-        Lookup::Declared(info) => {
-            if let Some(hooks) = super::decl::prop_hooks(&info) {
-                if let Some(get) = &hooks.get {
-                    if !super::decl::in_hook_of(vm, obj, &info.name) {
-                        return Ok(super::call::call_method_fn(vm, obj, get, Vec::new(), None)?.into_unref());
+    let lookup = lookup_prop(vm, &class, name, scope);
+    let silent = ty == Fetch::Is || class.magic.get.is_some();
+    // The property slot (valid offset) and its typed info.
+    let mut slot: Option<(usize, Option<PropertyInfo>)> = None;
+    match &lookup {
+        Lookup::Declared(info) => match prop_hooks(info) {
+            Some(hooks) => match read_hooked(vm, obj, &class, info, hooks, name, ty)? {
+                Resolved::Value(v) => return Ok(v),
+                Resolved::Slot(s, ti) => slot = Some((s, ti)),
+            },
+            None => slot = Some((info.slot, typed(info))),
+        },
+        Lookup::Dynamic => {
+            let found = obj.obj().dyn_props.borrow().as_ref().and_then(|d| d.get_str(name).cloned());
+            if let Some(v) = found {
+                return Ok(v);
+            }
+        }
+        Lookup::Denied(_) | Lookup::BadName => {
+            if !silent {
+                return Err(wrong_offset_error(vm, &lookup, &class));
+            }
+        }
+    }
+    let mut prop_info: Option<PropertyInfo> = None;
+    if let Some((s, ti)) = slot {
+        let v = slot_value(obj, s);
+        if let Some(info) = &ti {
+            if ty.is_write() && set_restricted(vm, &class, info, scope) {
+                if matches!(v, Value::Object(_)) {
+                    return Ok(v);
+                }
+                if v.is_undef() && ty == Fetch::Unset {
+                    return Ok(Value::Null);
+                }
+                if info.is_readonly() {
+                    return Err(readonly_indirect_modification_error(vm, info));
+                }
+                return Err(asymmetric_error(vm, info, "indirectly modify"));
+            }
+        }
+        if !v.is_undef() {
+            return Ok(v);
+        }
+        if ti.is_some() && slot_uninit(obj, s) {
+            // Skip __get() for uninitialized typed properties.
+            return uninit_read(vm, &class, ti.as_ref(), name, ty);
+        }
+        prop_info = ti;
+    }
+
+    // Magic isset (`??`, `isset()`-like reads).
+    if ty == Fetch::Is && class.magic.isset.is_some() {
+        if !guard_get(obj, name, IN_ISSET) {
+            guard_set(obj, name, IN_ISSET, true);
+            let r = call_magic(vm, obj, b"__isset", vec![Value::String(name.clone())]);
+            let r = match r {
+                Ok(v) => v,
+                Err(e) => {
+                    guard_set(obj, name, IN_ISSET, false);
+                    return Err(e);
+                }
+            };
+            let r = super::eval::to_bool(vm, &r);
+            let truthy = match r {
+                Ok(b) => b,
+                Err(e) => {
+                    guard_set(obj, name, IN_ISSET, false);
+                    return Err(e);
+                }
+            };
+            if !truthy {
+                guard_set(obj, name, IN_ISSET, false);
+                return Ok(Value::Null);
+            }
+            // __isset() may have materialised the property (GH-12695).
+            let now = match &lookup {
+                Lookup::Declared(info) if prop_hooks(info).is_none() => {
+                    let v = slot_value(obj, info.slot);
+                    (!v.is_undef()).then_some(v)
+                }
+                Lookup::Dynamic => obj.obj().dyn_props.borrow().as_ref().and_then(|d| d.get_str(name).cloned()),
+                _ => None,
+            };
+            if let Some(v) = now {
+                guard_set(obj, name, IN_ISSET, false);
+                return Ok(v);
+            }
+            if class.magic.get.is_some() && !guard_get(obj, name, IN_GET) {
+                let r = call_getter(vm, obj, &class, name, prop_info.as_ref(), ty);
+                guard_set(obj, name, IN_ISSET, false);
+                return r;
+            }
+            guard_set(obj, name, IN_ISSET, false);
+            return uninit_read(vm, &class, prop_info.as_ref(), name, ty);
+        } else if class.magic.get.is_some() && !guard_get(obj, name, IN_GET) {
+            return call_getter(vm, obj, &class, name, prop_info.as_ref(), ty);
+        }
+    } else if class.magic.get.is_some() {
+        if !guard_get(obj, name, IN_GET) {
+            return call_getter(vm, obj, &class, name, prop_info.as_ref(), ty);
+        } else if matches!(lookup, Lookup::Denied(_) | Lookup::BadName) {
+            return Err(wrong_offset_error(vm, &lookup, &class));
+        }
+    }
+    uninit_read(vm, &class, prop_info.as_ref(), name, ty)
+}
+
+/// The `uninit_error` tail of `zend_std_read_property`.
+fn uninit_read(vm: &mut Vm, class: &ClassRef, prop_info: Option<&PropertyInfo>, name: &[u8], ty: Fetch) -> PResult<Value> {
+    if ty != Fetch::Is {
+        match prop_info {
+            Some(info) => return Err(uninit_error(vm, info)),
+            None => undefined_property(vm, class, name)?,
+        }
+    }
+    Ok(Value::Null)
+}
+
+/// Hooked property read: calls the get hook or resolves to the backing slot.
+fn read_hooked(vm: &mut Vm, obj: &ObjRef, class: &ClassRef, info: &PropertyInfo, hooks: &HookSet, name: &PhpStr, ty: Fetch) -> PResult<Resolved> {
+    let Some(get) = hooks.get.clone() else {
+        if is_virtual(info) {
+            return Err(set_only_error(vm, class, name));
+        }
+        let v = slot_value(obj, info.slot);
+        if v.is_undef() {
+            return Err(uninit_error(vm, info));
+        }
+        if ty.is_write() {
+            if !matches!(v.deref().type_code(), crate::value::TypeCode::Object) {
+                return Err(indirect_hook_error(vm, class, name));
+            }
+            return Ok(Resolved::Value(v.into_unref()));
+        }
+        return Ok(Resolved::Value(v));
+    };
+    if !should_call_hook(vm, info, obj) {
+        if is_virtual(info) {
+            return Err(no_backing_error(vm, class, name, true));
+        }
+        return Ok(Resolved::Slot(info.slot, typed(info)));
+    }
+    let strict = caller_strict(vm);
+    let rv = call_on(vm, obj, &get, Vec::new(), strict)?;
+    if !rv.is_ref() && ty.is_write() && !matches!(rv, Value::Object(_)) {
+        return Err(indirect_hook_error(vm, class, name));
+    }
+    Ok(Resolved::Value(rv))
+}
+
+/// Calls `__get` (`zend_std_call_getter` with the guard and the checks of
+/// `zend_std_read_property`).
+fn call_getter(vm: &mut Vm, obj: &ObjRef, class: &ClassRef, name: &PhpStr, prop_info: Option<&PropertyInfo>, ty: Fetch) -> PResult<Value> {
+    guard_set(obj, name, IN_GET, true);
+    let r = call_magic(vm, obj, b"__get", vec![Value::String(name.clone())]);
+    guard_set(obj, name, IN_GET, false);
+    let mut rv = r?;
+    if !rv.is_ref() && ty.is_write() && !matches!(rv, Value::Object(_)) {
+        vm.engine_notice(format!(
+            "Indirect modification of overloaded property {}::${} has no effect",
+            display_class_name(&class.name),
+            name
+        ))?;
+    }
+    if let Some(info) = prop_info {
+        // zend_verify_prop_assignable_by_ref_ex(..., MAGIC_GET)
+        let strict = class.magic.get.as_ref().and_then(|f| super::user_fn(f)).is_some_and(|u| u.code.strict());
+        let inner = rv.deref().clone();
+        match coerce_prop_silent(vm, info, inner.clone(), strict)? {
+            Some(c) => {
+                if !c.identical(&inner) {
+                    match &rv {
+                        Value::Ref(r) => {
+                            r.set(c);
+                        }
+                        _ => rv = c,
                     }
                 }
             }
-            let v = obj.obj().props.borrow().get(info.slot).cloned().unwrap_or_default();
-            if !v.is_undef() {
-                return Ok(v.into_unref());
+            None => {
+                return Err(vm.throw_type_error(format!(
+                    "Value of type {} returned from {}::__get() must be compatible with unset property {}::${} of type {}",
+                    inner.type_name(),
+                    display_class_name(&info.declaring_class),
+                    display_class_name(&info.declaring_class),
+                    info.name,
+                    info.ty.as_ref().map(|t| t.to_type_string()).unwrap_or_default()
+                )));
             }
-            // Unset or uninitialised.
-            let was_unset = slot_was_unset(obj, info.slot);
-            if class.magic.get.is_some() && !guard_get(obj, name, IN_GET) && (info.ty.is_none() || was_unset) {
-                return magic_get(vm, obj, name, is);
-            }
-            if is {
-                return Ok(Value::Null);
-            }
-            if info.ty.is_some() {
-                return Err(uninit_error(vm, &info));
-            }
-            undefined_property(vm, &class, name)?;
-            Ok(Value::Null)
-        }
-        Lookup::Dynamic => {
-            let found = obj
-                .obj()
-                .dyn_props
-                .borrow()
-                .as_ref()
-                .and_then(|d| d.get_str(name).cloned());
-            if let Some(v) = found {
-                return Ok(v.into_unref());
-            }
-            if class.magic.get.is_some() && !guard_get(obj, name, IN_GET) {
-                return magic_get(vm, obj, name, is);
-            }
-            if name.first() == Some(&0) && !name.is_empty() {
-                return Err(vm.throw_error("Error", "Cannot access property starting with \"\\0\""));
-            }
-            if !is {
-                undefined_property(vm, &class, name)?;
-            }
-            Ok(Value::Null)
-        }
-        Lookup::Denied(info) => {
-            if class.magic.get.is_some() && !guard_get(obj, name, IN_GET) {
-                return magic_get(vm, obj, name, is);
-            }
-            if is {
-                return Ok(Value::Null);
-            }
-            Err(denied_error(vm, &info, &class))
         }
     }
+    Ok(rv)
 }
 
 fn undefined_property(vm: &mut Vm, class: &ClassRef, name: &[u8]) -> PResult<()> {
-    let mut m = format!(
-        "Undefined property: {}::$",
-        super::decl::display_class_name(&class.name)
-    )
-    .into_bytes();
+    let mut m = format!("Undefined property: {}::$", display_class_name(&class.name)).into_bytes();
     m.extend_from_slice(name);
     vm.engine_warning(PhpStr::from_vec(m))
 }
 
-fn magic_get(vm: &mut Vm, obj: &ObjRef, name: &PhpStr, is: bool) -> PResult<Value> {
-    if is {
-        // `??` / isset-like reads call __isset first.
-        if obj.class().magic.isset.is_some() && !guard_get(obj, name, IN_ISSET) {
-            guard_set(obj, name, IN_ISSET, true);
-            let r = call_magic(vm, obj, b"__isset", vec![Value::String(name.clone())]);
-            guard_set(obj, name, IN_ISSET, false);
-            if !super::eval::to_bool(vm, &r?)? {
-                return Ok(Value::Null);
-            }
-        } else if obj.class().magic.isset.is_none() {
-            return Ok(Value::Null);
-        }
-    }
-    guard_set(obj, name, IN_GET, true);
-    let r = call_magic(vm, obj, b"__get", vec![Value::String(name.clone())]);
-    guard_set(obj, name, IN_GET, false);
-    Ok(r?.into_unref())
+fn call_magic(vm: &mut Vm, obj: &ObjRef, method: &[u8], args: Vec<Value>) -> PResult<Value> {
+    let m = obj.class().find_method(method).cloned().expect("magic method present");
+    let strict = caller_strict(vm);
+    call_on(vm, obj, &m, args, strict)
 }
 
 // ---------------------------------------------------------------------------
 // Write
 // ---------------------------------------------------------------------------
 
-/// Set-visibility check for readonly / asymmetric properties.
-fn check_set_access(vm: &mut Vm, info: &PropertyInfo, scope: Option<&ClassRef>, op: &str) -> PResult<()> {
-    let mut set_flags = info.flags & (member_flags::PRIVATE_SET | member_flags::PROTECTED_SET | member_flags::PUBLIC_SET);
-    if set_flags == 0 && info.is_readonly() {
-        set_flags = if info.flags & member_flags::PRIVATE != 0 {
-            member_flags::PRIVATE_SET
-        } else {
-            member_flags::PROTECTED_SET
-        };
-    }
-    if set_flags == 0 || set_flags & member_flags::PUBLIC_SET != 0 {
-        return Ok(());
-    }
-    let same = scope.is_some_and(|s| s.name.eq_ignore_ascii_case(&info.declaring_class));
-    if same {
-        return Ok(());
-    }
-    if set_flags & member_flags::PROTECTED_SET != 0 && protected_ok(&info.declaring_class, scope, vm) {
-        return Ok(());
-    }
-    let vis = if set_flags & member_flags::PRIVATE_SET != 0 {
-        "private(set)"
-    } else if info.is_readonly() {
-        "protected(set) readonly"
-    } else {
-        "protected(set)"
-    };
-    let from = match scope {
-        Some(s) => format!("scope {}", super::decl::display_class_name(&s.name)),
-        None => "global scope".to_string(),
-    };
-    Err(vm.throw_error(
-        "Error",
-        format!(
-            "Cannot {op} {vis} property {}::${} from {from}",
-            super::decl::display_class_name(&info.declaring_class),
-            info.name
-        ),
-    ))
-}
-
 /// Coerces a value for a typed property (`zend_verify_property_type`).
 pub(crate) fn coerce_prop(vm: &mut Vm, info: &PropertyInfo, v: Value, strict: bool) -> PResult<Value> {
-    let Some(ty) = &info.ty else { return Ok(v) };
-    if ty.is_mixed() {
-        return Ok(v);
+    match coerce_prop_silent(vm, info, v.clone(), strict)? {
+        Some(c) => Ok(c),
+        None => Err(vm.throw_type_error(format!(
+            "Cannot assign {} to property {}::${} of type {}",
+            v.value_name(),
+            display_class_name(&info.declaring_class),
+            info.name,
+            info.ty.as_ref().map(|t| t.to_type_string()).unwrap_or_default()
+        ))),
     }
-    if super::call::type_matches(vm, ty, &v, None)? {
-        return Ok(v);
+}
+
+/// Type check/coercion without the error (`i_zend_verify_property_type`).
+fn coerce_prop_silent(vm: &mut Vm, info: &PropertyInfo, v: Value, strict: bool) -> PResult<Option<Value>> {
+    let Some(ty) = &info.ty else { return Ok(Some(v)) };
+    if ty.is_mixed() {
+        return Ok(Some(v));
+    }
+    let scope = vm.find_class(&info.declaring_class);
+    if super::call::type_matches(vm, ty, &v, scope.as_ref())? {
+        return Ok(Some(v));
     }
     if !v.is_null() {
         let mode = CoerceMode { strict, silent: false };
         if let Some(c) = vm.coerce_to_type(ty, v.clone(), mode)? {
-            return Ok(c);
+            return Ok(Some(c));
         }
     }
-    Err(vm.throw_type_error(format!(
-        "Cannot assign {} to property {}::${} of type {}",
-        v.value_name(),
-        super::decl::display_class_name(&info.declaring_class),
-        info.name,
-        ty.to_type_string()
-    )))
+    Ok(None)
 }
 
 /// `$obj->name = $value` (`zend_std_write_property`). Returns the assigned value.
@@ -398,53 +731,74 @@ pub fn write_prop(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &Ph
             return Ok(value);
         }
     }
+    let value = value.into_unref();
     let class = obj.class().clone();
-    match lookup_prop(vm, &class, name, scope) {
+    let lookup = lookup_prop(vm, &class, name, scope);
+    let mut guard_checked = false;
+    // (slot, typed info)
+    let slot: Option<(usize, Option<PropertyInfo>)>;
+    match &lookup {
         Lookup::Declared(info) => {
-            if let Some(hooks) = super::decl::prop_hooks(&info) {
-                if !super::decl::in_hook_of(vm, obj, &info.name) {
-                    if let Some(set) = &hooks.set {
-                        check_set_access(vm, &info, scope, "modify")?;
-                        super::call::call_method_fn(vm, obj, set, vec![value.clone()], None)?;
-                        return Ok(value);
+            let mut target = (info.slot, typed(info));
+            if let Some(hooks) = prop_hooks(info) {
+                match &hooks.set {
+                    None => {
+                        if is_virtual(info) {
+                            return Err(vm.throw_error(
+                                "Error",
+                                format!(
+                                    "Cannot write to get-only virtual property {}::${}",
+                                    display_class_name(&class.name),
+                                    name
+                                ),
+                            ));
+                        }
                     }
-                    if hooks.virtual_ {
-                        return Err(vm.throw_error(
-                            "Error",
-                            format!(
-                                "Cannot write to get-only virtual property {}::${}",
-                                super::decl::display_class_name(&class.name),
-                                name
-                            ),
-                        ));
+                    Some(set) => {
+                        if !should_call_hook(vm, info, obj) {
+                            if is_virtual(info) {
+                                return Err(no_backing_error(vm, &class, name, false));
+                            }
+                        } else {
+                            if info.flags & SET_MASK != 0 && !has_set_access(vm, &class, info, scope) {
+                                return Err(asymmetric_error(vm, info, "modify"));
+                            }
+                            let set = set.clone();
+                            call_on(vm, obj, &set, vec![value.clone()], strict)?;
+                            return Ok(value);
+                        }
+                    }
+                }
+                target = (info.slot, typed(info));
+            }
+            let (s, ti) = target;
+            let cur = slot_value(obj, s);
+            if let Some(info) = &ti {
+                if info.is_readonly() || info.flags & SET_MASK != 0 {
+                    let error = if !cur.is_undef() || slot_uninit(obj, s) || class.magic.set.is_none() {
+                        true
+                    } else {
+                        guard_checked = true;
+                        guard_get(obj, name, IN_SET)
+                    };
+                    if error {
+                        if info.is_readonly() && !cur.is_undef() && !slot_reinitable(obj, s) {
+                            return Err(readonly_modification_error(vm, info));
+                        }
+                        if info.flags & SET_MASK != 0 && !has_set_access(vm, &class, info, scope) {
+                            return Err(asymmetric_error(vm, info, "modify"));
+                        }
                     }
                 }
             }
-            let cur_undef = obj.obj().props.borrow().get(info.slot).is_none_or(Value::is_undef);
-            let was_unset = cur_undef && slot_was_unset(obj, info.slot);
-            if info.is_readonly() || info.flags & (member_flags::PRIVATE_SET | member_flags::PROTECTED_SET) != 0 {
-                let use_magic = cur_undef && was_unset && class.magic.set.is_some() && !guard_get(obj, name, IN_SET);
-                if !use_magic {
-                    if info.is_readonly() && !cur_undef {
-                        return Err(vm.throw_error(
-                            "Error",
-                            format!(
-                                "Cannot modify readonly property {}::${}",
-                                super::decl::display_class_name(&info.declaring_class),
-                                info.name
-                            ),
-                        ));
-                    }
-                    check_set_access(vm, &info, scope, if info.is_readonly() { "modify" } else { "modify" })?;
-                }
+            if !cur.is_undef() {
+                return assign_slot(vm, obj, s, ti.as_ref(), value, strict);
             }
-            if !cur_undef || !was_unset || class.magic.set.is_none() || guard_get(obj, name, IN_SET) {
-                let v = coerce_prop(vm, &info, value, strict)?;
-                store_slot(obj, info.slot, v.clone());
-                mark_slot_unset(obj, info.slot, false);
-                return Ok(v);
+            if slot_uninit(obj, s) {
+                // Writes to uninitialized typed properties bypass __set().
+                return assign_slot(vm, obj, s, ti.as_ref(), value, strict);
             }
-            magic_set(vm, obj, name, value)
+            slot = Some((s, ti));
         }
         Lookup::Dynamic => {
             {
@@ -461,18 +815,46 @@ pub fn write_prop(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &Ph
                     }
                 }
             }
-            if class.magic.set.is_some() && !guard_get(obj, name, IN_SET) {
-                return magic_set(vm, obj, name, value);
-            }
-            create_dynamic(vm, obj, name, value)
+            slot = None;
         }
-        Lookup::Denied(info) => {
-            if class.magic.set.is_some() && !guard_get(obj, name, IN_SET) {
-                return magic_set(vm, obj, name, value);
+        Lookup::Denied(_) | Lookup::BadName => {
+            if class.magic.set.is_none() {
+                return Err(wrong_offset_error(vm, &lookup, &class));
             }
-            Err(denied_error(vm, &info, &class))
+            slot = None;
         }
     }
+    let _ = guard_checked;
+    // Magic set.
+    if class.magic.set.is_some() {
+        if !guard_get(obj, name, IN_SET) {
+            return magic_set(vm, obj, name, value);
+        }
+        if matches!(lookup, Lookup::Denied(_) | Lookup::BadName) {
+            return Err(wrong_offset_error(vm, &lookup, &class));
+        }
+    }
+    // write_std_property
+    match slot {
+        Some((s, ti)) => assign_slot(vm, obj, s, ti.as_ref(), value, strict),
+        None => create_dynamic(vm, obj, name, value),
+    }
+}
+
+/// Assigns to a declared slot with the property type check
+/// (`typed_property:` / `found:` in `zend_std_write_property`).
+fn assign_slot(vm: &mut Vm, obj: &ObjRef, slot: usize, info: Option<&PropertyInfo>, value: Value, strict: bool) -> PResult<Value> {
+    let v = match info {
+        Some(info) => {
+            let v = coerce_prop(vm, info, value, strict)?;
+            clear_reinitable(obj, slot);
+            v
+        }
+        None => value,
+    };
+    store_slot(obj, slot, v.clone());
+    mark_slot_unset(obj, slot, false);
+    Ok(v)
 }
 
 fn store_slot(obj: &ObjRef, slot: usize, v: Value) {
@@ -509,22 +891,18 @@ fn allows_dynamic(class: &ClassRef) -> bool {
 fn create_dynamic(vm: &mut Vm, obj: &ObjRef, name: &PhpStr, value: Value) -> PResult<Value> {
     let class = obj.class().clone();
     if name.first() == Some(&0) {
-        return Err(vm.throw_error("Error", "Cannot access property starting with \"\\0\""));
+        return Err(bad_name_error(vm));
     }
     if class.has_flag(class_flags::NO_DYNAMIC_PROPERTIES) || class.has_flag(class_flags::READONLY) || class.is_enum() {
         return Err(vm.throw_error(
             "Error",
-            format!(
-                "Cannot create dynamic property {}::${}",
-                super::decl::display_class_name(&class.name),
-                name
-            ),
+            format!("Cannot create dynamic property {}::${}", display_class_name(&class.name), name),
         ));
     }
     if !allows_dynamic(&class) {
         vm.engine_deprecated(format!(
             "Creation of dynamic property {}::${} is deprecated",
-            super::decl::display_class_name(&class.name),
+            display_class_name(&class.name),
             name
         ))?;
     }
@@ -534,62 +912,9 @@ fn create_dynamic(vm: &mut Vm, obj: &ObjRef, name: &PhpStr, value: Value) -> PRe
     Ok(value)
 }
 
-/// `$obj->name =& $ref`.
-pub fn assign_prop_ref(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &PhpStr, r: PhpRef) -> PResult<()> {
-    let class = obj.class().clone();
-    match lookup_prop(vm, &class, name, scope) {
-        Lookup::Declared(info) => {
-            if info.is_readonly() {
-                return Err(vm.throw_error(
-                    "Error",
-                    format!(
-                        "Cannot modify readonly property {}::${}",
-                        super::decl::display_class_name(&info.declaring_class),
-                        info.name
-                    ),
-                ));
-            }
-            if info.ty.is_some() {
-                let v = r.get();
-                let c = coerce_prop(vm, &info, v.clone(), false)?;
-                if !c.identical(&v) {
-                    r.set(c);
-                }
-            }
-            let old = std::mem::replace(&mut obj.obj().props.borrow_mut()[info.slot], Value::Ref(r));
-            drop(old);
-            mark_slot_unset(obj, info.slot, false);
-            Ok(())
-        }
-        Lookup::Dynamic => {
-            let exists = obj.obj().dyn_props.borrow().as_ref().is_some_and(|d| d.get_str(name).is_some());
-            if !exists {
-                if class.magic.get.is_some() || class.magic.set.is_some() {
-                    if class.magic.set.is_some() && !guard_get(obj, name, IN_SET) {
-                        return Err(vm.throw_error("Error", "Cannot assign by reference to overloaded object"));
-                    }
-                }
-                create_dynamic(vm, obj, name, Value::Null)?;
-            }
-            let mut d = obj.obj().dyn_props.borrow_mut();
-            let t = d.get_or_insert_with(PhpArray::new);
-            let old = t.insert(ArrayKey::Str(name.clone()), Value::Ref(r));
-            drop(d);
-            drop(old);
-            Ok(())
-        }
-        Lookup::Denied(info) => Err(denied_error(vm, &info, &class)),
-    }
-}
-
-/// `&$obj->name`.
-pub fn make_prop_ref(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &PhpStr) -> PResult<PhpRef> {
-    match prop_target(vm, scope, obj, name, FetchMode::Write, true)? {
-        PropTarget::Ref(r) => Ok(r),
-        PropTarget::Value(v) => Ok(PhpRef::new(v)),
-        PropTarget::Missing => Ok(PhpRef::new(Value::Null)),
-    }
-}
+// ---------------------------------------------------------------------------
+// Fetch for write (zend_fetch_property_address / get_property_ptr_ptr)
+// ---------------------------------------------------------------------------
 
 /// How a property is fetched for a nested write.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -603,106 +928,172 @@ pub enum FetchMode {
 pub enum PropTarget {
     /// The property slot, made a reference.
     Ref(PhpRef),
-    /// A temporary (from `__get` or a virtual property): writes have no effect.
+    /// A temporary (from `__get` or a hook): writes have no effect.
     Value(Value),
     /// Nothing to unset.
     Missing,
 }
 
-/// Fetches a property for a nested write (`$obj->p[...] = ...`).
-pub(crate) fn prop_for_write(vm: &mut Vm, cx: &Ctx, obj: &ObjRef, name: &PhpStr, mode: FetchMode, next_is_dim: bool) -> PResult<PropTarget> {
-    let _ = next_is_dim;
-    prop_target(vm, cx.scope(), obj, name, mode, false)
+/// `ZEND_FETCH_OBJ_FLAGS`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ObjFlags {
+    None,
+    DimWrite,
+    Ref,
 }
 
-fn prop_target(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &PhpStr, mode: FetchMode, for_ref: bool) -> PResult<PropTarget> {
+/// The result of `get_property_ptr_ptr`.
+enum Ptr {
+    /// A declared slot (with its typed info) or a dynamic property.
+    Slot(usize, Option<PropertyInfo>),
+    Dyn,
+    /// No direct pointer: use `read_property`.
+    Null,
+}
+
+/// `zend_std_get_property_ptr_ptr`.
+fn get_property_ptr(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &PhpStr, ty: Fetch) -> PResult<Ptr> {
     let class = obj.class().clone();
-    match lookup_prop(vm, &class, name, scope) {
-        Lookup::Declared(info) => {
-            if let Some(hooks) = super::decl::prop_hooks(&info) {
-                if hooks.get.is_some() && !super::decl::in_hook_of(vm, obj, &info.name) {
-                    let v = super::call::call_method_fn(vm, obj, hooks.get.as_ref().unwrap(), Vec::new(), None)?;
-                    if let Value::Ref(r) = v {
-                        return Ok(PropTarget::Ref(r));
-                    }
-                    if !matches!(v, Value::Object(_)) {
-                        vm.engine_notice(format!(
-                            "Indirect modification of {}::${} is not allowed",
-                            super::decl::display_class_name(&class.name),
-                            name
-                        ))?;
-                    }
-                    return Ok(PropTarget::Value(v));
+    let lookup = lookup_prop(vm, &class, name, scope);
+    let (s, ti) = match &lookup {
+        Lookup::Declared(info) => match prop_hooks(info) {
+            Some(_) => {
+                if !is_virtual(info) && !should_call_hook(vm, info, obj) {
+                    (info.slot, typed(info))
+                } else {
+                    return Ok(Ptr::Null);
                 }
             }
-            let cur = obj.obj().props.borrow()[info.slot].clone();
-            if cur.is_undef() {
-                if mode == FetchMode::Unset {
-                    return Ok(PropTarget::Missing);
-                }
-                let was_unset = slot_was_unset(obj, info.slot);
-                if class.magic.get.is_some() && !guard_get(obj, name, IN_GET) && (info.ty.is_none() || was_unset) {
-                    let v = magic_get_raw(vm, obj, name)?;
-                    return magic_result_target(vm, &class, name, v);
-                }
-                if let Some(ty) = &info.ty {
-                    if info.is_readonly() {
-                        return Err(uninit_error(vm, &info));
-                    }
-                    // Auto-initialise an array in a typed property if allowed.
-                    if ty.mask & crate::types::mask::ARRAY == 0 && !ty.is_mixed() {
-                        if mode == FetchMode::ReadWrite || for_ref {
-                            return Err(uninit_error(vm, &info));
-                        }
-                        return Err(vm.throw_error(
-                            "Error",
-                            format!(
-                                "Cannot auto-initialize an array inside property {}::${} of type {}",
-                                super::decl::display_class_name(&info.declaring_class),
-                                info.name,
-                                ty.to_type_string()
-                            ),
-                        ));
-                    }
-                    if mode == FetchMode::ReadWrite {
-                        return Err(uninit_error(vm, &info));
-                    }
-                } else if mode == FetchMode::ReadWrite {
-                    undefined_property(vm, &class, name)?;
-                }
-                if for_ref && info.ty.is_some() {
+            None => (info.slot, typed(info)),
+        },
+        Lookup::Dynamic => {
+            let exists = obj.obj().dyn_props.borrow().as_ref().is_some_and(|d| d.get_str(name).is_some());
+            if exists {
+                return Ok(Ptr::Dyn);
+            }
+            if class.magic.get.is_none() || guard_get(obj, name, IN_GET) {
+                if class.has_flag(class_flags::NO_DYNAMIC_PROPERTIES) || class.has_flag(class_flags::READONLY) || class.is_enum() {
                     return Err(vm.throw_error(
                         "Error",
-                        format!(
-                            "Cannot access uninitialized non-nullable property {}::${} by reference",
-                            super::decl::display_class_name(&info.declaring_class),
-                            info.name
-                        ),
+                        format!("Cannot create dynamic property {}::${}", display_class_name(&class.name), name),
                     ));
                 }
-            }
-            if info.is_readonly() && !cur.is_undef() {
-                if matches!(cur, Value::Object(_)) && !for_ref {
-                    return Ok(PropTarget::Value(cur));
+                if !allows_dynamic(&class) {
+                    vm.engine_deprecated(format!(
+                        "Creation of dynamic property {}::${} is deprecated",
+                        display_class_name(&class.name),
+                        name
+                    ))?;
                 }
-                return Err(vm.throw_error(
-                    "Error",
-                    format!(
-                        "Cannot modify readonly property {}::${}",
-                        super::decl::display_class_name(&info.declaring_class),
-                        info.name
-                    ),
-                ));
+                if ty == Fetch::Rw {
+                    undefined_property(vm, &class, name)?;
+                }
+                let mut d = obj.obj().dyn_props.borrow_mut();
+                d.get_or_insert_with(PhpArray::new).insert(ArrayKey::Str(name.clone()), Value::Null);
+                return Ok(Ptr::Dyn);
             }
-            if let Some(ty) = &info.ty {
-                if !cur.is_undef() && !matches!(cur.deref().type_code(), crate::value::TypeCode::Array | crate::value::TypeCode::Object | crate::value::TypeCode::Null) && !for_ref {
-                    let _ = ty;
+            return Ok(Ptr::Null);
+        }
+        Lookup::Denied(_) | Lookup::BadName => {
+            if class.magic.get.is_none() {
+                return Err(wrong_offset_error(vm, &lookup, &class));
+            }
+            return Ok(Ptr::Null);
+        }
+    };
+    let cur = slot_value(obj, s);
+    if cur.is_undef() {
+        let uninit = ti.is_some() && slot_uninit(obj, s);
+        if class.magic.get.is_none() || guard_get(obj, name, IN_GET) || uninit {
+            if ty == Fetch::Rw {
+                match &ti {
+                    Some(info) => return Err(uninit_error(vm, info)),
+                    None => {
+                        undefined_property(vm, &class, name)?;
+                        if slot_value(obj, s).is_undef() {
+                            store_slot(obj, s, Value::Null);
+                            mark_slot_unset(obj, s, false);
+                        }
+                    }
+                }
+            } else if let Some(info) = ti.as_ref().filter(|i| i.is_readonly() || i.flags & SET_MASK != 0) {
+                if info.is_readonly() || !has_set_access(vm, &class, info, scope) {
+                    return Ok(Ptr::Null);
+                }
+            } else if ti.is_none() {
+                store_slot(obj, s, Value::Null);
+                mark_slot_unset(obj, s, false);
+            }
+        } else {
+            return Ok(Ptr::Null);
+        }
+    } else if let Some(info) = ti.as_ref().filter(|i| i.is_readonly() || i.flags & SET_MASK != 0) {
+        if info.is_readonly() || !has_set_access(vm, &class, info, scope) {
+            return Ok(Ptr::Null);
+        }
+    }
+    Ok(Ptr::Slot(s, ti))
+}
+
+/// `zend_fetch_property_address` for W/RW/UNSET fetches.
+fn fetch_property_address(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &PhpStr, ty: Fetch, flags: ObjFlags) -> PResult<PropTarget> {
+    match get_property_ptr(vm, scope, obj, name, ty)? {
+        Ptr::Null => {
+            let v = read_property(vm, scope, obj, name, ty)?;
+            Ok(match v {
+                Value::Ref(r) => PropTarget::Ref(r),
+                v => PropTarget::Value(v),
+            })
+        }
+        Ptr::Dyn => {
+            let mut d = obj.obj().dyn_props.borrow_mut();
+            let t = d.get_or_insert_with(PhpArray::new);
+            Ok(PropTarget::Ref(crate::value::array::make_element_ref(t, ArrayKey::Str(name.clone()))))
+        }
+        Ptr::Slot(s, ti) => {
+            let cur = slot_value(obj, s);
+            if ty == Fetch::Unset && cur.is_undef() {
+                return Ok(PropTarget::Missing);
+            }
+            if let Some(info) = &ti {
+                match flags {
+                    ObjFlags::DimWrite => {
+                        // promotes_to_array: undef/null/false
+                        let promotes = matches!(cur.deref().type_code(), crate::value::TypeCode::Undef | crate::value::TypeCode::Null)
+                            || matches!(&*cur.deref(), Value::Bool(false));
+                        if promotes {
+                            let ty = info.ty.as_ref().expect("typed");
+                            if ty.mask & crate::types::mask::ARRAY == 0 && !ty.is_mixed() {
+                                return Err(vm.throw_type_error(format!(
+                                    "Cannot auto-initialize an array inside property {}::${} of type {}",
+                                    display_class_name(&info.declaring_class),
+                                    info.name,
+                                    ty.to_type_string()
+                                )));
+                            }
+                        }
+                    }
+                    ObjFlags::Ref => {
+                        if cur.is_undef() {
+                            let ty = info.ty.as_ref().expect("typed");
+                            if ty.mask & crate::types::mask::NULL == 0 && !ty.is_mixed() {
+                                return Err(vm.throw_error(
+                                    "Error",
+                                    format!(
+                                        "Cannot access uninitialized non-nullable property {}::${} by reference",
+                                        display_class_name(&info.declaring_class),
+                                        info.name
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    ObjFlags::None => {}
                 }
             }
             let mut props = obj.obj().props.borrow_mut();
-            let slot = &mut props[info.slot];
-            mark_slot_unset_later(obj, info.slot);
-            Ok(PropTarget::Ref(match slot {
+            let slot = &mut props[s];
+            let r = match slot {
                 Value::Ref(r) => r.clone(),
                 other => {
                     let v = std::mem::take(other);
@@ -710,63 +1101,69 @@ fn prop_target(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &PhpSt
                     *other = Value::Ref(r.clone());
                     r
                 }
-            }))
-        }
-        Lookup::Dynamic => {
-            let exists = obj.obj().dyn_props.borrow().as_ref().is_some_and(|d| d.get_str(name).is_some());
-            if !exists {
-                if mode == FetchMode::Unset {
-                    return Ok(PropTarget::Missing);
-                }
-                if class.magic.get.is_some() && !guard_get(obj, name, IN_GET) {
-                    let v = magic_get_raw(vm, obj, name)?;
-                    return magic_result_target(vm, &class, name, v);
-                }
-                if mode == FetchMode::ReadWrite {
-                    undefined_property(vm, &class, name)?;
-                }
-                create_dynamic(vm, obj, name, Value::Null)?;
-            }
-            let mut d = obj.obj().dyn_props.borrow_mut();
-            let t = d.get_or_insert_with(PhpArray::new);
-            let r = crate::value::array::make_element_ref(t, ArrayKey::Str(name.clone()));
+            };
+            drop(props);
+            mark_slot_unset(obj, s, false);
             Ok(PropTarget::Ref(r))
         }
-        Lookup::Denied(info) => {
-            if class.magic.get.is_some() && !guard_get(obj, name, IN_GET) {
-                let v = magic_get_raw(vm, obj, name)?;
-                return magic_result_target(vm, &class, name, v);
+    }
+}
+
+/// `$obj->name =& $ref` (`zend_assign_to_property_reference`).
+pub fn assign_prop_ref(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &PhpStr, r: PhpRef) -> PResult<()> {
+    match get_property_ptr(vm, scope, obj, name, Fetch::W)? {
+        Ptr::Null => {
+            // Errors of the fallback read (readonly, hooks) take precedence.
+            let _ = read_property(vm, scope, obj, name, Fetch::W)?;
+            Err(vm.throw_error("Error", "Cannot assign by reference to overloaded object"))
+        }
+        Ptr::Dyn => {
+            let mut d = obj.obj().dyn_props.borrow_mut();
+            let t = d.get_or_insert_with(PhpArray::new);
+            let old = t.insert(ArrayKey::Str(name.clone()), Value::Ref(r));
+            drop(d);
+            drop(old);
+            Ok(())
+        }
+        Ptr::Slot(s, ti) => {
+            if let Some(info) = &ti {
+                let v = r.get();
+                let strict = caller_strict(vm);
+                let c = coerce_prop(vm, info, v.clone(), strict)?;
+                if !c.identical(&v) {
+                    r.set(c);
+                }
             }
-            Err(denied_error(vm, &info, &class))
+            let old = std::mem::replace(&mut obj.obj().props.borrow_mut()[s], Value::Ref(r));
+            drop(old);
+            mark_slot_unset(obj, s, false);
+            Ok(())
         }
     }
 }
 
-fn mark_slot_unset_later(_obj: &ObjRef, _slot: usize) {}
-
-fn magic_get_raw(vm: &mut Vm, obj: &ObjRef, name: &PhpStr) -> PResult<Value> {
-    guard_set(obj, name, IN_GET, true);
-    let r = call_magic(vm, obj, b"__get", vec![Value::String(name.clone())]);
-    guard_set(obj, name, IN_GET, false);
-    r
-}
-
-fn magic_result_target(vm: &mut Vm, class: &ClassRef, name: &PhpStr, v: Value) -> PResult<PropTarget> {
-    match v {
-        Value::Ref(r) => Ok(PropTarget::Ref(r)),
-        Value::Object(o) => Ok(PropTarget::Value(Value::Object(o))),
-        v => {
-            vm.engine_notice(format!(
-                "Indirect modification of overloaded property {}::${} has no effect",
-                super::decl::display_class_name(&class.name),
-                name
-            ))?;
-            Ok(PropTarget::Value(v))
-        }
+/// `&$obj->name`.
+pub fn make_prop_ref(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &PhpStr) -> PResult<PhpRef> {
+    match fetch_property_address(vm, scope, obj, name, Fetch::W, ObjFlags::Ref)? {
+        PropTarget::Ref(r) => Ok(r),
+        PropTarget::Value(v) => Ok(PhpRef::new(v)),
+        PropTarget::Missing => Ok(PhpRef::new(Value::Null)),
     }
 }
 
-/// `++$obj->p` / `$obj->p--`.
+/// Fetches a property for a nested write (`$obj->p[...] = ...`).
+pub(crate) fn prop_for_write(vm: &mut Vm, cx: &Ctx, obj: &ObjRef, name: &PhpStr, mode: FetchMode, next_is_dim: bool) -> PResult<PropTarget> {
+    let ty = match mode {
+        FetchMode::Write => Fetch::W,
+        FetchMode::ReadWrite => Fetch::Rw,
+        FetchMode::Unset => Fetch::Unset,
+    };
+    let flags = if next_is_dim && mode == FetchMode::Write { ObjFlags::DimWrite } else { ObjFlags::None };
+    fetch_property_address(vm, cx.scope(), obj, name, ty, flags)
+}
+
+/// `++$obj->p` / `$obj->p--` (`zend_pre_incdec_property_zval` /
+/// `zend_pre_incdec_overloaded_property`).
 pub(crate) fn incdec_prop(vm: &mut Vm, cx: &Ctx, obj: &ObjRef, name: &PhpStr, inc: bool, post: bool) -> PResult<Value> {
     let scope = cx.scope().cloned();
     let old = read_prop(vm, scope.as_ref(), obj, name, false)?;
@@ -775,11 +1172,14 @@ pub(crate) fn incdec_prop(vm: &mut Vm, cx: &Ctx, obj: &ObjRef, name: &PhpStr, in
     if let (Value::Int(_), Value::Float(_)) = (&old, &new) {
         if let Lookup::Declared(info) = lookup_prop(vm, obj.class(), name, scope.as_ref()) {
             if let Some(ty) = &info.ty {
-                if ty.mask & crate::types::mask::FLOAT == 0 && !ty.is_mixed() {
+                if ty.mask & crate::types::mask::FLOAT == 0 && !ty.is_mixed() && prop_hooks(&info).is_none() {
+                    if info.is_readonly() {
+                        return Err(readonly_modification_error(vm, &info));
+                    }
                     return Err(vm.throw_type_error(format!(
                         "Cannot {} property {}::${} of type {} past its {} value",
                         if inc { "increment" } else { "decrement" },
-                        super::decl::display_class_name(&info.declaring_class),
+                        display_class_name(&info.declaring_class),
                         info.name,
                         ty.to_type_string(),
                         if inc { "maximal" } else { "minimal" }
@@ -804,64 +1204,91 @@ pub fn isset_prop(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &Ph
         }
     }
     let class = obj.class().clone();
-    let value = match lookup_prop(vm, &class, name, scope) {
-        Lookup::Declared(info) => {
-            if let Some(hooks) = super::decl::prop_hooks(&info) {
-                if let Some(get) = &hooks.get {
-                    if !super::decl::in_hook_of(vm, obj, &info.name) {
-                        let v = super::call::call_method_fn(vm, obj, get, Vec::new(), None)?.into_unref();
-                        return if empty { Ok(!v.is_null() && super::eval::to_bool(vm, &v)?) } else { Ok(!v.is_null()) };
-                    }
-                }
-            }
-            let v = obj.obj().props.borrow()[info.slot].clone();
-            if v.is_undef() {
-                let was_unset = slot_was_unset(obj, info.slot);
-                if info.ty.is_some() && !was_unset {
-                    return Ok(false);
-                }
-                None
-            } else {
-                Some(v.into_unref())
-            }
+    let lookup = lookup_prop(vm, &class, name, scope);
+    let check = |vm: &mut Vm, v: &Value| -> PResult<bool> {
+        if empty {
+            super::eval::to_bool(vm, &v.unref())
+        } else {
+            Ok(!v.unref().is_null())
         }
-        Lookup::Dynamic => obj
-            .obj()
-            .dyn_props
-            .borrow()
-            .as_ref()
-            .and_then(|d| d.get_str(name).map(Value::unref)),
-        Lookup::Denied(_) => None,
     };
-    match value {
-        Some(v) => {
-            if empty {
-                Ok(!v.is_null() && super::eval::to_bool(vm, &v)?)
-            } else {
-                Ok(!v.is_null())
-            }
-        }
-        None => {
-            if class.magic.isset.is_some() && !guard_get(obj, name, IN_ISSET) {
-                guard_set(obj, name, IN_ISSET, true);
-                let r = call_magic(vm, obj, b"__isset", vec![Value::String(name.clone())]);
-                guard_set(obj, name, IN_ISSET, false);
-                let has = super::eval::to_bool(vm, &r?)?;
-                if !has {
-                    return Ok(false);
-                }
-                if empty {
-                    if class.magic.get.is_some() && !guard_get(obj, name, IN_GET) {
-                        let v = magic_get_raw(vm, obj, name)?.into_unref();
-                        return super::eval::to_bool(vm, &v);
+    let mut slot: Option<usize> = None;
+    match &lookup {
+        Lookup::Declared(info) => {
+            let mut s = info.slot;
+            if let Some(hooks) = prop_hooks(info) {
+                match &hooks.get {
+                    None => {
+                        if is_virtual(info) {
+                            return Err(set_only_error(vm, &class, name));
+                        }
                     }
-                    return Ok(false);
+                    Some(get) => {
+                        if should_call_hook(vm, info, obj) {
+                            let get = get.clone();
+                            let strict = caller_strict(vm);
+                            let rv = call_on(vm, obj, &get, Vec::new(), strict)?;
+                            return check(vm, &rv);
+                        }
+                        if is_virtual(info) {
+                            return Err(no_backing_error(vm, &class, name, true));
+                        }
+                    }
                 }
-                return Ok(true);
+                s = info.slot;
             }
-            Ok(false)
+            let v = slot_value(obj, s);
+            if !v.is_undef() {
+                return check(vm, &v);
+            }
+            if info.ty.is_some() && slot_uninit(obj, s) {
+                // Skip __isset() for uninitialized typed properties.
+                return Ok(false);
+            }
+            slot = Some(s);
         }
+        Lookup::Dynamic => {
+            let v = obj.obj().dyn_props.borrow().as_ref().and_then(|d| d.get_str(name).cloned());
+            if let Some(v) = v {
+                return check(vm, &v);
+            }
+        }
+        Lookup::Denied(_) | Lookup::BadName => {}
     }
+    if class.magic.isset.is_none() || guard_get(obj, name, IN_ISSET) {
+        return Ok(false);
+    }
+    guard_set(obj, name, IN_ISSET, true);
+    let r = (|| -> PResult<bool> {
+        let rv = call_magic(vm, obj, b"__isset", vec![Value::String(name.clone())])?;
+        let mut result = super::eval::to_bool(vm, &rv.unref())?;
+        if empty && result {
+            // GH-12695: __isset() may have materialised the property.
+            let prop = match slot {
+                Some(s) => {
+                    let v = slot_value(obj, s);
+                    (!v.is_undef()).then_some(v)
+                }
+                None if matches!(lookup, Lookup::Dynamic) => {
+                    obj.obj().dyn_props.borrow().as_ref().and_then(|d| d.get_str(name).cloned())
+                }
+                None => None,
+            };
+            if let Some(p) = prop {
+                result = super::eval::to_bool(vm, &p.unref())?;
+            } else if class.magic.get.is_some() && !guard_get(obj, name, IN_GET) {
+                guard_set(obj, name, IN_GET, true);
+                let g = call_magic(vm, obj, b"__get", vec![Value::String(name.clone())]);
+                guard_set(obj, name, IN_GET, false);
+                result = super::eval::to_bool(vm, &g?.unref())?;
+            } else {
+                result = false;
+            }
+        }
+        Ok(result)
+    })();
+    guard_set(obj, name, IN_ISSET, false);
+    r
 }
 
 /// `unset($obj->name)` (`zend_std_unset_property`).
@@ -872,43 +1299,53 @@ pub fn unset_prop(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &Ph
         }
     }
     let class = obj.class().clone();
-    match lookup_prop(vm, &class, name, scope) {
+    let lookup = lookup_prop(vm, &class, name, scope);
+    let mut guard_used = false;
+    match &lookup {
         Lookup::Declared(info) => {
-            if super::decl::prop_hooks(&info).is_some() {
+            if prop_hooks(info).is_some() {
                 return Err(vm.throw_error(
                     "Error",
-                    format!(
-                        "Cannot unset hooked property {}::${}",
-                        super::decl::display_class_name(&class.name),
-                        name
-                    ),
+                    format!("Cannot unset hooked property {}::${}", display_class_name(&class.name), name),
                 ));
             }
-            let cur_undef = obj.obj().props.borrow()[info.slot].is_undef();
-            if info.is_readonly() {
-                if !cur_undef {
-                    return Err(vm.throw_error(
-                        "Error",
-                        format!(
-                            "Cannot unset readonly property {}::${}",
-                            super::decl::display_class_name(&info.declaring_class),
-                            info.name
-                        ),
-                    ));
+            let s = info.slot;
+            let cur = slot_value(obj, s);
+            let ti = typed(info);
+            if let Some(info) = ti.as_ref().filter(|i| i.is_readonly() || i.flags & SET_MASK != 0) {
+                let error = if !cur.is_undef() || slot_uninit(obj, s) || class.magic.unset.is_none() {
+                    true
+                } else {
+                    guard_used = true;
+                    guard_get(obj, name, IN_UNSET)
+                };
+                if error {
+                    if info.is_readonly() && !cur.is_undef() && !slot_reinitable(obj, s) {
+                        return Err(vm.throw_error(
+                            "Error",
+                            format!(
+                                "Cannot unset readonly property {}::${}",
+                                display_class_name(&info.declaring_class),
+                                name
+                            ),
+                        ));
+                    }
+                    if info.flags & SET_MASK != 0 && !has_set_access(vm, &class, info, scope) {
+                        return Err(asymmetric_error(vm, info, "unset"));
+                    }
                 }
-                check_set_access(vm, &info, scope, "unset")?;
             }
-            if cur_undef {
-                if class.magic.unset.is_some() && !guard_get(obj, name, IN_UNSET) && slot_was_unset(obj, info.slot) {
-                    return magic_unset(vm, obj, name);
-                }
-                mark_slot_unset(obj, info.slot, true);
+            if !cur.is_undef() {
+                let old = std::mem::take(&mut obj.obj().props.borrow_mut()[s]);
+                mark_slot_unset(obj, s, true);
+                drop(old);
                 return Ok(());
             }
-            let old = std::mem::take(&mut obj.obj().props.borrow_mut()[info.slot]);
-            mark_slot_unset(obj, info.slot, true);
-            drop(old);
-            Ok(())
+            if ti.is_some() && slot_uninit(obj, s) {
+                // Reset the IS_PROP_UNINIT flag and bypass __unset().
+                mark_slot_unset(obj, s, true);
+                return Ok(());
+            }
         }
         Lookup::Dynamic => {
             let removed = {
@@ -919,18 +1356,23 @@ pub fn unset_prop(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &Ph
                 drop(removed);
                 return Ok(());
             }
-            if class.magic.unset.is_some() && !guard_get(obj, name, IN_UNSET) {
-                return magic_unset(vm, obj, name);
-            }
-            Ok(())
         }
-        Lookup::Denied(info) => {
-            if class.magic.unset.is_some() && !guard_get(obj, name, IN_UNSET) {
-                return magic_unset(vm, obj, name);
+        Lookup::Denied(_) | Lookup::BadName => {
+            if class.magic.unset.is_none() {
+                return Err(wrong_offset_error(vm, &lookup, &class));
             }
-            Err(denied_error(vm, &info, &class))
         }
     }
+    let _ = guard_used;
+    if class.magic.unset.is_some() {
+        if !guard_get(obj, name, IN_UNSET) {
+            return magic_unset(vm, obj, name);
+        }
+        if matches!(lookup, Lookup::Denied(_) | Lookup::BadName) {
+            return Err(wrong_offset_error(vm, &lookup, &class));
+        }
+    }
+    Ok(())
 }
 
 fn magic_unset(vm: &mut Vm, obj: &ObjRef, name: &PhpStr) -> PResult<()> {
@@ -1205,39 +1647,31 @@ pub fn clone_value(vm: &mut Vm, scope: Option<ClassRef>, v: Value, with: Option<
             std_clone(&obj)
         }
     };
+    if let Some(m) = class.magic.clone.clone() {
+        set_properties_reinitable(&new, true);
+        let r = super::call::call_method_fn(vm, &new, &m, Vec::new(), None);
+        set_properties_reinitable(&new, false);
+        r?;
+    }
     if let Some(with) = with {
         let Value::Array(a) = with.into_unref() else {
             return Err(vm.throw_type_error("clone(): Argument #2 ($withProperties) must be of type array"));
         };
-        for (k, v) in a.iter() {
-            let name = match k {
-                ArrayKey::Str(s) => s,
-                ArrayKey::Int(_) => {
-                    return Err(vm.throw_type_error("Property name must be of type string, int given"));
-                }
-            };
-            write_prop_clone_with(vm, scope.as_ref(), &new, &name, v.unref())?;
-        }
-    }
-    if class.magic.clone.is_some() {
-        let m = class.magic.clone.clone().unwrap();
-        super::call::call_method_fn(vm, &new, &m, Vec::new(), None)?;
+        set_properties_reinitable(&new, true);
+        let r = (|| -> PResult<()> {
+            for (k, v) in a.iter() {
+                let name = match k {
+                    ArrayKey::Str(s) => s,
+                    ArrayKey::Int(i) => PhpStr::from(i.to_string()),
+                };
+                write_prop(vm, scope.as_ref(), &new, &name, v.unref(), false)?;
+            }
+            Ok(())
+        })();
+        set_properties_reinitable(&new, false);
+        r?;
     }
     Ok(Value::Object(new))
-}
-
-fn write_prop_clone_with(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &PhpStr, v: Value) -> PResult<()> {
-    // Readonly properties may be reinitialised once during clone-with.
-    if let Lookup::Declared(info) = lookup_prop(vm, obj.class(), name, scope) {
-        if info.is_readonly() {
-            check_set_access(vm, &info, scope, "modify")?;
-            let v = coerce_prop(vm, &info, v, false)?;
-            store_slot(obj, info.slot, v);
-            return Ok(());
-        }
-    }
-    write_prop(vm, scope, obj, name, v, false)?;
-    Ok(())
 }
 
 /// The standard clone handler (`zend_objects_clone_obj`).
@@ -1255,6 +1689,13 @@ pub fn std_clone(obj: &ObjRef) -> ObjRef {
     let new = ObjRef::with_props(obj.class().clone(), props);
     if let Some(d) = obj.obj().dyn_props.borrow().as_ref() {
         *new.obj().dyn_props.borrow_mut() = Some(d.clone());
+    }
+    // Slot flags (unset vs. uninitialised) are copied with the slots.
+    if has_extra(obj) {
+        let unset = with_extra(obj, |x| x.unset_slots.clone());
+        if !unset.is_empty() {
+            with_extra(&new, |x| x.unset_slots = unset);
+        }
     }
     new
 }

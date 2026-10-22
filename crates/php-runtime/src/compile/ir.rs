@@ -648,6 +648,9 @@ pub enum Expr {
     MakeRef(Box<LVal>, u32),
     /// A place read in `BP_VAR_IS` mode (operand of `??` and `empty()`).
     PlaceIs(Box<LVal>),
+    /// `obj->prop` / `obj?->prop` inside a constant expression
+    /// (`ZEND_AST_PROP` in zend_ast_evaluate: enums only).
+    ConstProp(Box<Expr>, Member, bool, u32),
 }
 
 /// List-destructuring pattern element.
