@@ -1275,119 +1275,117 @@ fn valid_class_name(name: &[u8]) -> bool {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn check_magic_method(l: &mut Lowerer<'_>, code: &FuncCode, flags: u32, class_name: &PhpStr) -> CResult<()> {
+    // zend_check_magic_method_implementation (E_COMPILE_ERROR).
     let lc = code.name.to_ascii_lowercase();
     let name = lc.as_bytes();
     if !name.starts_with(b"__") {
         return Ok(());
     }
+    enum Step {
+        Check(Option<String>),
+        Public,
+    }
+    use Step::{Check, Public};
     let cname = display_class_name(class_name);
-    let n_params = code.params.len();
-    let err = |msg: String| -> CResult<()> { crate::compile::err(msg, code.start_line) };
-    let must_args = |n: usize| -> Option<String> {
-        if n_params != n {
-            Some(format!(
-                "Method {}::{}() must take exactly {} argument{}",
-                cname,
-                code.name,
-                n,
-                if n == 1 { "" } else { "s" }
-            ))
-        } else {
-            None
+    let fname = code.name.to_string();
+    let num_args = code.params.iter().filter(|p| !p.variadic).count();
+    let args = |n: usize| -> Step {
+        if num_args != n {
+            return Check(Some(match n {
+                0 => format!("Method {cname}::{fname}() cannot take arguments"),
+                1 => format!("Method {cname}::{fname}() must take exactly 1 argument"),
+                _ => format!("Method {cname}::{fname}() must take exactly {n} arguments"),
+            }));
         }
+        if code.params.iter().take(n).any(|p| p.by_ref) {
+            return Check(Some(format!("Method {cname}::{fname}() cannot take arguments by reference")));
+        }
+        Check(None)
     };
     let is_static = flags & member_flags::STATIC != 0;
-    let must_static = |want: bool| -> Option<String> {
-        if is_static != want {
-            Some(format!(
-                "Method {}::{}() {} be static",
-                cname,
-                code.name,
-                if want { "must" } else { "cannot" }
-            ))
-        } else {
-            None
+    let non_static = || Check(is_static.then(|| format!("Method {cname}::{fname}() cannot be static")));
+    let must_static = || Check((!is_static).then(|| format!("Method {cname}::{fname}() must be static")));
+    let nodiscard = code.has(code_flags::NODISCARD);
+    let no_return_type = || -> Step {
+        if code.return_type.is_some() {
+            return Check(Some(format!("Method {cname}::{fname}() cannot declare a return type")));
         }
-    };
-    let by_ref_check = || -> Option<String> {
-        code.params.iter().find(|p| p.by_ref).map(|_| {
-            format!("Method {}::{}() cannot take arguments by reference", cname, code.name)
-        })
-    };
-    let ret = |want: &str| -> Option<String> {
-        match &code.return_type {
-            Some(t) if t.text.as_bytes() != want.as_bytes() && !(want == "void" && false) => {
-                if want == "string" && t.text.as_bytes() == b"string" {
-                    return None;
-                }
-                Some(format!("{}::{}(): Return type must be {} when declared", cname, code.name, want))
-            }
-            _ => None,
+        if nodiscard {
+            return Check(Some(format!("Method {cname}::{fname} cannot be #[\\NoDiscard]")));
         }
+        Check(None)
     };
-    let checks: Vec<Option<String>> = match name {
-        b"__construct" => {
-            if is_static {
-                vec![Some(format!("Method {}::{}() cannot be static", cname, code.name))]
-            } else if code.return_type.is_some() {
-                vec![Some(format!("Method {}::{}() cannot declare a return type", cname, code.name))]
-            } else {
-                vec![]
-            }
+    let arg_type = |i: usize, want: u32| -> Step {
+        let Some(t) = code.params.get(i).and_then(|p| p.ty.as_ref()) else { return Check(None) };
+        if t.decl.mask & want != 0 {
+            return Check(None);
         }
-        b"__destruct" => vec![
-            must_args(0).map(|_| format!("Method {}::{}() cannot take arguments", cname, code.name)),
-            must_static(false),
-            if code.return_type.is_some() {
-                Some(format!("Method {}::{}() cannot declare a return type", cname, code.name))
-            } else {
-                None
-            },
-        ],
-        b"__clone" => vec![
-            must_args(0).map(|_| format!("Method {}::{}() cannot take arguments", cname, code.name)),
-            must_static(false),
-            ret("void"),
-        ],
-        b"__get" => vec![must_args(1), must_static(false), by_ref_check()],
-        b"__set" => vec![must_args(2), must_static(false), by_ref_check(), ret("void")],
-        b"__unset" => vec![must_args(1), must_static(false), by_ref_check(), ret("void")],
-        b"__isset" => vec![must_args(1), must_static(false), by_ref_check(), ret("bool")],
-        b"__call" => vec![must_args(2), must_static(false), by_ref_check()],
-        b"__callstatic" => vec![must_args(2), must_static(true), by_ref_check()],
-        b"__tostring" => vec![
-            must_args(0).map(|_| format!("Method {}::{}() cannot take arguments", cname, code.name)),
-            must_static(false),
-            ret("string"),
-        ],
-        b"__debuginfo" => vec![
-            must_args(0).map(|_| format!("Method {}::{}() cannot take arguments", cname, code.name)),
-            must_static(false),
-            ret("?array"),
-        ],
-        b"__serialize" => vec![
-            must_args(0).map(|_| format!("Method {}::{}() cannot take arguments", cname, code.name)),
-            must_static(false),
-            ret("array"),
-        ],
-        b"__unserialize" => vec![must_args(1), must_static(false), ret("void")],
-        b"__set_state" => vec![must_args(1), must_static(true), ret("object")],
-        b"__invoke" => vec![must_static(false)],
-        b"__sleep" => vec![
-            must_args(0).map(|_| format!("Method {}::{}() cannot take arguments", cname, code.name)),
-            must_static(false),
-            ret("array"),
-        ],
-        b"__wakeup" => vec![
-            must_args(0).map(|_| format!("Method {}::{}() cannot take arguments", cname, code.name)),
-            must_static(false),
-            ret("void"),
-        ],
+        Check(Some(format!(
+            "{cname}::{fname}(): Parameter #{} (${}) must be of type {} when declared",
+            i + 1,
+            code.params[i].name,
+            TypeDecl::from_mask(want).to_type_string()
+        )))
+    };
+    let ret = |want: u32| -> Step {
+        if want == mask::VOID && nodiscard {
+            return Check(Some(format!("Method {cname}::{fname} cannot be #[\\NoDiscard]")));
+        }
+        let Some(t) = code.return_type.as_ref().map(|t| &t.decl) else { return Check(None) };
+        if t.mask & mask::NEVER != 0 {
+            return Check(None);
+        }
+        let mut complex = !t.classes.is_empty();
+        let mut extra = t.mask & !want;
+        if extra & mask::STATIC != 0 {
+            extra &= !mask::STATIC;
+            complex = true;
+        }
+        if extra != 0 || (complex && want != mask::OBJECT) {
+            return Check(Some(format!(
+                "{cname}::{fname}(): Return type must be {} when declared",
+                TypeDecl::from_mask(want).to_type_string()
+            )));
+        }
+        Check(None)
+    };
+    let steps: Vec<Step> = match name {
+        b"__construct" => vec![non_static(), no_return_type()],
+        b"__destruct" => vec![args(0), non_static(), no_return_type()],
+        b"__clone" => vec![args(0), non_static(), ret(mask::VOID)],
+        b"__get" => vec![args(1), non_static(), Public, arg_type(0, mask::STRING)],
+        b"__set" => vec![args(2), non_static(), Public, arg_type(0, mask::STRING), ret(mask::VOID)],
+        b"__unset" => vec![args(1), non_static(), Public, arg_type(0, mask::STRING), ret(mask::VOID)],
+        b"__isset" => vec![args(1), non_static(), Public, arg_type(0, mask::STRING), ret(mask::BOOL)],
+        b"__call" => vec![args(2), non_static(), Public, arg_type(0, mask::STRING), arg_type(1, mask::ARRAY)],
+        b"__callstatic" => vec![args(2), must_static(), Public, arg_type(0, mask::STRING), arg_type(1, mask::ARRAY)],
+        b"__tostring" => vec![args(0), non_static(), Public, ret(mask::STRING)],
+        b"__debuginfo" => vec![args(0), non_static(), Public, ret(mask::ARRAY | mask::NULL)],
+        b"__serialize" => vec![args(0), non_static(), Public, ret(mask::ARRAY)],
+        b"__unserialize" => vec![args(1), non_static(), Public, arg_type(0, mask::ARRAY), ret(mask::VOID)],
+        b"__set_state" => vec![args(1), must_static(), Public, arg_type(0, mask::ARRAY), ret(mask::OBJECT)],
+        b"__invoke" => vec![non_static(), Public],
+        b"__sleep" => vec![args(0), non_static(), Public, ret(mask::ARRAY)],
+        b"__wakeup" => vec![args(0), non_static(), Public, ret(mask::VOID)],
         _ => vec![],
     };
-    let _ = &l;
-    for c in checks.into_iter().flatten() {
-        return err(c);
+    for s in steps {
+        match s {
+            Check(Some(m)) => return crate::compile::err(m, code.start_line),
+            Check(None) => {}
+            Public => {
+                if flags & member_flags::PUBLIC == 0 {
+                    let msg = format!("The magic method {cname}::{fname}() must have public visibility");
+                    l.vm.zend_error_at(level::E_WARNING, code.file.clone(), code.start_line, PhpStr::from(msg))?;
+                }
+            }
+        }
+    }
+    if name == b"__debuginfo" && code.return_type.as_ref().is_some_and(|t| t.decl.mask & mask::NULL != 0) {
+        let msg = format!(
+            "Returning null from {cname}::__debugInfo() is deprecated, make the return type non-nullable and return an empty array instead"
+        );
+        l.vm.zend_error_at(level::E_DEPRECATED, code.file.clone(), code.start_line, PhpStr::from(msg))?;
     }
     Ok(())
 }
@@ -2161,6 +2159,26 @@ fn implement_interface_hook(vm: &mut Vm, def: &ClassDef, ce: &ClassEntry, iface:
                         Ok(()) => Flow::Fatal,
                     });
                 }
+            }
+        }
+        b"throwable" => {
+            // zend_implement_throwable: only via Exception or Error.
+            let mut root = ce.parent.clone();
+            while let Some(p) = root.as_ref().and_then(|r| r.parent.clone()) {
+                root = Some(p);
+            }
+            let ok = root.is_some_and(|r| matches!(r.name.as_bytes(), b"Exception" | b"Error"));
+            if !ok {
+                let msg = if def.kind == ClassKindIr::Enum {
+                    format!("{} {cname} cannot implement interface {}", kind_word(def.kind), iface.name)
+                } else {
+                    format!(
+                        "{} {cname} cannot implement interface {}, extend Exception or Error instead",
+                        kind_word(def.kind),
+                        iface.name
+                    )
+                };
+                return Err(vm.fatal_error(msg));
             }
         }
         b"serializable" => {

@@ -571,6 +571,81 @@ impl Lowerer<'_> {
         attrs.iter().any(|a| a.name.eq_ignore_ascii_case(name.as_bytes()))
     }
 
+    /// The second loop of `zend_compile_attributes`: target, repetition and
+    /// validator checks of the internal attributes. `class` describes the
+    /// class for class-level validators: (kind, class flags, name).
+    pub(crate) fn validate_attributes(
+        &mut self,
+        attrs: &[Rc<AttrDef>],
+        target: u32,
+        class: Option<(ClassKindIr, u32, &PhpStr)>,
+    ) -> CResult<()> {
+        let delayed = Self::has_attr(attrs, "DelayedTargetValidation");
+        for (i, a) in attrs.iter().enumerate() {
+            let lc = a.name.to_ascii_lowercase();
+            let Some(flags) = internal_attribute_targets(lc.as_bytes()) else { continue };
+            self.line = a.line;
+            let mut run_validator = true;
+            if target & flags == 0 {
+                if !delayed {
+                    return self.error(format!(
+                        "Attribute \"{}\" cannot target {} (allowed targets: {})",
+                        a.name,
+                        attribute_target_names(target),
+                        attribute_target_names(flags)
+                    ));
+                }
+                run_validator = false;
+            }
+            if attrs.iter().enumerate().any(|(j, b)| j != i && b.name.eq_ignore_ascii_case(&lc)) {
+                return self.error(format!("Attribute \"{}\" must not be repeated", a.name));
+            }
+            if !run_validator || delayed {
+                continue;
+            }
+            let Some((kind, cflags, cname)) = class else { continue };
+            if target != attr_target::CLASS {
+                continue;
+            }
+            let kind_word = match kind {
+                ClassKindIr::Class => "class",
+                ClassKindIr::Interface => "interface",
+                ClassKindIr::Trait => "trait",
+                ClassKindIr::Enum => "enum",
+            };
+            let cname = crate::interp::decl::display_class_name(cname);
+            match lc.as_bytes() {
+                b"attribute" => {
+                    let what = match kind {
+                        ClassKindIr::Class if cflags & class_flags::ABSTRACT != 0 => Some("abstract class"),
+                        ClassKindIr::Class => None,
+                        _ => Some(kind_word),
+                    };
+                    if let Some(w) = what {
+                        return self.error(format!("Cannot apply #[\\Attribute] to {w} {cname}"));
+                    }
+                }
+                b"allowdynamicproperties" => {
+                    let what = match kind {
+                        ClassKindIr::Class if cflags & class_flags::READONLY != 0 => Some("readonly class"),
+                        ClassKindIr::Class => None,
+                        _ => Some(kind_word),
+                    };
+                    if let Some(w) = what {
+                        return self.error(format!("Cannot apply #[\\AllowDynamicProperties] to {w} {cname}"));
+                    }
+                }
+                b"deprecated" => {
+                    if kind != ClassKindIr::Trait {
+                        return self.error(format!("Cannot apply #[\\Deprecated] to {kind_word} {cname}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     // ----- constant expressions ----------------------------------------------------
 
     /// `zend_is_allowed_in_const_expr` check.
@@ -822,6 +897,20 @@ impl Lowerer<'_> {
                 }
             }
             let attributes = self.attributes(&p.attributes)?;
+            {
+                // Internal attributes of promoted parameters that only target
+                // the property are not applied to the parameter.
+                let promoted = !p.modifiers.is_empty() || p.hooks.is_some();
+                let mut for_param = attributes.clone();
+                if promoted {
+                    for_param.retain(|a| {
+                        internal_attribute_targets(&a.name.to_ascii_lowercase()).is_none_or(|f| {
+                            f & attr_target::PARAMETER != 0 || f & attr_target::PROPERTY == 0
+                        })
+                    });
+                }
+                self.validate_attributes(&for_param, attr_target::PARAMETER, None)?;
+            }
             let mut default = None;
             let mut default_const = None;
             let mut default_text = None;
@@ -1070,6 +1159,7 @@ impl Lowerer<'_> {
         display: &str,
     ) -> CResult<(Vec<ParamInfo>, Option<TypeInfo>, Block, Vec<Rc<AttrDef>>)> {
         let attributes = self.attributes(&common.attributes)?;
+        self.validate_attributes(&attributes, attr_target::FUNCTION, None)?;
         let params = self.params(&common.params, display, false, false)?;
         let rt = self.return_type_info(common, display, false)?;
         if Self::has_attr(&attributes, "NoDiscard") {
@@ -1134,6 +1224,7 @@ impl Lowerer<'_> {
         let display = name.to_string();
         let res = (|| -> CResult<_> {
             let attributes = self.attributes(&c.common.attributes)?;
+            self.validate_attributes(&attributes, attr_target::FUNCTION, None)?;
             let params = self.params(&c.common.params, &display, false, false)?;
             let mut uses = Vec::with_capacity(c.uses.len());
             for (u, o) in c.uses.iter().zip(&outer) {
@@ -1191,6 +1282,7 @@ impl Lowerer<'_> {
         let display = name.to_string();
         let res = (|| -> CResult<_> {
             let attributes = self.attributes(&a.common.attributes)?;
+            self.validate_attributes(&attributes, attr_target::FUNCTION, None)?;
             let params = self.params(&a.common.params, &display, false, false)?;
             let mut caps = Vec::with_capacity(names.len());
             for (n, o) in names.iter().zip(&outer) {
@@ -1372,6 +1464,7 @@ impl Lowerer<'_> {
         bool,
     )> {
         let attributes = self.attributes(&c.attributes)?;
+        self.validate_attributes(&attributes, attr_target::CLASS, Some((kind, class_flags_v, class_name)))?;
         let mut consts: Vec<ClassConstDef> = Vec::new();
         let mut props: Vec<PropDef> = Vec::new();
         let mut methods: Vec<MethodDef> = Vec::new();
@@ -1411,6 +1504,7 @@ impl Lowerer<'_> {
                         None => None,
                     };
                     let attrs = self.attributes(&g.attributes)?;
+                    self.validate_attributes(&attrs, attr_target::CLASS_CONST, None)?;
                     for e in &g.consts {
                         self.line = e.line;
                         if consts.iter().any(|x| x.name.as_bytes() == e.name.as_bytes())
@@ -1472,6 +1566,7 @@ impl Lowerer<'_> {
                         None => None,
                     };
                     let attrs = self.attributes(&g.attributes)?;
+                    self.validate_attributes(&attrs, attr_target::PROPERTY, None)?;
                     for p in &g.props {
                         self.line = p.line;
                         let mut flags = flags;
@@ -1790,6 +1885,7 @@ impl Lowerer<'_> {
                     // The backing value type is checked when the cases are
                     // first used (`zend_enum_build_backed_enum_table`).
                     let attrs = self.attributes(&ec.attributes)?;
+                    self.validate_attributes(&attrs, attr_target::CLASS_CONST, None)?;
                     cases.push(EnumCaseDef {
                         name: pstr(&ec.name),
                         value,
@@ -1817,6 +1913,7 @@ impl Lowerer<'_> {
         let is_ctor = lc.as_bytes() == b"__construct";
         let res = (|| -> CResult<_> {
             let attributes = self.attributes(&md.common.attributes)?;
+            self.validate_attributes(&attributes, attr_target::METHOD, None)?;
             let params = self.params(&md.common.params, &display, is_ctor, md.body.is_none())?;
             let rt = self.return_type_info(&md.common, &display, lc.as_bytes() == b"__tostring")?;
             if self.fs.is_generator {
@@ -2094,6 +2191,46 @@ impl Lowerer<'_> {
 }
 
 /// `zend_is_valid_default_value`.
+/// `ZEND_ATTRIBUTE_TARGET_*`.
+pub(crate) mod attr_target {
+    pub const CLASS: u32 = 1 << 0;
+    pub const FUNCTION: u32 = 1 << 1;
+    pub const METHOD: u32 = 1 << 2;
+    pub const PROPERTY: u32 = 1 << 3;
+    pub const CLASS_CONST: u32 = 1 << 4;
+    pub const PARAMETER: u32 = 1 << 5;
+    pub const CONST: u32 = 1 << 6;
+    pub const ALL: u32 = (1 << 7) - 1;
+}
+
+/// Allowed targets of the internal attributes (`zend_internal_attribute_get`).
+fn internal_attribute_targets(lc: &[u8]) -> Option<u32> {
+    use attr_target::*;
+    Some(match lc {
+        b"attribute" => CLASS,
+        b"returntypewillchange" => METHOD,
+        b"allowdynamicproperties" => CLASS,
+        b"sensitiveparameter" => PARAMETER,
+        b"override" => METHOD | PROPERTY | CLASS_CONST,
+        b"deprecated" => METHOD | FUNCTION | CLASS_CONST | CONST | CLASS,
+        b"nodiscard" => METHOD | FUNCTION,
+        b"delayedtargetvalidation" => ALL,
+        _ => return None,
+    })
+}
+
+/// `zend_get_attribute_target_names`.
+fn attribute_target_names(flags: u32) -> String {
+    const NAMES: [&str; 7] = ["class", "function", "method", "property", "class constant", "parameter", "constant"];
+    NAMES
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| flags & (1 << i) != 0)
+        .map(|(_, n)| *n)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn is_valid_default(t: &TypeDecl, v: &Value) -> bool {
     if t.is_mixed() {
         return true;

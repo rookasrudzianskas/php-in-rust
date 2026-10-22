@@ -527,17 +527,45 @@ fn class_alias(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
     let autoload = a.bool(2);
     let c = if autoload { vm.lookup_class(&orig)? } else { vm.find_class(&orig) };
     let Some(c) = c else {
-        vm.warning(format!("Class \"{orig}\" not found"))?;
+        vm.zend_error(level::E_WARNING, format!("Class \"{orig}\" not found"))?;
         return Ok(Value::Bool(false));
     };
-    if c.is_internal() {
-        return Err(vm.argument_value_error(1, "must be a user-defined class name, internal class name given"));
-    }
+    // zend_register_class_alias_ex
     let lc = alias.strip_prefix(b"\\").unwrap_or(&alias).to_ascii_lowercase();
+    // zend_assert_valid_class_name(lcname, "a class alias")
+    let uq = match lc.iter().rposition(|&b| b == b'\\') {
+        Some(i) => &lc[i + 1..],
+        None => &lc[..],
+    };
+    const RESERVED: [&[u8]; 17] = [
+        b"null", b"true", b"false", b"int", b"float", b"string", b"bool", b"void", b"never", b"iterable",
+        b"object", b"mixed", b"array", b"callable", b"static", b"self", b"parent",
+    ];
+    if RESERVED.contains(&uq) {
+        let msg = format!("Cannot use \"{}\" as a class alias as it is reserved", String::from_utf8_lossy(&lc));
+        return Err(match vm.zend_error(level::E_COMPILE_ERROR, msg) {
+            Err(f) => f,
+            Ok(()) => Flow::Fatal,
+        });
+    }
+    for (word, since) in [(&b"_"[..], "8.4"), (b"let", "8.6"), (b"is", "8.6")] {
+        if uq == word {
+            vm.zend_error(
+                level::E_DEPRECATED,
+                format!("Using \"{}\" as a class alias is deprecated since {since}", String::from_utf8_lossy(word)),
+            )?;
+        }
+    }
     if vm.classes.contains_key(&lc) {
-        vm.warning(format!(
-            "Cannot declare class {alias}, because the name is already in use"
-        ))?;
+        // zend_class_redeclaration_error_ex(E_WARNING, alias, ce)
+        let msg = match &c.location {
+            Some((file, line, _)) if !c.is_internal() => format!(
+                "Cannot redeclare {} {alias} (previously declared in {file}:{line})",
+                c.kind_name()
+            ),
+            _ => format!("Cannot redeclare {} {alias}", c.kind_name()),
+        };
+        vm.zend_error(level::E_WARNING, msg)?;
         return Ok(Value::Bool(false));
     }
     vm.classes.insert(PhpStr::from_vec(lc), c);
