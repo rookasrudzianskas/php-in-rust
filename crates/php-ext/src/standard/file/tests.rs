@@ -670,3 +670,131 @@ fn php_filter_url_without_resource_throws() {
         "\nWarning: fopen(): Failed to open stream: operation failed in /t.php on line 3\n"
     );
 }
+
+#[test]
+fn data_urls_are_not_writable() {
+    // bug79467.phpt
+    let mut t = TestVm::new();
+    let r = t
+        .call("file_put_contents", vec![s("data://text/plain,cccc"), s("data")])
+        .unwrap();
+    assert_eq!(r.as_bool(), Some(false));
+    assert_eq!(
+        t.output(),
+        "\nNotice: file_put_contents(): Stream is not writable in /t.php on line 3\n"
+    );
+}
+
+#[test]
+fn remote_file_urls_are_rejected() {
+    // fopen_variation14.phpt
+    let mut t = TestVm::new();
+    let r = t.call("fopen", vec![s("file://dir/x.tmp"), s("r")]).unwrap();
+    assert_eq!(r.as_bool(), Some(false));
+    assert_eq!(
+        t.output(),
+        "\nWarning: fopen(): Remote host file access not supported, file://dir/x.tmp in /t.php on line 3\n\nWarning: fopen(): Failed to open stream: no suitable wrapper could be found in /t.php on line 3\n"
+    );
+    let d = scratch("fileurl");
+    let f = format!("{d}/x");
+    std::fs::write(&f, "via url").unwrap();
+    let r = t.call("file_get_contents", vec![s(&format!("file://{f}"))]).unwrap();
+    assert_eq!(as_bytes(&r), b"via url");
+    let r = t
+        .call("file_get_contents", vec![s(&format!("file://localhost{f}"))])
+        .unwrap();
+    assert_eq!(as_bytes(&r), b"via url");
+}
+
+#[test]
+fn write_to_read_only_stream_notices() {
+    let mut t = TestVm::new();
+    let d = scratch("ro");
+    let f = format!("{d}/r");
+    std::fs::write(&f, "x").unwrap();
+    let fp = t.call("fopen", vec![s(&f), s("r")]).unwrap();
+    assert_eq!(
+        t.call("fwrite", vec![fp.clone(), s("data")]).unwrap().as_bool(),
+        Some(false)
+    );
+    let out = t.output();
+    assert!(
+        out.starts_with(
+            "\nNotice: fwrite(): Write of 4 bytes failed with errno=9 Bad file descriptor"
+        ),
+        "{out}"
+    );
+    assert_eq!(
+        t.call("fwrite", vec![fp.clone(), s("data"), Value::Int(0)])
+            .unwrap()
+            .as_int(),
+        Some(0)
+    );
+    t.call("fclose", vec![fp]).unwrap();
+}
+
+#[test]
+fn exclusive_and_create_modes() {
+    let mut t = TestVm::new();
+    let d = scratch("modes");
+    let f = format!("{d}/m");
+    let fp = t.call("fopen", vec![s(&f), s("x")]).unwrap();
+    assert!(matches!(fp, Value::Resource(_)));
+    t.call("fwrite", vec![fp.clone(), s("12345")]).unwrap();
+    t.call("fclose", vec![fp]).unwrap();
+    let r = t.call("fopen", vec![s(&f), s("x+")]).unwrap();
+    assert_eq!(r.as_bool(), Some(false));
+    assert_eq!(
+        t.output(),
+        "\nWarning: fopen(): Failed to open stream: File exists in /t.php on line 3\n"
+    );
+    // "c" keeps the contents, "w" truncates
+    let fp = t.call("fopen", vec![s(&f), s("c+")]).unwrap();
+    assert_eq!(
+        as_bytes(&t.call("fread", vec![fp.clone(), Value::Int(10)]).unwrap()),
+        b"12345"
+    );
+    t.call("fclose", vec![fp]).unwrap();
+    let fp = t.call("fopen", vec![s(&f), s("w")]).unwrap();
+    t.call("fclose", vec![fp]).unwrap();
+    assert_eq!(std::fs::read(&f).unwrap(), b"");
+}
+
+#[test]
+fn include_path_lookup() {
+    let mut t = TestVm::new();
+    let d = scratch("incpath");
+    std::fs::write(format!("{d}/inc.txt"), "found").unwrap();
+    t.vm.ini_set("include_path", format!(".:{d}"));
+    let r = t
+        .call("file_get_contents", vec![s("inc.txt"), Value::Bool(true)])
+        .unwrap();
+    assert_eq!(as_bytes(&r), b"found");
+    let r = t.call("stream_resolve_include_path", vec![s("inc.txt")]).unwrap();
+    assert_eq!(as_bytes(&r), format!("{d}/inc.txt").as_bytes());
+    let fp = t
+        .call("fopen", vec![s("inc.txt"), s("r"), Value::Bool(true)])
+        .unwrap();
+    assert!(matches!(fp, Value::Resource(_)));
+}
+
+#[test]
+fn open_basedir_restriction() {
+    let mut t = TestVm::new();
+    let d = scratch("obd");
+    let inside = format!("{d}/in.txt");
+    std::fs::write(&inside, "ok").unwrap();
+    t.vm.ini_set("open_basedir", d.clone());
+    assert_eq!(
+        as_bytes(&t.call("file_get_contents", vec![s(&inside)]).unwrap()),
+        b"ok"
+    );
+    let r = t.call("file_get_contents", vec![s("/etc/hosts")]).unwrap();
+    assert_eq!(r.as_bool(), Some(false));
+    assert_eq!(
+        t.output(),
+        format!(
+            "\nWarning: file_get_contents(): open_basedir restriction in effect. File(/etc/hosts) is not within the allowed path(s): ({d}) in /t.php on line 3\n\nWarning: file_get_contents(): Failed to open stream: Operation not permitted in /t.php on line 3\n"
+        )
+    );
+}
