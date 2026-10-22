@@ -1081,3 +1081,761 @@ static PROC_GET_STATUS: NativeFunction = NativeFunction {
 pub fn register(r: &mut Registry) {
     r.functions(&[&PROC_OPEN, &PROC_CLOSE, &PROC_TERMINATE, &PROC_GET_STATUS]);
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::testing::{TestVm, thrown};
+    use php_runtime::PhpRef;
+
+    fn s(v: &str) -> Value {
+        Value::from(v)
+    }
+
+    fn list(items: Vec<Value>) -> Value {
+        Value::from(PhpArray::from_values(items))
+    }
+
+    fn strs(items: &[&str]) -> Value {
+        list(items.iter().map(|v| s(v)).collect())
+    }
+
+    fn spec(items: Vec<(i64, Value)>) -> Value {
+        let mut a = PhpArray::new();
+        for (k, v) in items {
+            a.insert(ArrayKey::Int(k), v);
+        }
+        Value::from(a)
+    }
+
+    fn pipe(mode: &str) -> Value {
+        strs(&["pipe", mode])
+    }
+
+    /// `proc_open($cmd, $spec, $pipes, ...$rest)`.
+    fn open(t: &mut TestVm, cmd: Value, spec: Value, rest: Vec<Value>) -> (PResult<Value>, PhpRef) {
+        let pipes = PhpRef::new(Value::Null);
+        let mut args = vec![cmd, spec, Value::Ref(pipes.clone())];
+        args.extend(rest);
+        (t.call("proc_open", args), pipes)
+    }
+
+    fn pipes_of(pipes: &PhpRef) -> Vec<(i64, ResRef)> {
+        let Value::Array(a) = pipes.get() else {
+            panic!("$pipes is not an array: {:?}", pipes.get());
+        };
+        a.iter()
+            .map(|(k, v)| match (k, v) {
+                (ArrayKey::Int(i), Value::Resource(r)) => (i, r.clone()),
+                other => panic!("unexpected $pipes entry {other:?}"),
+            })
+            .collect()
+    }
+
+    fn pipe_at(pipes: &PhpRef, i: i64) -> ResRef {
+        pipes_of(pipes)
+            .into_iter()
+            .find(|(k, _)| *k == i)
+            .map(|(_, r)| r)
+            .unwrap_or_else(|| panic!("no pipe {i}"))
+    }
+
+    fn read_all(t: &mut TestVm, r: &ResRef) -> String {
+        let data = streams::read_to_end(&mut t.vm, r)
+            .unwrap()
+            .unwrap_or_default();
+        String::from_utf8_lossy(&data).into_owned()
+    }
+
+    fn status(t: &mut TestVm, proc: &Value) -> PhpArray {
+        match t.call("proc_get_status", vec![proc.clone()]).unwrap() {
+            Value::Array(a) => (*a).clone(),
+            other => panic!("proc_get_status returned {other:?}"),
+        }
+    }
+
+    fn field(a: &PhpArray, k: &str) -> Value {
+        a.get_str(k.as_bytes()).cloned().unwrap_or(Value::Undef)
+    }
+
+    /// Polls `proc_get_status()` until the child is no longer running.
+    fn wait_stopped_running(t: &mut TestVm, proc: &Value) -> PhpArray {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let st = status(t, proc);
+            if matches!(field(&st, "running"), Value::Bool(false)) || Instant::now() > deadline {
+                return st;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn close(t: &mut TestVm, proc: &Value) -> i64 {
+        match t.call("proc_close", vec![proc.clone()]).unwrap() {
+            Value::Int(n) => n,
+            other => panic!("proc_close returned {other:?}"),
+        }
+    }
+
+    fn temp_path(name: &str) -> String {
+        let dir = std::env::temp_dir();
+        format!(
+            "{}/php_proc_open_{}_{name}",
+            dir.display(),
+            std::process::id()
+        )
+    }
+
+    fn warning(msg: &str) -> String {
+        format!("\nWarning: proc_open(): {msg} in /t.php on line 3\n")
+    }
+
+    // proc_open.phpt, bug44667.phpt
+    #[test]
+    fn cat_round_trip() {
+        let mut t = TestVm::new();
+        let ds = spec(vec![(0, pipe("r")), (1, pipe("w")), (2, pipe("w"))]);
+        let (proc, pipes) = open(&mut t, s("/bin/cat"), ds, vec![]);
+        let proc = proc.unwrap();
+        assert!(matches!(&proc, Value::Resource(r) if r.type_name() == "process"));
+        let keys: Vec<i64> = pipes_of(&pipes).iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, vec![0, 1, 2]);
+        let modes: Vec<Vec<u8>> = pipes_of(&pipes)
+            .iter()
+            .map(|(_, r)| handle_of(r).unwrap().borrow().st.mode.as_bytes().to_vec())
+            .collect();
+        assert_eq!(modes, vec![b"w".to_vec(), b"r".to_vec(), b"r".to_vec()]);
+        for (_, r) in pipes_of(&pipes) {
+            let f = handle_of(&r).unwrap().borrow().st.flags;
+            assert_ne!(f & flags::NO_SEEK, 0);
+        }
+
+        let stdin = pipe_at(&pipes, 0);
+        assert_eq!(
+            streams::write(&mut t.vm, &stdin, b"Hello").unwrap(),
+            Some(5)
+        );
+        assert!(streams::close(&mut t.vm, &stdin).unwrap());
+        assert_eq!(read_all(&mut t, &pipe_at(&pipes, 1)), "Hello");
+        assert_eq!(close(&mut t, &proc), 0);
+        assert_eq!(t.output(), "");
+
+        // 'rb' / 'wb' modes (bug #44667).
+        let ds = spec(vec![(0, pipe("rb")), (1, pipe("wb"))]);
+        let (proc, pipes) = open(&mut t, s("cat"), ds, vec![]);
+        let proc = proc.unwrap();
+        let stdin = pipe_at(&pipes, 0);
+        streams::write(&mut t.vm, &stdin, b"Hello").unwrap();
+        streams::close(&mut t.vm, &stdin).unwrap();
+        assert_eq!(read_all(&mut t, &pipe_at(&pipes, 1)), "Hello");
+        assert_eq!(close(&mut t, &proc), 0);
+    }
+
+    #[test]
+    fn proc_close_returns_exit_code_and_closes_pipes() {
+        let mut t = TestVm::new();
+        let ds = spec(vec![(0, pipe("r")), (1, pipe("w"))]);
+        let (proc, pipes) = open(&mut t, s("cat >/dev/null; exit 3"), ds, vec![]);
+        let proc = proc.unwrap();
+        // proc_close() closes the pipes first, so cat sees EOF.
+        assert_eq!(close(&mut t, &proc), 3);
+        for (_, r) in pipes_of(&pipes) {
+            assert_eq!(r.type_name(), "Unknown");
+        }
+        assert!(matches!(&proc, Value::Resource(r) if r.type_name() == "Unknown"));
+        let (class, msg) = thrown(t.call("proc_close", vec![proc.clone()]));
+        assert_eq!(class, "TypeError");
+        assert_eq!(
+            msg,
+            "proc_close(): supplied resource is not a valid process resource"
+        );
+        let (_, msg) = thrown(t.call("proc_get_status", vec![proc]));
+        assert_eq!(
+            msg,
+            "proc_get_status(): supplied resource is not a valid process resource"
+        );
+    }
+
+    // proc_open_pipes1.phpt: the discarded process resource closes its pipes.
+    #[test]
+    fn dropping_the_process_closes_its_pipes() {
+        let mut t = TestVm::new();
+        let ds = spec((3..=30).map(|i| (i, pipe("w"))).collect());
+        let (proc, pipes) = open(&mut t, s("exit 0"), ds, vec![]);
+        let proc = proc.unwrap();
+        let all = pipes_of(&pipes);
+        assert_eq!(all.len(), 28);
+        assert!(all.iter().all(|(_, r)| r.type_name() == "stream"));
+        drop(proc);
+        assert!(all.iter().all(|(_, r)| r.type_name() == "Unknown"));
+    }
+
+    // proc_open_pipes2.phpt
+    #[test]
+    fn no_pipes() {
+        let mut t = TestVm::new();
+        let (proc, pipes) = open(&mut t, s("exit 0"), spec(vec![]), vec![]);
+        let proc = proc.unwrap();
+        assert!(pipes_of(&pipes).is_empty());
+        assert_eq!(close(&mut t, &proc), 0);
+    }
+
+    // proc_open_pipes3.phpt
+    #[test]
+    fn invalid_pipes() {
+        let mut t = TestVm::new();
+        let base: Vec<(i64, Value)> = (3..=5).map(|i| (i, pipe("w"))).collect();
+        let with = |last: Value| {
+            let mut v = base.clone();
+            v.push((6, last));
+            spec(v)
+        };
+
+        let (r, pipes) = open(&mut t, s("exit 0"), with(strs(&["pi"])), vec![]);
+        assert!(matches!(r.unwrap(), Value::Bool(false)));
+        assert!(matches!(pipes.get(), Value::Null));
+        assert_eq!(
+            t.output(),
+            warning("pi is not a valid descriptor spec/mode")
+        );
+
+        let (r, _) = open(&mut t, s("exit 0"), with(Value::Int(1)), vec![]);
+        assert_eq!(
+            thrown(r),
+            (
+                "ValueError".to_string(),
+                "proc_open(): Argument #2 ($descriptor_spec) must only contain arrays and streams"
+                    .to_string()
+            )
+        );
+
+        let (r, pipes) = open(&mut t, s("exit 0"), with(pipe("test")), vec![]);
+        let proc = r.unwrap();
+        assert_eq!(pipes_of(&pipes).len(), 4);
+        // "test" does not start with "w": the parent writes.
+        let mode = handle_of(&pipe_at(&pipes, 6))
+            .unwrap()
+            .borrow()
+            .st
+            .mode
+            .clone();
+        assert_eq!(mode.as_bytes(), b"w");
+        drop(proc);
+
+        let file = strs(&["file", "test", "z"]);
+        let (r, _) = open(&mut t, s("exit 0"), with(file), vec![]);
+        assert!(matches!(r.unwrap(), Value::Bool(false)));
+        let out = t.output();
+        assert!(
+            out.starts_with("\nWarning: proc_open(): Failed to open stream: "),
+            "{out}"
+        );
+    }
+
+    // proc_open_array.phpt
+    #[test]
+    fn command_array_validation() {
+        let mut t = TestVm::new();
+        let ds = || spec(vec![(0, pipe("r")), (1, pipe("w")), (2, pipe("w"))]);
+        let cases: Vec<(Value, &str)> = vec![
+            (
+                list(vec![]),
+                "proc_open(): Argument #1 ($command) must not be empty",
+            ),
+            (
+                strs(&["php\0oops"]),
+                "Command array element 1 contains a null byte",
+            ),
+            (
+                strs(&["php", "array\0oops"]),
+                "Command array element 2 contains a null byte",
+            ),
+            (
+                strs(&[""]),
+                "First element must contain a non-empty program name",
+            ),
+        ];
+        for (cmd, expected) in cases {
+            let (r, _) = open(&mut t, cmd, ds(), vec![]);
+            assert_eq!(thrown(r), ("ValueError".to_string(), expected.to_string()));
+        }
+    }
+
+    #[test]
+    fn command_array_arguments_are_passed_through() {
+        let mut t = TestVm::new();
+        let args = [
+            "Simple",
+            "White space\ttab\nnewline",
+            "\"Quoted\"",
+            "Qu\"ot\"ed",
+            "\\Back\\slash\\",
+            "\\\\Back\\\\slash\\\\",
+            "\\\"Qu\\\"ot\\\"ed\\\"",
+        ];
+        let mut cmd = vec!["/bin/sh", "-c", "printf '[%s]\\n' \"$0\" \"$@\"", "zero"];
+        cmd.extend(args);
+        let (r, pipes) = open(&mut t, strs(&cmd), spec(vec![(1, pipe("w"))]), vec![]);
+        let proc = r.unwrap();
+        let expected: String = std::iter::once("zero")
+            .chain(args)
+            .map(|a| format!("[{a}]\n"))
+            .collect();
+        assert_eq!(read_all(&mut t, &pipe_at(&pipes, 1)), expected);
+        assert_eq!(close(&mut t, &proc), 0);
+
+        // The command is the first element.
+        let cmd = strs(&["/bin/sh", "-c", "exit 0"]);
+        let (r, _) = open(&mut t, cmd, spec(vec![]), vec![]);
+        let proc = r.unwrap();
+        let st = wait_stopped_running(&mut t, &proc);
+        assert!(matches!(field(&st, "command"), Value::String(c) if c.as_bytes() == b"/bin/sh"));
+    }
+
+    #[test]
+    fn command_array_uses_path_lookup_and_reports_spawn_failure() {
+        let mut t = TestVm::new();
+        let cmd = strs(&["sh", "-c", "echo $0"]);
+        let (r, pipes) = open(&mut t, cmd, spec(vec![(1, pipe("w"))]), vec![]);
+        let proc = r.unwrap();
+        assert_eq!(read_all(&mut t, &pipe_at(&pipes, 1)), "sh\n");
+        assert_eq!(close(&mut t, &proc), 0);
+
+        for cmd in [
+            "php-in-rust-no-such-program",
+            "/php-in-rust/no/such/program",
+        ] {
+            let (r, pipes) = open(&mut t, strs(&[cmd]), spec(vec![(1, pipe("w"))]), vec![]);
+            assert!(matches!(r.unwrap(), Value::Bool(false)));
+            assert!(matches!(pipes.get(), Value::Null));
+            assert_eq!(
+                t.output(),
+                warning("posix_spawn() failed: No such file or directory")
+            );
+        }
+    }
+
+    #[test]
+    fn string_command_runs_through_sh() {
+        let mut t = TestVm::new();
+        let cmd = s("echo $0; echo hi");
+        let (r, pipes) = open(&mut t, cmd, spec(vec![(1, pipe("w"))]), vec![]);
+        let proc = r.unwrap();
+        assert_eq!(read_all(&mut t, &pipe_at(&pipes, 1)), "sh\nhi\n");
+        let st = wait_stopped_running(&mut t, &proc);
+        assert!(
+            matches!(field(&st, "command"), Value::String(c) if c.as_bytes() == b"echo $0; echo hi")
+        );
+        assert_eq!(close(&mut t, &proc), 0);
+    }
+
+    // php_array_to_envp: order kept, empty values skipped, int keys raw.
+    #[test]
+    fn explicit_environment() {
+        let mut t = TestVm::new();
+        let mut env = PhpArray::new();
+        env.insert(ArrayKey::from("A"), s("1"));
+        env.insert(ArrayKey::from("B"), s(""));
+        env.insert(ArrayKey::Int(0), s("C=3"));
+        env.insert(ArrayKey::from("D"), Value::Int(4));
+        env.insert(ArrayKey::from("E"), Value::Bool(true));
+        let (r, pipes) = open(
+            &mut t,
+            strs(&["/usr/bin/env"]),
+            spec(vec![(1, pipe("w"))]),
+            vec![Value::Null, Value::from(env)],
+        );
+        let proc = r.unwrap();
+        assert_eq!(
+            read_all(&mut t, &pipe_at(&pipes, 1)),
+            "A=1\nC=3\nD=4\nE=1\n"
+        );
+        assert_eq!(close(&mut t, &proc), 0);
+
+        // An empty array is an empty environment, not the inherited one.
+        let (r, pipes) = open(
+            &mut t,
+            strs(&["/usr/bin/env"]),
+            spec(vec![(1, pipe("w"))]),
+            vec![Value::Null, Value::from(PhpArray::new())],
+        );
+        let proc = r.unwrap();
+        assert_eq!(read_all(&mut t, &pipe_at(&pipes, 1)), "");
+        assert_eq!(close(&mut t, &proc), 0);
+    }
+
+    // proc_open_cwd_null_bytes.phpt
+    #[test]
+    fn cwd() {
+        let mut t = TestVm::new();
+        let (r, pipes) = open(&mut t, s("pwd"), spec(vec![(1, pipe("w"))]), vec![s("/")]);
+        let proc = r.unwrap();
+        assert_eq!(read_all(&mut t, &pipe_at(&pipes, 1)), "/\n");
+        assert_eq!(close(&mut t, &proc), 0);
+
+        let cwd = vec![s("foo\0bar")];
+        let (r, _) = open(&mut t, s("does_not_matter"), spec(vec![]), cwd);
+        assert_eq!(
+            thrown(r),
+            (
+                "ValueError".to_string(),
+                "proc_open(): Argument #4 ($cwd) must not contain any null bytes".to_string()
+            )
+        );
+
+        let cwd = vec![s("/php-in-rust/no/such/dir")];
+        let (r, _) = open(&mut t, s("exit 0"), spec(vec![]), cwd);
+        assert!(matches!(r.unwrap(), Value::Bool(false)));
+        assert_eq!(
+            t.output(),
+            warning("posix_spawn() failed: No such file or directory")
+        );
+    }
+
+    // proc_open_null.phpt
+    #[test]
+    fn null_descriptor() {
+        let mut t = TestVm::new();
+        let cmd = "printf Test; printf Error >&2";
+        let ds = spec(vec![(1, strs(&["null"])), (2, pipe("w"))]);
+        let (r, pipes) = open(&mut t, s(cmd), ds, vec![]);
+        let proc = r.unwrap();
+        let keys: Vec<i64> = pipes_of(&pipes).iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, vec![2]);
+        assert_eq!(read_all(&mut t, &pipe_at(&pipes, 2)), "Error");
+        close(&mut t, &proc);
+
+        let ds = spec(vec![(1, pipe("w")), (2, strs(&["null"]))]);
+        let (r, pipes) = open(&mut t, s(cmd), ds, vec![]);
+        let proc = r.unwrap();
+        assert_eq!(read_all(&mut t, &pipe_at(&pipes, 1)), "Test");
+        close(&mut t, &proc);
+    }
+
+    // proc_open_redirect.phpt
+    #[test]
+    fn redirect() {
+        let mut t = TestVm::new();
+        let ds = spec(vec![(0, strs(&["redirect"]))]);
+        let (r, _) = open(&mut t, s("exit 0"), ds, vec![]);
+        assert_eq!(
+            thrown(r),
+            (
+                "ValueError".to_string(),
+                "Missing redirection target".to_string()
+            )
+        );
+        let ds = spec(vec![(0, strs(&["redirect", "foo"]))]);
+        let (r, _) = open(&mut t, s("exit 0"), ds, vec![]);
+        assert_eq!(
+            thrown(r).1,
+            "Redirection target must be of type int, string given"
+        );
+        let ds = spec(vec![(0, list(vec![s("redirect"), Value::Int(42)]))]);
+        let (r, _) = open(&mut t, s("exit 0"), ds, vec![]);
+        assert!(matches!(r.unwrap(), Value::Bool(false)));
+        assert_eq!(t.output(), warning("Redirection target 42 not found"));
+
+        let cmd = "echo Test; printf Error >&2";
+        let redirect = || list(vec![s("redirect"), Value::Int(1)]);
+        let ds = spec(vec![(1, pipe("w")), (2, redirect())]);
+        let (r, pipes) = open(&mut t, s(cmd), ds, vec![]);
+        let proc = r.unwrap();
+        assert_eq!(pipes_of(&pipes).len(), 1);
+        assert_eq!(read_all(&mut t, &pipe_at(&pipes, 1)), "Test\nError");
+        close(&mut t, &proc);
+
+        // With a file name.
+        let path = temp_path("redirect_file");
+        let ds = spec(vec![(1, strs(&["file", &path, "w"])), (2, redirect())]);
+        let (r, pipes) = open(&mut t, s(cmd), ds, vec![]);
+        let proc = r.unwrap();
+        assert!(pipes_of(&pipes).is_empty());
+        close(&mut t, &proc);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "Test\nError");
+        std::fs::remove_file(&path).unwrap();
+
+        // With a stream resource.
+        let file = streams::open(&mut t.vm, path.as_bytes(), b"w", false, None)
+            .unwrap()
+            .unwrap();
+        let ds = spec(vec![(1, Value::Resource(file.clone())), (2, redirect())]);
+        let (r, pipes) = open(&mut t, s(cmd), ds, vec![]);
+        let proc = r.unwrap();
+        assert!(pipes_of(&pipes).is_empty());
+        close(&mut t, &proc);
+        assert!(streams::close(&mut t.vm, &file).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "Test\nError");
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(t.output(), "");
+    }
+
+    #[test]
+    fn file_descriptor_reads_from_a_file() {
+        let mut t = TestVm::new();
+        let path = temp_path("file_input");
+        std::fs::write(&path, "from a file\n").unwrap();
+        let ds = spec(vec![(0, strs(&["file", &path, "r"])), (1, pipe("w"))]);
+        let (r, pipes) = open(&mut t, s("/bin/cat"), ds, vec![]);
+        let proc = r.unwrap();
+        assert_eq!(read_all(&mut t, &pipe_at(&pipes, 1)), "from a file\n");
+        assert_eq!(close(&mut t, &proc), 0);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    // A read-buffered stream hands the child its logical position.
+    #[test]
+    fn stream_resource_position_is_synchronised() {
+        let mut t = TestVm::new();
+        let path = temp_path("cast_position");
+        std::fs::write(&path, "0123456789").unwrap();
+        let file = streams::open(&mut t.vm, path.as_bytes(), b"r", false, None)
+            .unwrap()
+            .unwrap();
+        let head = streams::read(&mut t.vm, &file, 4).unwrap().unwrap();
+        assert_eq!(head, b"0123");
+        let ds = spec(vec![(0, Value::Resource(file.clone())), (1, pipe("w"))]);
+        let (r, pipes) = open(&mut t, s("/bin/cat"), ds, vec![]);
+        let proc = r.unwrap();
+        assert_eq!(read_all(&mut t, &pipe_at(&pipes, 1)), "456789");
+        assert_eq!(close(&mut t, &proc), 0);
+        assert_eq!(t.output(), "");
+        streams::close(&mut t.vm, &file).unwrap();
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    // proc_open_with_wrong_resource_type.phpt and php_stream_cast failures.
+    #[test]
+    fn stream_resource_errors() {
+        let mut t = TestVm::new();
+        let (r, _) = open(&mut t, s("exit 0"), spec(vec![]), vec![]);
+        let proc = r.unwrap();
+        let (r, _) = open(&mut t, s("exit 0"), spec(vec![(0, proc.clone())]), vec![]);
+        assert_eq!(
+            thrown(r),
+            (
+                "TypeError".to_string(),
+                "proc_open(): supplied resource is not a valid stream resource".to_string()
+            )
+        );
+        close(&mut t, &proc);
+
+        let mem = streams::open_memory(&mut t.vm, b"data");
+        let ds = spec(vec![(0, Value::Resource(mem))]);
+        let (r, _) = open(&mut t, s("exit 0"), ds, vec![]);
+        assert!(matches!(r.unwrap(), Value::Bool(false)));
+        assert_eq!(
+            t.output(),
+            warning("Cannot represent a stream of type MEMORY as a File Descriptor")
+        );
+    }
+
+    #[test]
+    fn descriptor_spec_validation() {
+        let mut t = TestVm::new();
+        let mut keyed = PhpArray::new();
+        keyed.insert(ArrayKey::from("in"), pipe("r"));
+        let (r, _) = open(&mut t, s("exit 0"), Value::from(keyed), vec![]);
+        assert_eq!(
+            thrown(r).1,
+            "proc_open(): Argument #2 ($descriptor_spec) must be an integer indexed array"
+        );
+
+        let cases: Vec<(Value, &str)> = vec![
+            (list(vec![]), "Missing handle qualifier"),
+            (strs(&["pipe"]), "Missing mode parameter for 'pipe'"),
+            (strs(&["file"]), "Missing file name parameter for 'file'"),
+            (
+                strs(&["file", "/dev/null"]),
+                "Missing mode parameter for 'file'",
+            ),
+        ];
+        for (item, expected) in cases {
+            let (r, _) = open(&mut t, s("exit 0"), spec(vec![(0, item)]), vec![]);
+            assert_eq!(thrown(r), ("ValueError".to_string(), expected.to_string()));
+        }
+
+        // proc_open_descriptor_0_setup_failure.phpt: the spec is rejected
+        // after a pipe was already set up.
+        let ds = spec(vec![(0, pipe("w")), (1, strs(&["bogus_type"]))]);
+        let (r, _) = open(&mut t, s("true"), ds, vec![]);
+        assert!(matches!(r.unwrap(), Value::Bool(false)));
+        assert_eq!(
+            t.output(),
+            warning("bogus_type is not a valid descriptor spec/mode")
+        );
+
+        let (r, _) = open(&mut t, s("true"), spec(vec![(-1, pipe("w"))]), vec![]);
+        assert!(matches!(r.unwrap(), Value::Bool(false)));
+        let out = t.output();
+        assert!(
+            out.starts_with("\nWarning: proc_open(): Unable to copy file descriptor ")
+                && out.contains(" (for pipe) into file descriptor -1: Bad file descriptor in "),
+            "{out}"
+        );
+    }
+
+    // gh12655.phpt: descriptor items held by reference.
+    #[test]
+    fn descriptor_items_by_reference() {
+        let mut t = TestVm::new();
+        let item = |m: &str| Value::Ref(PhpRef::new(pipe(m)));
+        let ds = spec(vec![(0, item("r")), (1, item("w")), (2, item("w"))]);
+        let (r, pipes) = open(&mut t, s("echo ok"), ds, vec![]);
+        let proc = r.unwrap();
+        assert_eq!(read_all(&mut t, &pipe_at(&pipes, 1)), "ok\n");
+        assert_eq!(close(&mut t, &proc), 0);
+    }
+
+    // proc_open_sockets*.phpt
+    #[test]
+    fn socket_descriptors() {
+        let mut t = TestVm::new();
+        let ds = spec(vec![
+            (0, strs(&["null"])),
+            (1, strs(&["socket"])),
+            (2, strs(&["socket"])),
+        ]);
+        let cmd = s("printf hello; printf 'SOME ERROR' >&2");
+        let (r, pipes) = open(&mut t, cmd, ds, vec![]);
+        let proc = r.unwrap();
+        let out = pipe_at(&pipes, 1);
+        let kind = handle_of(&out).unwrap().borrow().kind();
+        assert_eq!(kind, stream::StreamKind::Socket);
+        assert_eq!(read_all(&mut t, &out), "hello");
+        assert_eq!(read_all(&mut t, &pipe_at(&pipes, 2)), "SOME ERROR");
+        assert_eq!(close(&mut t, &proc), 0);
+    }
+
+    // proc_open02.phpt
+    #[test]
+    fn get_status_and_terminate() {
+        let mut t = TestVm::new();
+        let cmd = strs(&["/bin/sleep", "3"]);
+        let (r, _) = open(&mut t, cmd, spec(vec![(0, pipe("r"))]), vec![]);
+        let proc = r.unwrap();
+        let ok = t.call("proc_terminate", vec![proc.clone(), Value::Int(0)]);
+        assert!(matches!(ok.unwrap(), Value::Bool(true)));
+
+        let st = status(&mut t, &proc);
+        let keys: Vec<String> = st
+            .keys()
+            .map(|k| k.to_php_str().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "command", "pid", "cached", "running", "signaled", "stopped", "exitcode",
+                "termsig", "stopsig"
+            ]
+        );
+        assert!(matches!(field(&st, "command"), Value::String(c) if c.as_bytes() == b"/bin/sleep"));
+        assert!(matches!(field(&st, "pid"), Value::Int(p) if p > 0));
+        assert!(matches!(field(&st, "cached"), Value::Bool(false)));
+        assert!(matches!(field(&st, "running"), Value::Bool(true)));
+        assert!(matches!(field(&st, "signaled"), Value::Bool(false)));
+        assert!(matches!(field(&st, "exitcode"), Value::Int(-1)));
+
+        let ok = t.call("proc_terminate", vec![proc.clone()]);
+        assert!(matches!(ok.unwrap(), Value::Bool(true)));
+        let st = wait_stopped_running(&mut t, &proc);
+        assert!(matches!(field(&st, "running"), Value::Bool(false)));
+        assert!(matches!(field(&st, "signaled"), Value::Bool(true)));
+        assert!(matches!(field(&st, "cached"), Value::Bool(false)));
+        assert!(matches!(field(&st, "exitcode"), Value::Int(-1)));
+        assert!(matches!(field(&st, "termsig"), Value::Int(15)));
+        assert!(matches!(field(&st, "stopsig"), Value::Int(0)));
+
+        // A signal is not cached: the reaped child is gone (ECHILD).
+        let st = status(&mut t, &proc);
+        assert!(matches!(field(&st, "running"), Value::Bool(false)));
+        assert!(matches!(field(&st, "signaled"), Value::Bool(false)));
+        assert_eq!(close(&mut t, &proc), -1);
+    }
+
+    // bug39322.phpt
+    #[test]
+    fn terminate_with_sigkill() {
+        let mut t = TestVm::new();
+        let ds = spec(vec![(0, pipe("r")), (1, pipe("w")), (2, pipe("w"))]);
+        let (r, _) = open(&mut t, s("/bin/sleep 3"), ds, vec![]);
+        let proc = r.unwrap();
+        let ok = t.call("proc_terminate", vec![proc.clone(), Value::Int(9)]);
+        assert!(matches!(ok.unwrap(), Value::Bool(true)));
+        let st = wait_stopped_running(&mut t, &proc);
+        assert!(
+            matches!(field(&st, "command"), Value::String(c) if c.as_bytes() == b"/bin/sleep 3")
+        );
+        assert!(matches!(field(&st, "signaled"), Value::Bool(true)));
+        assert!(matches!(field(&st, "termsig"), Value::Int(9)));
+    }
+
+    // gh10239_1.phpt, gh10239_2.phpt
+    #[test]
+    fn exit_status_is_cached() {
+        let mut t = TestVm::new();
+        let (r, _) = open(&mut t, s("false"), spec(vec![]), vec![]);
+        let proc = r.unwrap();
+        let st = wait_stopped_running(&mut t, &proc);
+        assert!(matches!(field(&st, "cached"), Value::Bool(true)));
+        assert!(matches!(field(&st, "exitcode"), Value::Int(1)));
+        let again = status(&mut t, &proc);
+        assert!(matches!(field(&again, "cached"), Value::Bool(true)));
+        assert!(matches!(field(&again, "running"), Value::Bool(false)));
+        assert!(matches!(field(&again, "exitcode"), Value::Int(1)));
+        assert_eq!(close(&mut t, &proc), 1);
+
+        let (r, _) = open(&mut t, s("exit 0"), spec(vec![]), vec![]);
+        let proc = r.unwrap();
+        wait_stopped_running(&mut t, &proc);
+        assert_eq!(close(&mut t, &proc), 0);
+    }
+
+    #[test]
+    fn process_argument_validation() {
+        let mut t = TestVm::new();
+        let (class, msg) = thrown(t.call("proc_close", vec![s("x")]));
+        assert_eq!(class, "TypeError");
+        assert_eq!(
+            msg,
+            "proc_close(): Argument #1 ($process) must be of type resource, string given"
+        );
+        let (_, msg) = thrown(t.call("proc_get_status", vec![Value::Null]));
+        assert_eq!(
+            msg,
+            "proc_get_status(): Argument #1 ($process) must be of type resource, null given"
+        );
+        let mem = streams::open_memory(&mut t.vm, b"");
+        let (_, msg) = thrown(t.call("proc_terminate", vec![Value::Resource(mem)]));
+        assert_eq!(
+            msg,
+            "proc_terminate(): supplied resource is not a valid process resource"
+        );
+    }
+
+    // bug69442.phpt
+    #[test]
+    fn pty_descriptors() {
+        let mut t = TestVm::new();
+        let cmd = "(echo \"foo\" ; exit 42;) 3>/dev/null; code=$?; echo $code >&3; exit $code";
+        let pty = || strs(&["pty"]);
+        let ds = spec(vec![(0, pty()), (1, pty()), (2, pty()), (3, pipe("w"))]);
+        let (r, pipes) = open(&mut t, s(cmd), ds, vec![]);
+        let proc = r.unwrap();
+        let master = pipe_at(&pipes, 0);
+        let mode = handle_of(&master).unwrap().borrow().st.mode.clone();
+        assert_eq!(mode.as_bytes(), b"r+");
+        let mut data = Vec::new();
+        while !data.ends_with(b"\n") {
+            match streams::read(&mut t.vm, &master, 1000).unwrap() {
+                Some(chunk) if !chunk.is_empty() => data.extend(chunk),
+                _ => break,
+            }
+        }
+        assert_eq!(String::from_utf8_lossy(&data), "foo\r\n");
+        assert_eq!(read_all(&mut t, &pipe_at(&pipes, 3)), "42\n");
+        assert_eq!(close(&mut t, &proc), 42);
+    }
+}
