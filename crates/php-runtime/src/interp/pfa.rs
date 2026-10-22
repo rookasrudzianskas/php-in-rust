@@ -1128,6 +1128,7 @@ fn create(vm: &mut Vm, cx: &Ctx, pe: &PartialExpr) -> PResult<Value> {
             magic_name: None,
             from_callable: false,
             pfa,
+            self_obj: Default::default(),
         },
     ))
 }

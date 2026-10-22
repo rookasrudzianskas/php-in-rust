@@ -44,6 +44,8 @@ pub struct Env {
     pub num_params: u32,
     /// Strict types of the code running in this scope.
     pub strict: bool,
+    /// The (non-fake) closure being executed (`Closure::getCurrent()`).
+    pub closure: Option<crate::object::WeakObjRef>,
 }
 
 impl fmt::Debug for Env {
@@ -67,6 +69,7 @@ impl Env {
             extra_args: RefCell::new(Vec::new()),
             num_params: 0,
             strict: false,
+            closure: None,
         }
     }
 

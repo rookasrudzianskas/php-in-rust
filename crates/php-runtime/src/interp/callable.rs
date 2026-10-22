@@ -546,6 +546,14 @@ pub fn is_callable_ex(vm: &mut Vm, v: &Value, suppress: bool) -> PResult<Result<
         }
         _ => return Ok(Err("no array or string given".into())),
     };
+    // `[$closure, "__invoke"]`: the trampoline carries the closure's arginfo.
+    if let (Some(f), Some(o)) = (&fcc.func, &fcc.object) {
+        if super::closure::is_closure_invoke(f) {
+            if let Some(c) = super::closure::closure_data(o) {
+                fcc.func = Some(super::closure::invoke_method_for(&c));
+            }
+        }
+    }
     Ok(r.map(|()| CallableInfo {
         name,
         target: Target {

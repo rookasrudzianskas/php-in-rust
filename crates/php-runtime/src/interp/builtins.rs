@@ -771,57 +771,69 @@ fn call_user_func(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
     call::call_value(vm, &f, args, named, true)
 }
 
-fn call_user_func_array(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
-    let f = a.get(0).clone();
-    let arr = a.array(1).clone();
+/// `zend_call_function` with `fci.named_params`: string keys are named
+/// arguments, integer keys after them are an error.
+fn split_named_params(vm: &mut Vm, arr: &PhpArray) -> PResult<(Vec<Value>, Vec<(PhpStr, Value)>)> {
     let mut pos = Vec::new();
     let mut named = Vec::new();
     for (k, v) in arr.iter() {
         match k {
             ArrayKey::Int(_) => {
                 if !named.is_empty() {
-                    return Err(vm.throw_error("Error", "Cannot use positional argument after named argument during unpacking"));
+                    return Err(vm.throw_error("Error", "Cannot use positional argument after named argument"));
                 }
                 pos.push(v.clone());
             }
             ArrayKey::Str(s) => named.push((s, v.clone())),
         }
     }
+    Ok((pos, named))
+}
+
+fn call_user_func_array(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
+    let f = a.get(0).clone();
+    let arr = a.array(1).clone();
+    let (pos, named) = split_named_params(vm, &arr)?;
     call::call_value(vm, &f, pos, named, true)
 }
 
 fn forward_static_call(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
     let f = a.get(0).clone();
     let args: Vec<Value> = a.rest(1).iter().map(Value::unref).collect();
-    forward_static(vm, f, args)
-}
-
-fn forward_static_call_array(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
-    let f = a.get(0).clone();
-    let args: Vec<Value> = a.array(1).values().map(Value::unref).collect();
-    forward_static(vm, f, args)
-}
-
-fn forward_static(vm: &mut Vm, f: Value, args: Vec<Value>) -> PResult<Value> {
+    let named = a.named_rest().to_vec();
     let env = caller_env(vm);
     if env.scope.is_none() {
         return Err(vm.throw_error("Error", "Cannot call forward_static_call() when no class scope is active"));
     }
+    forward_static(vm, f, args, named)
+}
+
+fn forward_static_call_array(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
+    let f = a.get(0).clone();
+    let arr = a.array(1).clone();
+    let (pos, named) = split_named_params(vm, &arr)?;
+    let pos = pos.into_iter().map(|v| v.unref()).collect();
+    forward_static(vm, f, pos, named)
+}
+
+fn forward_static(vm: &mut Vm, f: Value, args: Vec<Value>, named: Vec<(PhpStr, Value)>) -> PResult<Value> {
+    let env = caller_env(vm);
     let info = match call::check_callable(vm, &f, false) {
         Ok(i) => i,
         Err(msg) => return Err(vm.throw_type_error(format!("forward_static_call(): Argument #1 ($callback) must be a valid callback, {msg}"))),
     };
     let mut t = info.target;
     if t.this.is_none() {
-        if let (Some(called), Some(fs)) = (&env.called, &t.func.scope) {
+        let called = env.this.as_ref().map(|o| o.class().clone()).or_else(|| env.called.clone());
+        if let (Some(called), Some(fs)) = (called, &t.func.scope) {
             if let Some(fsc) = vm.find_class(fs) {
                 if called.instance_of(&fsc) {
-                    t.called = Some(called.clone());
+                    t.called = Some(called);
                 }
             }
         }
     }
-    call::call_target(vm, t, Bound { positional: args, named: Vec::new() }, &Caller::internal(), true)
+    call::call_target(vm, t, Bound { positional: args, named }, &Caller::internal(), true)
 }
 
 fn is_callable(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
