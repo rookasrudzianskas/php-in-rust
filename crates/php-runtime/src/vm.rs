@@ -391,7 +391,27 @@ pub struct Vm {
     pub interp: crate::interp::State,
     /// Engine → extension callbacks.
     pub hooks: Hooks,
+    /// Set while user code executes `include`/`require`(`_once`)/`eval`
+    /// (`opline->opcode == ZEND_INCLUDE_OR_EVAL`): `php_verror` then names
+    /// that construct as the error origin while `frames.len()` equals the
+    /// recorded depth (not inside user code the opener calls back into).
+    pub include_or_eval: Option<ActiveInclude>,
     output_hooks_ran: bool,
+}
+
+/// An `include`/`require` whose file is being opened (see
+/// [`Vm::include_or_eval`]).
+#[derive(Clone, Debug)]
+pub struct ActiveInclude {
+    /// `include`, `include_once`, `require` or `require_once`.
+    pub op: &'static str,
+    /// `frames.len()` of the code executing the construct.
+    pub depth: usize,
+    /// The operand (shown with `error_include_args`).
+    pub filename: PhpStr,
+    /// Location of the construct.
+    pub file: PhpStr,
+    pub line: u32,
 }
 
 /// `interface_gets_implemented`: called with (interface, class) when a class
@@ -506,6 +526,7 @@ impl Vm {
             ext_data: HashMap::new(),
             interp: crate::interp::State::default(),
             hooks: Hooks::default(),
+            include_or_eval: None,
             output_hooks_ran: false,
         };
         vm.register_module("Core", crate::builtins::register_core);
@@ -811,10 +832,36 @@ impl Vm {
         limit: usize,
     ) -> PhpArray {
         let mut out = PhpArray::new();
-        for f in self.frames.iter().rev().skip(skip_last) {
+        // zend_fetch_debug_backtrace emits an `include` pseudo-frame for user
+        // code whose current opline is ZEND_INCLUDE_OR_EVAL.
+        let include = self
+            .include_or_eval
+            .as_ref()
+            .filter(|inc| inc.depth < self.frames.len());
+        let total = self.frames.len();
+        let mut entries: Vec<Option<&Frame>> = Vec::with_capacity(total + 1);
+        for idx in (0..total).rev() {
+            if include.is_some_and(|inc| inc.depth == idx + 1) {
+                entries.push(None);
+            }
+            entries.push(Some(&self.frames[idx]));
+        }
+        if include.is_some_and(|inc| inc.depth == 0) {
+            entries.push(None);
+        }
+        for entry in entries.into_iter().skip(skip_last) {
             if limit > 0 && out.len() >= limit {
                 break;
             }
+            let Some(f) = entry else {
+                let inc = include.expect("pseudo-frame without include");
+                let mut e = PhpArray::new();
+                e.insert_str("file", inc.file.clone());
+                e.insert_str("line", inc.line as i64);
+                e.insert_str("function", inc.op);
+                let _ = out.append(e);
+                continue;
+            };
             let mut e = PhpArray::new();
             if let Some((file, line)) = &f.call_site {
                 e.insert_str("file", file.clone());

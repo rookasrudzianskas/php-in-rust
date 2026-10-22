@@ -506,7 +506,22 @@ pub fn call_user(
     let env = Rc::new(env);
 
     // Push the frame.
-    let call_site = if vm.in_native_frame() { None } else { caller.site.clone() };
+    // Calls the engine makes on behalf of the running user code (error
+    // handlers, magic methods, destructors) report that code's location, as
+    // zend_fetch_debug_backtrace takes it from the previous user frame.
+    let call_site = if vm.in_native_frame() {
+        None
+    } else {
+        caller.site.clone().or_else(|| {
+            if vm.frames.is_empty()
+                && (vm.interp.in_shutdown || vm.interp.detached || !vm.executing)
+            {
+                None
+            } else {
+                Some((vm.current_file.clone(), vm.current_line))
+            }
+        })
+    };
     let call_type = match (&this, &scope) {
         (Some(_), _) => Some("->"),
         (None, Some(_)) => Some("::"),
