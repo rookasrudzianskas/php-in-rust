@@ -2,7 +2,14 @@
 
 use super::*;
 
-fn encode(t: &mut TestVm, st: &[u8], charset: &str, te: &str, lf: Option<&[u8]>, indent: Option<i64>) -> Value {
+fn encode(
+    t: &mut TestVm,
+    st: &[u8],
+    charset: &str,
+    te: &str,
+    lf: Option<&[u8]>,
+    indent: Option<i64>,
+) -> Value {
     let mut args = vec![b(st), s(charset), s(te)];
     if let Some(lf) = lf {
         args.push(b(lf));
@@ -32,7 +39,8 @@ fn base64(s: &str) -> Vec<u8> {
     out
 }
 
-const GREEK: &str = "zpHPhc+Ez4wgzrXOr869zrHOuSDOtc67zrvOt869zrnOus+MIM66zrXOr868zrXOvc6/LiAwMTIzNDU2Nzg5Lg==";
+const GREEK: &str =
+    "zpHPhc+Ez4wgzrXOr869zrHOuSDOtc67zrvOt869zrnOus+MIM66zrXOr868zrXOvc6/LiAwMTIzNDU2Nzg5Lg==";
 
 #[test]
 fn encode_basic() {
@@ -40,11 +48,17 @@ fn encode_basic() {
     let mut t = TestVm::new();
     let english = b"This is an English string. 0123456789";
     for te in ["B", "Q"] {
-        assert_eq!(bytes(&encode(&mut t, english, "UTF-8", te, None, None)), english);
+        assert_eq!(
+            bytes(&encode(&mut t, english, "UTF-8", te, None, None)),
+            english
+        );
     }
     call(&mut t, "mb_internal_encoding", vec![s("utf-8")]);
     let jp = base64("5pel5pys6Kqe44OG44Kt44K544OI44Gn44GZ44CC");
-    assert_eq!(text(&encode(&mut t, &jp, "UTF-8", "B", None, None)), "=?UTF-8?B?5pel5pys6Kqe44OG44Kt44K544OI44Gn44GZ44CC?=");
+    assert_eq!(
+        text(&encode(&mut t, &jp, "UTF-8", "B", None, None)),
+        "=?UTF-8?B?5pel5pys6Kqe44OG44Kt44K544OI44Gn44GZ44CC?="
+    );
     assert_eq!(
         text(&encode(&mut t, &jp, "UTF-8", "Q", None, None)),
         "=?UTF-8?Q?=E6=97=A5=E6=9C=AC=E8=AA=9E=E3=83=86=E3=82=AD=E3=82=B9=E3=83=88?=\r\n =?UTF-8?Q?=E3=81=A7=E3=81=99=E3=80=82?="
@@ -65,9 +79,18 @@ fn encode_japanese() {
     // mb_encode_mimeheader_basic2.phpt / basic3.phpt
     let mut t = TestVm::new();
     let inputs = [
-        ("SJIS", base64("k/qWe4zqg2WDTINYg2eCxYK3gUIwMTIzNIJUglWCVoJXgliBQg==")),
-        ("JIS", base64("GyRCRnxLXDhsJUYlLSU5JUgkRyQ5ISMbKEIwMTIzNBskQiM1IzYjNyM4IzkhIxsoQg==")),
-        ("EUC_JP", base64("xvzL3LjspcalraW5pcikx6S5oaMwMTIzNKO1o7ajt6O4o7mhow==")),
+        (
+            "SJIS",
+            base64("k/qWe4zqg2WDTINYg2eCxYK3gUIwMTIzNIJUglWCVoJXgliBQg=="),
+        ),
+        (
+            "JIS",
+            base64("GyRCRnxLXDhsJUYlLSU5JUgkRyQ5ISMbKEIwMTIzNBskQiM1IzYjNyM4IzkhIxsoQg=="),
+        ),
+        (
+            "EUC_JP",
+            base64("xvzL3LjspcalraW5pcikx6S5oaMwMTIzNKO1o7ajt6O4o7mhow=="),
+        ),
     ];
     for (lang, input) in &inputs {
         call(&mut t, "mb_internal_encoding", vec![s(lang)]);
@@ -98,8 +121,16 @@ fn encode_japanese() {
     ];
     for ((lang, input), (eb, eq)) in inputs.iter().zip(expected) {
         call(&mut t, "mb_internal_encoding", vec![s(lang)]);
-        assert_eq!(text(&encode(&mut t, input, lang, "B", None, None)), eb, "{lang}");
-        assert_eq!(text(&encode(&mut t, input, lang, "Q", None, None)), eq, "{lang}");
+        assert_eq!(
+            text(&encode(&mut t, input, lang, "B", None, None)),
+            eb,
+            "{lang}"
+        );
+        assert_eq!(
+            text(&encode(&mut t, input, lang, "Q", None, None)),
+            eq,
+            "{lang}"
+        );
     }
 }
 
@@ -109,7 +140,15 @@ fn encode_edge_cases() {
     let mut t = TestVm::new();
     t.vm.ini_set_system("error_reporting", "24575");
     let mut out = String::new();
-    fn d(t: &mut TestVm, out: &mut String, st: &[u8], cs: &str, te: &str, lf: Option<&[u8]>, indent: Option<i64>) {
+    fn d(
+        t: &mut TestVm,
+        out: &mut String,
+        st: &[u8],
+        cs: &str,
+        te: &str,
+        lf: Option<&[u8]>,
+        indent: Option<i64>,
+    ) {
         let v = encode(t, st, cs, te, lf, indent);
         out.push_str(&dump(t, v));
     }
@@ -130,38 +169,163 @@ fn encode_edge_cases() {
     d(&mut t, &mut out, b"S ", "ASCII", "Q", Some(b""), Some(73));
     d(&mut t, &mut out, b"S4", "ASCII", "B", Some(b"\n"), Some(73));
     d(&mut t, &mut out, b"S4", "ASCII", "Q", Some(b"\n"), Some(73));
-    d(&mut t, &mut out, b"24\x0a", "UCS-4", "Q", Some(b""), Some(29));
+    d(
+        &mut t,
+        &mut out,
+        b"24\x0a",
+        "UCS-4",
+        "Q",
+        Some(b""),
+        Some(29),
+    );
     d(&mut t, &mut out, b"o\x20\x00", "ASCII", "B", None, None);
-    d(&mut t, &mut out, b"\x00\x11\x01\x00\x00\x00\x00\x00\x00\x00", "UCS-4", "B", None, None);
+    d(
+        &mut t,
+        &mut out,
+        b"\x00\x11\x01\x00\x00\x00\x00\x00\x00\x00",
+        "UCS-4",
+        "B",
+        None,
+        None,
+    );
     d(&mut t, &mut out, b"\x01\x00\xcb\xcb\xcb\xcb\xcb\xcb=\xcb\xcb\xcb=?\x01\x00a\x00\x00\xcb\xcb\xcb=?\xcb\xcb\xcb\xcb\xcb\xcb\xcb\xcb\xcb?4?4\xcb\xcb\xcb\xcb\xcb=?\x01\x00\x00\x00\x01\x00\x00\x06\xcb\xcb\xcb\xcb\xcb\xcb\xcb\xcb\xcb=?\xcb\xcb\xcb\xcb\xcb\xcb\xcb\xcb\xcb?4\xcb\xcb\xcb\xcb\xcb?4", "UCS-2", "B", Some(b""), None);
-    d(&mut t, &mut out, b"?", "ASCII", "Q", Some(b"=aaaaaa=?"), Some(52));
+    d(
+        &mut t,
+        &mut out,
+        b"?",
+        "ASCII",
+        "Q",
+        Some(b"=aaaaaa=?"),
+        Some(52),
+    );
     out.push_str("string(9) \"=aaaaaa=?\"\n");
-    d(&mut t, &mut out, b",\x20o\x00\x01\x00\x00(", "JIS", "Q", Some(b""), Some(40));
-    d(&mut t, &mut out, b"\xff", "ASCII", "Q", Some(b"\x00"), Some(54));
-    d(&mut t, &mut out, b"\xff~H~\xe0\xea\x00\x00\xff\xff\xff\xff\xff>\x00\x00\x00\x00", "HZ", "Q", Some(b""), Some(71));
-    d(&mut t, &mut out, b"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyBIG5", "BIG-5", "B", None, None);
+    d(
+        &mut t,
+        &mut out,
+        b",\x20o\x00\x01\x00\x00(",
+        "JIS",
+        "Q",
+        Some(b""),
+        Some(40),
+    );
+    d(
+        &mut t,
+        &mut out,
+        b"\xff",
+        "ASCII",
+        "Q",
+        Some(b"\x00"),
+        Some(54),
+    );
+    d(
+        &mut t,
+        &mut out,
+        b"\xff~H~\xe0\xea\x00\x00\xff\xff\xff\xff\xff>\x00\x00\x00\x00",
+        "HZ",
+        "Q",
+        Some(b""),
+        Some(71),
+    );
+    d(
+        &mut t,
+        &mut out,
+        b"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyBIG5",
+        "BIG-5",
+        "B",
+        None,
+        None,
+    );
     d(&mut t, &mut out, b"\x20\x20\x20\x202\x20\x20\x20sssssssssssssssssssssssssss\x20\x20\x20\x20W\x20\x20\x20\x20\x20\x20W\x20\x20\x20\x20\xb9S\x01\x00\xf0`\x00\x00\x20\x20\x20\x20mSCII\xee\x20\x20\x20\x20mSCII\xeeI\xee", "ArmSCII-8", "B", Some(b""), None);
     let spaces80 = format!("{}\x00", " ".repeat(80));
-    d(&mut t, &mut out, spaces80.as_bytes(), "CP936", "Q", Some(b""), None);
+    d(
+        &mut t,
+        &mut out,
+        spaces80.as_bytes(),
+        "CP936",
+        "Q",
+        Some(b""),
+        None,
+    );
     let ones = format!("  {}", "1".repeat(73));
-    d(&mut t, &mut out, ones.as_bytes(), "ASCII", "Q", Some(b""), None);
-    d(&mut t, &mut out, b"\xe7\xad\xb5", "HZ", "Q", Some(b""), Some(44));
+    d(
+        &mut t,
+        &mut out,
+        ones.as_bytes(),
+        "ASCII",
+        "Q",
+        Some(b""),
+        None,
+    );
+    d(
+        &mut t,
+        &mut out,
+        b"\xe7\xad\xb5",
+        "HZ",
+        "Q",
+        Some(b""),
+        Some(44),
+    );
     let gb1 = format!("2{}!3", " ".repeat(74));
-    d(&mut t, &mut out, gb1.as_bytes(), "GB18030", "Q", Some(b""), None);
+    d(
+        &mut t,
+        &mut out,
+        gb1.as_bytes(),
+        "GB18030",
+        "Q",
+        Some(b""),
+        None,
+    );
     let gb2 = format!("{}!3 ", " ".repeat(72));
-    d(&mut t, &mut out, gb2.as_bytes(), "GB18030", "Q", Some(b""), None);
+    d(
+        &mut t,
+        &mut out,
+        gb2.as_bytes(),
+        "GB18030",
+        "Q",
+        Some(b""),
+        None,
+    );
     let gb3 = format!("2{}!3", " ".repeat(89));
-    d(&mut t, &mut out, gb3.as_bytes(), "GB18030", "Q", Some(b""), None);
-    d(&mut t, &mut out, b",9868949,9868978,9869015,9689100,9869121,9869615,9870690,9867116,98558119861183. ", "utf-8", "B", None, None);
+    d(
+        &mut t,
+        &mut out,
+        gb3.as_bytes(),
+        "GB18030",
+        "Q",
+        Some(b""),
+        None,
+    );
+    d(
+        &mut t,
+        &mut out,
+        b",9868949,9868978,9869015,9689100,9869121,9869615,9870690,9867116,98558119861183. ",
+        "utf-8",
+        "B",
+        None,
+        None,
+    );
     let xx = format!("xx {} ", "A".repeat(81));
     d(&mut t, &mut out, xx.as_bytes(), "utf-8", "B", None, None);
     call(&mut t, "mb_internal_encoding", vec![s("MacJapanese")]);
     d(&mut t, &mut out, b"ne\xf6\xff\xff\xffs\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff1\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff1", "CP50220", "B", Some(b"A"), Some(44));
     call(&mut t, "mb_internal_encoding", vec![s("Quoted-Printable")]);
-    let e = err(&mut t, "mb_encode_mimeheader", vec![s("x"), s("Quoted-Printable"), s("B"), s(""), Value::Int(184)]);
+    let e = err(
+        &mut t,
+        "mb_encode_mimeheader",
+        vec![
+            s("x"),
+            s("Quoted-Printable"),
+            s("B"),
+            s(""),
+            Value::Int(184),
+        ],
+    );
     out.push_str(&e);
     out.push_str("\nDone");
-    assert_eq!(normalize(&out), normalize(&phpt_section("mb_encode_mimeheader_basic4", "EXPECT")));
+    assert_eq!(
+        normalize(&out),
+        normalize(&phpt_section("mb_encode_mimeheader_basic4", "EXPECT"))
+    );
 }
 
 #[test]
@@ -179,17 +343,27 @@ fn encode_indent_and_linefeeds() {
         }
     }
     out.push_str("Done");
-    assert_eq!(normalize(&out), normalize(&phpt_section("mb_encode_mimeheader_indent", "EXPECT")));
+    assert_eq!(
+        normalize(&out),
+        normalize(&phpt_section("mb_encode_mimeheader_indent", "EXPECT"))
+    );
     // mb_encode_mimeheader_variation6.phpt
     let r = encode(&mut t, &greek, "utf-8", "B", Some(b"---"), None);
     assert_eq!(
         text(&r),
         "=?UTF-8?B?zpHPhc+Ez4wgzrXOr869zrHOuSDOtc67zrvOt869zrnOus+MIM66zrXOr868?=--- =?UTF-8?B?zrXOvc6/LiAwMTIzNDU2Nzg5Lg==?="
     );
-    assert_eq!(bytes(&encode(&mut t, &greek, "utf-8", "B", Some(b"\n"), None)).len(), 114);
+    assert_eq!(
+        bytes(&encode(&mut t, &greek, "utf-8", "B", Some(b"\n"), None)).len(),
+        114
+    );
     // mb_encode_mimeheader_crash.phpt
     assert_eq!(
-        err(&mut t, "mb_encode_mimeheader", vec![s("abc"), s("UTF7-IMAP"), s("Q")]),
+        err(
+            &mut t,
+            "mb_encode_mimeheader",
+            vec![s("abc"), s("UTF7-IMAP"), s("Q")]
+        ),
         "ValueError: mb_encode_mimeheader(): Argument #2 ($charset) \"UTF7-IMAP\" cannot be used for MIME header encoding"
     );
 }
@@ -201,7 +375,13 @@ fn decode() {
     // mb_decode_mimeheader_basic.phpt
     let expect = "e697a5e69cace8aa9ee38386e382ade382b9e38388e381a7e38199e38082";
     let dec = |t: &mut TestVm, st: &[u8]| hex(&call(t, "mb_decode_mimeheader", vec![b(st)]));
-    assert_eq!(dec(&mut t, b"=?UTF-8?b?5pel5pys6Kqe44OG44Kt44K544OI44Gn44GZ44CC?="), expect);
+    assert_eq!(
+        dec(
+            &mut t,
+            b"=?UTF-8?b?5pel5pys6Kqe44OG44Kt44K544OI44Gn44GZ44CC?="
+        ),
+        expect
+    );
     assert_eq!(
         dec(&mut t, b"=?UTF-8?Q?=E6=97=A5=E6=9C=AC=E8=AA=9E=E3=83=86=E3=82=AD=E3=82=B9=E3=83=88?=\n=?UTF-8?Q?=E3=81=A7=E3=81=99=E3=80=82?="),
         expect
@@ -226,12 +406,18 @@ fn decode() {
         ("=?UTF-8?Q?__=E6=B1=89=E5=AD=97__?=", "  汉字  "),
         ("=?UTF-8?Q?=5F?=", "_"),
     ] {
-        assert_eq!(text(&call(&mut t, "mb_decode_mimeheader", vec![s(input)])), out);
+        assert_eq!(
+            text(&call(&mut t, "mb_decode_mimeheader", vec![s(input)])),
+            out
+        );
     }
     // mb_decode_mimeheader_variation3.phpt
     call(&mut t, "mb_internal_encoding", vec![s("iso-8859-7")]);
     assert_eq!(
-        dec(&mut t, b"=?UTF-8?B?zrHOss6zzrTOtc62zrfOuM65zrrOu868zr3Ovs6/z4DPgc+Dz4TPhc+Gz4fPiM+J?="),
+        dec(
+            &mut t,
+            b"=?UTF-8?B?zrHOss6zzrTOtc62zrfOuM65zrrOu868zr3Ovs6/z4DPgc+Dz4TPhc+Gz4fPiM+J?="
+        ),
         "e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f3f4f5f6f7f8f9"
     );
 }
@@ -267,6 +453,11 @@ fn decode_edge_cases() {
     for (enc, input, expected) in cases {
         call(&mut t, "mb_internal_encoding", vec![s(enc)]);
         let r = call(&mut t, "mb_decode_mimeheader", vec![b(input)]);
-        assert_eq!(hex(&r), expected, "{enc} {}", String::from_utf8_lossy(input));
+        assert_eq!(
+            hex(&r),
+            expected,
+            "{enc} {}",
+            String::from_utf8_lossy(input)
+        );
     }
 }

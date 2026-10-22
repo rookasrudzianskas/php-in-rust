@@ -5,7 +5,9 @@
 use std::collections::HashMap;
 
 use crate::mbstring::mbfl::convert::mb_fast_convert;
-use crate::mbstring::mbfl::encoding::{Encoding, ILLEGAL_MODE_CHAR, NoEncoding, enc, name2encoding};
+use crate::mbstring::mbfl::encoding::{
+    Encoding, ILLEGAL_MODE_CHAR, NoEncoding, enc, name2encoding,
+};
 use crate::mbstring::strings::check_encoding;
 
 /// Path of a file in php-src's `ext/mbstring/tests/data`.
@@ -18,7 +20,10 @@ pub fn data_path(name: &str) -> String {
 
 /// `readConversionTable`: character bytes to big-endian Unicode (2 bytes,
 /// or 4 with `utf32`). Codepoints 0xFFFD are skipped.
-pub fn read_conversion_table(name: &str, utf32: bool) -> (Vec<(Vec<u8>, Vec<u8>)>, HashMap<Vec<u8>, Vec<u8>>) {
+pub fn read_conversion_table(
+    name: &str,
+    utf32: bool,
+) -> (Vec<(Vec<u8>, Vec<u8>)>, HashMap<Vec<u8>, Vec<u8>>) {
     let text = std::fs::read(data_path(name)).expect("data file");
     let mut list = Vec::new();
     let mut to: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
@@ -34,8 +39,14 @@ pub fn read_conversion_table(name: &str, utf32: bool) -> (Vec<(Vec<u8>, Vec<u8>)
         let (Some(c), Some(u)) = (c.strip_prefix("0x"), u.trim().strip_prefix("0x")) else {
             continue;
         };
-        let u = u.split(|ch: char| !ch.is_ascii_hexdigit()).next().unwrap_or("");
-        let (Ok(ch), Ok(cp)) = (u64::from_str_radix(c.trim(), 16), u32::from_str_radix(u, 16)) else {
+        let u = u
+            .split(|ch: char| !ch.is_ascii_hexdigit())
+            .next()
+            .unwrap_or("");
+        let (Ok(ch), Ok(cp)) = (
+            u64::from_str_radix(c.trim(), 16),
+            u32::from_str_radix(u, 16),
+        ) else {
             continue;
         };
         if cp == 0xFFFD {
@@ -63,7 +74,12 @@ pub fn read_conversion_table(name: &str, utf32: bool) -> (Vec<(Vec<u8>, Vec<u8>)
 
 /// `mb_convert_encoding` with substitute character `subst` (mode CHAR);
 /// returns the output and the error count.
-pub fn convert(s: &[u8], from: &'static Encoding, to: &'static Encoding, subst: u32) -> (Vec<u8>, u32) {
+pub fn convert(
+    s: &[u8],
+    from: &'static Encoding,
+    to: &'static Encoding,
+    subst: u32,
+) -> (Vec<u8>, u32) {
     mb_fast_convert(s, from, to, subst, ILLEGAL_MODE_CHAR)
 }
 
@@ -86,7 +102,10 @@ pub fn test_sbcs_from_utf16_table(file: &str, name: &str, replacement: &[u8]) {
         all_from.extend_from_slice(c);
         all_to.extend_from_slice(u);
     }
-    assert!(check_encoding(&all_from, e), "{name}: valid string rejected");
+    assert!(
+        check_encoding(&all_from, e),
+        "{name}: valid string rejected"
+    );
     let (out, errors) = convert(&all_from, e, utf16, 0x25);
     assert_eq!(out, all_to, "{name} -> UTF-16BE");
     assert_eq!(errors, 0);

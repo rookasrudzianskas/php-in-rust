@@ -29,7 +29,11 @@ fn casemapping() {
     ];
     for (input, expected) in table {
         for (mode, e) in modes.iter().zip(expected) {
-            assert_eq!(case(&mut t, input.as_bytes(), *mode, None), e.as_bytes(), "{input} mode {mode}");
+            assert_eq!(
+                case(&mut t, input.as_bytes(), *mode, None),
+                e.as_bytes(),
+                "{input} mode {mode}"
+            );
         }
     }
     // Turkish dotted/dotless i in ISO-8859-9
@@ -50,10 +54,22 @@ fn casemapping() {
     assert_eq!(h(&mut t, b"\x69", 3), b"\x69");
     assert_eq!(h(&mut t, b"\x69", 7), b"\x69");
     let greek = "ΚΑΛΗΣΠΕΡΑ ΣΑΣ".as_bytes();
-    assert_eq!(case(&mut t, greek, 2, Some("UTF-8")), "Καλησπερα Σας".as_bytes());
-    assert_eq!(case(&mut t, greek, 6, Some("UTF-8")), "Καλησπερα Σασ".as_bytes());
-    assert_eq!(case(&mut t, greek, 1, Some("UTF-8")), "καλησπερα σας".as_bytes());
-    assert_eq!(case(&mut t, greek, 5, Some("UTF-8")), "καλησπερα σασ".as_bytes());
+    assert_eq!(
+        case(&mut t, greek, 2, Some("UTF-8")),
+        "Καλησπερα Σας".as_bytes()
+    );
+    assert_eq!(
+        case(&mut t, greek, 6, Some("UTF-8")),
+        "Καλησπερα Σασ".as_bytes()
+    );
+    assert_eq!(
+        case(&mut t, greek, 1, Some("UTF-8")),
+        "καλησπερα σας".as_bytes()
+    );
+    assert_eq!(
+        case(&mut t, greek, 5, Some("UTF-8")),
+        "καλησπερα σασ".as_bytes()
+    );
 }
 
 #[test]
@@ -62,10 +78,17 @@ fn casefold_latin1() {
     let mut t = TestVm::new();
     call(&mut t, "mb_internal_encoding", vec![s("ISO-8859-1")]);
     assert_eq!(
-        bytes(&call(&mut t, "mb_strtolower", vec![s("ABCDEFGHIJKLMNOPQRSTUVWXYZ\n")])),
+        bytes(&call(
+            &mut t,
+            "mb_strtolower",
+            vec![s("ABCDEFGHIJKLMNOPQRSTUVWXYZ\n")]
+        )),
         b"abcdefghijklmnopqrstuvwxyz\n"
     );
-    assert_eq!(bytes(&call(&mut t, "mb_strtoupper", vec![b(b"\xe4\xf6\xfc\n")])), b"\xc4\xd6\xdc\n");
+    assert_eq!(
+        bytes(&call(&mut t, "mb_strtoupper", vec![b(b"\xe4\xf6\xfc\n")])),
+        b"\xc4\xd6\xdc\n"
+    );
     assert_eq!(case(&mut t, b"\xe4\xf6\xfc\n", 2, None), b"\xc4\xf6\xfc\n");
 }
 
@@ -112,40 +135,112 @@ fn various_modes_and_sigma() {
         (format!("abcΣ{dots256} abc"), format!("Abcς{dots256} Abc")),
     ];
     for (input, e) in sigma {
-        assert_eq!(text(&Value::bytes(&case(&mut t, input.as_bytes(), 2, Some("UTF-8")))), e, "{input}");
+        assert_eq!(
+            text(&Value::bytes(&case(
+                &mut t,
+                input.as_bytes(),
+                2,
+                Some("UTF-8")
+            ))),
+            e,
+            "{input}"
+        );
     }
-    assert_eq!(hex(&Value::bytes(&case(&mut t, b"\x01I\x01,", 2, Some("UCS-2BE")))), "02bc004e012d");
-    assert_eq!(hex(&Value::bytes(&case(&mut t, b"\x01I\x01,", 6, Some("UCS-2BE")))), "0149012d");
+    assert_eq!(
+        hex(&Value::bytes(&case(
+            &mut t,
+            b"\x01I\x01,",
+            2,
+            Some("UCS-2BE")
+        ))),
+        "02bc004e012d"
+    );
+    assert_eq!(
+        hex(&Value::bytes(&case(
+            &mut t,
+            b"\x01I\x01,",
+            6,
+            Some("UCS-2BE")
+        ))),
+        "0149012d"
+    );
 }
 
 #[test]
 fn upper_lower_invalid_input() {
     let mut t = utf8_vm();
     // Invalid bytes become the substitute character.
-    assert_eq!(bytes(&call(&mut t, "mb_strtoupper", vec![b(b"a\xffb")])), b"A?B");
+    assert_eq!(
+        bytes(&call(&mut t, "mb_strtoupper", vec![b(b"a\xffb")])),
+        b"A?B"
+    );
     call(&mut t, "mb_substitute_character", vec![s("none")]);
-    assert_eq!(bytes(&call(&mut t, "mb_strtolower", vec![b(b"A\xffB")])), b"ab");
+    assert_eq!(
+        bytes(&call(&mut t, "mb_strtolower", vec![b(b"A\xffB")])),
+        b"ab"
+    );
     // Full mappings expand.
-    assert_eq!(text(&call(&mut t, "mb_strtoupper", vec![s("ŉ ǰ ﬁ")])), "ʼN J̌ FI");
+    assert_eq!(
+        text(&call(&mut t, "mb_strtoupper", vec![s("ŉ ǰ ﬁ")])),
+        "ʼN J̌ FI"
+    );
 }
 
 #[test]
 fn strwidth() {
     let mut t = utf8_vm();
     // mb_strwidth.phpt (UTF-8/UTF-16/KOI8-R parts)
-    assert_eq!(int(&call(&mut t, "mb_strwidth", vec![s("∮ E⋅da = Q"), s("UTF-8")])), 10);
-    let utf16le = unhex("1a043804400438043b043b04380446043004200069007300200043007900720069006c006c0069006300");
-    assert_eq!(int(&call(&mut t, "mb_strwidth", vec![b(&utf16le), s("UTF-16LE")])), 21);
-    let utf16be = unhex("041a043804400438043b043b04380446043000200069007300200043007900720069006c006c00690063");
-    assert_eq!(int(&call(&mut t, "mb_strwidth", vec![b(&utf16be), s("UTF-16BE")])), 21);
+    assert_eq!(
+        int(&call(
+            &mut t,
+            "mb_strwidth",
+            vec![s("∮ E⋅da = Q"), s("UTF-8")]
+        )),
+        10
+    );
+    let utf16le = unhex(
+        "1a043804400438043b043b04380446043004200069007300200043007900720069006c006c0069006300",
+    );
+    assert_eq!(
+        int(&call(
+            &mut t,
+            "mb_strwidth",
+            vec![b(&utf16le), s("UTF-16LE")]
+        )),
+        21
+    );
+    let utf16be = unhex(
+        "041a043804400438043b043b04380446043000200069007300200043007900720069006c006c00690063",
+    );
+    assert_eq!(
+        int(&call(
+            &mut t,
+            "mb_strwidth",
+            vec![b(&utf16be), s("UTF-16BE")]
+        )),
+        21
+    );
     let koi8r = unhex("ebc9d2c9ccccc9c3c120697320437972696c6c6963");
-    assert_eq!(int(&call(&mut t, "mb_strwidth", vec![b(&koi8r), s("KOI8-R")])), 21);
+    assert_eq!(
+        int(&call(&mut t, "mb_strwidth", vec![b(&koi8r), s("KOI8-R")])),
+        21
+    );
     assert_eq!(int(&call(&mut t, "mb_strwidth", vec![s("日本語abc")])), 9);
 }
 
 /// `testStrimwidthWithMarker`: the characters of the result in hex.
 fn strim(t: &mut TestVm, st: &[u8], marker: &[u8], start: i64, width: i64, enc: &str) -> String {
-    let r = call(t, "mb_strimwidth", vec![b(st), Value::Int(start), Value::Int(width), b(marker), s(enc)]);
+    let r = call(
+        t,
+        "mb_strimwidth",
+        vec![
+            b(st),
+            Value::Int(start),
+            Value::Int(width),
+            b(marker),
+            s(enc),
+        ],
+    );
     let chars = call(t, "mb_str_split", vec![r.clone(), Value::Int(1), s(enc)]);
     let len = int(&call(t, "mb_strlen", vec![r.clone(), s(enc)]));
     let w = int(&call(t, "mb_strwidth", vec![r, s(enc)]));
@@ -159,8 +254,14 @@ fn strimwidth() {
     let u = unhex("310032003300610062006300226f575b4b306a30");
     let dots = b".\x00.\x00.\x00";
     let all = "3100 3200 3300 6100 6200 6300 226f 575b 4b30 6a30";
-    assert_eq!(strim(&mut t, &u, dots, 0, 100, "UTF-16LE"), format!("[{all}] length=10 width=14"));
-    assert_eq!(strim(&mut t, &u, dots, 0, 14, "UTF-16LE"), format!("[{all}] length=10 width=14"));
+    assert_eq!(
+        strim(&mut t, &u, dots, 0, 100, "UTF-16LE"),
+        format!("[{all}] length=10 width=14")
+    );
+    assert_eq!(
+        strim(&mut t, &u, dots, 0, 14, "UTF-16LE"),
+        format!("[{all}] length=10 width=14")
+    );
     assert_eq!(
         strim(&mut t, &u, dots, 0, 13, "UTF-16LE"),
         "[3100 3200 3300 6100 6200 6300 226f 575b 2e00 2e00 2e00] length=11 width=13"
@@ -169,10 +270,22 @@ fn strimwidth() {
         strim(&mut t, &u, dots, 0, 12, "UTF-16LE"),
         "[3100 3200 3300 6100 6200 6300 226f 2e00 2e00 2e00] length=10 width=11"
     );
-    assert_eq!(strim(&mut t, &u, dots, 0, 0, "UTF-16LE"), "[2e00 2e00 2e00] length=3 width=3");
-    assert_eq!(strim(&mut t, &u, dots, 0, 1, "UTF-16LE"), "[2e00 2e00 2e00] length=3 width=3");
-    assert_eq!(strim(&mut t, &u, dots, -3, 5, "UTF-16LE"), "[575b 2e00 2e00 2e00] length=4 width=5");
-    assert_eq!(strim(&mut t, &u, dots, -4, -2, "UTF-16LE"), "[226f 2e00 2e00 2e00] length=4 width=5");
+    assert_eq!(
+        strim(&mut t, &u, dots, 0, 0, "UTF-16LE"),
+        "[2e00 2e00 2e00] length=3 width=3"
+    );
+    assert_eq!(
+        strim(&mut t, &u, dots, 0, 1, "UTF-16LE"),
+        "[2e00 2e00 2e00] length=3 width=3"
+    );
+    assert_eq!(
+        strim(&mut t, &u, dots, -3, 5, "UTF-16LE"),
+        "[575b 2e00 2e00 2e00] length=4 width=5"
+    );
+    assert_eq!(
+        strim(&mut t, &u, dots, -4, -2, "UTF-16LE"),
+        "[226f 2e00 2e00 2e00] length=4 width=5"
+    );
     assert!(t.output().contains(
         "Deprecated: mb_strimwidth(): passing a negative integer to argument #3 ($width) is deprecated"
     ));
@@ -180,13 +293,23 @@ fn strimwidth() {
     // "Other": every start/width combination on an ASCII string.
     let st = b"abcdefghijklmnop";
     let sub = |t: &mut TestVm, v: Value, from: i64, len: i64| {
-        bytes(&call(t, "mb_substr", vec![v, Value::Int(from), Value::Int(len), s("ASCII")]))
+        bytes(&call(
+            t,
+            "mb_substr",
+            vec![v, Value::Int(from), Value::Int(len), s("ASCII")],
+        ))
     };
     for from in -5i64..=5 {
         for width in -5i64..=5 {
             let r = t.call(
                 "mb_strimwidth",
-                vec![b(st), Value::Int(from), Value::Int(width), s("..."), s("ASCII")],
+                vec![
+                    b(st),
+                    Value::Int(from),
+                    Value::Int(width),
+                    s("..."),
+                    s("ASCII"),
+                ],
             );
             if from < 0 && width < 0 && width < from {
                 assert!(r.is_err(), "from={from} width={width}");
@@ -201,7 +324,10 @@ fn strimwidth() {
                 assert_eq!(sub(&mut t, r.clone(), 0, 1), sub(&mut t, b(st), from, 1));
             }
             if width >= 3 && (from >= 0 || width <= from.abs()) {
-                assert_eq!(int(&call(&mut t, "mb_strwidth", vec![r.clone(), s("ASCII")])), width);
+                assert_eq!(
+                    int(&call(&mut t, "mb_strwidth", vec![r.clone(), s("ASCII")])),
+                    width
+                );
             }
             if width < 0 {
                 assert_eq!(sub(&mut t, r.clone(), -3, 3), b"...");
@@ -212,7 +338,10 @@ fn strimwidth() {
     let a268 = "a".repeat(268);
     let r = strim(&mut t, a268.as_bytes(), b"", 12, 255, "ASCII");
     assert!(r.ends_with("length=255 width=255"));
-    assert_eq!(strim(&mut t, b"\x80\x80\x80", b"...", 0, 10, "UTF-8"), "[3f 3f 3f] length=3 width=3");
+    assert_eq!(
+        strim(&mut t, b"\x80\x80\x80", b"...", 0, 10, "UTF-8"),
+        "[3f 3f 3f] length=3 width=3"
+    );
     assert_eq!(
         strim(&mut t, b"abcdefghijklmnop", b"\x80\x80\x80", 0, 10, "UTF-8"),
         "[61 62 63 64 65 66 67 80 80 80] length=10 width=10"
@@ -221,19 +350,45 @@ fn strimwidth() {
         strim(&mut t, b"abc", b"abcdefghijklmnop", 0, 1, "ASCII"),
         "[61 62 63 64 65 66 67 68 69 6a 6b 6c 6d 6e 6f 70] length=16 width=16"
     );
-    assert_eq!(strim(&mut t, "日本語abc".as_bytes(), b"...", -3, 10, "UTF-8"), "[61 62 63] length=3 width=3");
+    assert_eq!(
+        strim(&mut t, "日本語abc".as_bytes(), b"...", -3, 10, "UTF-8"),
+        "[61 62 63] length=3 width=3"
+    );
     assert_eq!(
         strim(&mut t, "日本語abcdef".as_bytes(), b"...", 3, -1, "UTF-8"),
         "[61 62 2e 2e 2e] length=5 width=5"
     );
     let greek = b"\x00\x00\x00\x00+\x00\x00\x00\x00k\x00'\x11Yz";
-    assert_eq!(strim(&mut t, greek, b"...", 1, 0, "greek"), "[2e 2e 2e] length=3 width=3");
     assert_eq!(
-        err(&mut t, "mb_strimwidth", vec![s("abc"), Value::Int(100), Value::Int(10), s("..."), s("UTF-8")]),
+        strim(&mut t, greek, b"...", 1, 0, "greek"),
+        "[2e 2e 2e] length=3 width=3"
+    );
+    assert_eq!(
+        err(
+            &mut t,
+            "mb_strimwidth",
+            vec![
+                s("abc"),
+                Value::Int(100),
+                Value::Int(10),
+                s("..."),
+                s("UTF-8")
+            ]
+        ),
         "ValueError: mb_strimwidth(): Argument #2 ($start) is out of range"
     );
     assert_eq!(
-        err(&mut t, "mb_strimwidth", vec![s("abc"), Value::Int(0), Value::Int(-100), s("..."), s("UTF-8")]),
+        err(
+            &mut t,
+            "mb_strimwidth",
+            vec![
+                s("abc"),
+                Value::Int(0),
+                Value::Int(-100),
+                s("..."),
+                s("UTF-8")
+            ]
+        ),
         "ValueError: mb_strimwidth(): Argument #3 ($width) is out of range"
     );
 }

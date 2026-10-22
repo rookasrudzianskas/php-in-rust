@@ -20,7 +20,10 @@ fn language() {
     assert_eq!(text(&call(&mut t, "mb_language", vec![])), "neutral");
     assert!(t.vm.ini_set("mbstring.language", "uni").is_some());
     assert_eq!(text(&call(&mut t, "mb_language", vec![])), "uni");
-    assert_eq!(dump_str(&mut t, "mb_language", vec![s("English")]), "bool(true)\n");
+    assert_eq!(
+        dump_str(&mut t, "mb_language", vec![s("English")]),
+        "bool(true)\n"
+    );
     assert_eq!(text(&call(&mut t, "mb_language", vec![])), "English");
     assert_eq!(
         err(&mut t, "mb_language", vec![s("Pig Latin")]),
@@ -44,24 +47,44 @@ fn language_detect_order_defaults() {
     );
     let mut t = vm_with(&[("mbstring.language", "Japanese")]);
     // mb_detect_order.phpt
-    assert_eq!(dump_str(&mut t, "mb_detect_order", vec![s("auto")]), "bool(true)\n");
+    assert_eq!(
+        dump_str(&mut t, "mb_detect_order", vec![s("auto")]),
+        "bool(true)\n"
+    );
     assert_eq!(
         strings(&call(&mut t, "mb_detect_order", vec![])),
         ["ASCII", "JIS", "UTF-8", "EUC-JP", "SJIS"]
     );
     call(&mut t, "mb_detect_order", vec![s("SJIS,EUC-JP,JIS,UTF-8")]);
-    assert_eq!(strings(&call(&mut t, "mb_detect_order", vec![])), ["SJIS", "EUC-JP", "JIS", "UTF-8"]);
-    call(&mut t, "mb_detect_order", vec![list(&["ASCII", "JIS", "EUC-JP", "UTF-8"])]);
-    assert_eq!(strings(&call(&mut t, "mb_detect_order", vec![])), ["ASCII", "JIS", "EUC-JP", "UTF-8"]);
+    assert_eq!(
+        strings(&call(&mut t, "mb_detect_order", vec![])),
+        ["SJIS", "EUC-JP", "JIS", "UTF-8"]
+    );
+    call(
+        &mut t,
+        "mb_detect_order",
+        vec![list(&["ASCII", "JIS", "EUC-JP", "UTF-8"])],
+    );
+    assert_eq!(
+        strings(&call(&mut t, "mb_detect_order", vec![])),
+        ["ASCII", "JIS", "EUC-JP", "UTF-8"]
+    );
     assert_eq!(
         err(&mut t, "mb_detect_order", vec![s("BAD_NAME")]),
         "ValueError: mb_detect_order(): Argument #1 ($encoding) contains invalid encoding \"BAD_NAME\""
     );
     assert_eq!(
-        err(&mut t, "mb_detect_order", vec![list(&["ASCII", "BAD_NAME"])]),
+        err(
+            &mut t,
+            "mb_detect_order",
+            vec![list(&["ASCII", "BAD_NAME"])]
+        ),
         "ValueError: mb_detect_order(): Argument #1 ($encoding) contains invalid encoding \"BAD_NAME\""
     );
-    assert_eq!(strings(&call(&mut t, "mb_detect_order", vec![])), ["ASCII", "JIS", "EUC-JP", "UTF-8"]);
+    assert_eq!(
+        strings(&call(&mut t, "mb_detect_order", vec![])),
+        ["ASCII", "JIS", "EUC-JP", "UTF-8"]
+    );
     // mb_detect_order_empty_encoding_list.phpt
     for v in [s(""), Value::empty_array()] {
         assert_eq!(
@@ -74,13 +97,22 @@ fn language_detect_order_defaults() {
 #[test]
 fn detect_order_ini() {
     // mb_detect_order_with_ini_set.phpt
-    let mut t = vm_with(&[("mbstring.detect_order", "UTF-8,ISO-8859-15,ISO-8859-1,ASCII")]);
+    let mut t = vm_with(&[(
+        "mbstring.detect_order",
+        "UTF-8,ISO-8859-15,ISO-8859-1,ASCII",
+    )]);
     assert_eq!(
         strings(&call(&mut t, "mb_detect_order", vec![])),
         ["UTF-8", "ISO-8859-15", "ISO-8859-1", "ASCII"]
     );
-    assert!(t.vm.ini_set("mbstring.detect_order", "UTF-8, ISO-8859-1, ASCII").is_some());
-    assert_eq!(strings(&call(&mut t, "mb_detect_order", vec![])), ["UTF-8", "ISO-8859-1", "ASCII"]);
+    assert!(
+        t.vm.ini_set("mbstring.detect_order", "UTF-8, ISO-8859-1, ASCII")
+            .is_some()
+    );
+    assert_eq!(
+        strings(&call(&mut t, "mb_detect_order", vec![])),
+        ["UTF-8", "ISO-8859-1", "ASCII"]
+    );
     t.vm.ini_set("mbstring.detect_order", "UTF-8");
     assert_eq!(strings(&call(&mut t, "mb_detect_order", vec![])), ["UTF-8"]);
     // An empty list is rejected.
@@ -93,7 +125,10 @@ fn internal_encoding() {
     // mb_internal_encoding.phpt
     let mut t = TestVm::new();
     for e in ["EUC-JP", "UTF-8", "ASCII"] {
-        assert_eq!(dump_str(&mut t, "mb_internal_encoding", vec![s(e)]), "bool(true)\n");
+        assert_eq!(
+            dump_str(&mut t, "mb_internal_encoding", vec![s(e)]),
+            "bool(true)\n"
+        );
         assert_eq!(text(&call(&mut t, "mb_internal_encoding", vec![])), e);
     }
     assert_eq!(
@@ -109,23 +144,38 @@ fn internal_encoding() {
         ("output_encoding", "ISO-8859-1"),
         ("internal_encoding", "ISO-8859-1"),
     ]);
-    assert_eq!(text(&call(&mut t, "mb_internal_encoding", vec![])), "ISO-8859-1");
+    assert_eq!(
+        text(&call(&mut t, "mb_internal_encoding", vec![])),
+        "ISO-8859-1"
+    );
     assert_eq!(text(&call(&mut t, "mb_http_output", vec![])), "ISO-8859-1");
-    assert_eq!(strings(&call(&mut t, "mb_http_input", vec![s("I")])), ["ISO-8859-1"]);
+    assert_eq!(
+        strings(&call(&mut t, "mb_http_input", vec![s("I")])),
+        ["ISO-8859-1"]
+    );
     call(&mut t, "mb_internal_encoding", vec![s("UTF-8")]);
     assert_eq!(text(&call(&mut t, "mb_internal_encoding", vec![])), "UTF-8");
 
     // mb_internal_encoding_ini_basic2.phpt / mb_internal_encoding_ini_invalid_encoding.phpt
     let mut t = vm_with(&[("mbstring.internal_encoding", "ISO-8859-7")]);
-    assert_eq!(text(&call(&mut t, "mb_internal_encoding", vec![])), "ISO-8859-7");
+    assert_eq!(
+        text(&call(&mut t, "mb_internal_encoding", vec![])),
+        "ISO-8859-7"
+    );
     call(&mut t, "mb_internal_encoding", vec![s("UTF-8")]);
-    assert_eq!(t.vm.ini_get("mbstring.internal_encoding").unwrap(), "ISO-8859-7");
+    assert_eq!(
+        t.vm.ini_get("mbstring.internal_encoding").unwrap(),
+        "ISO-8859-7"
+    );
     let mut t = vm_with(&[("mbstring.internal_encoding", "BAD")]);
     assert_eq!(text(&call(&mut t, "mb_internal_encoding", vec![])), "UTF-8");
     assert_eq!(t.vm.ini_get("mbstring.internal_encoding").unwrap(), "BAD");
 
     // ini_language.phpt: an ini value is reported by its canonical name.
-    let mut t = vm_with(&[("internal_encoding", "Shift_JIS"), ("mbstring.language", "Japanese")]);
+    let mut t = vm_with(&[
+        ("internal_encoding", "Shift_JIS"),
+        ("mbstring.language", "Japanese"),
+    ]);
     assert_eq!(text(&call(&mut t, "mb_internal_encoding", vec![])), "SJIS");
 }
 
@@ -134,7 +184,10 @@ fn internal_encoding_follows_ini() {
     // internal_encoding.phpt
     let mut t = vm_with(&[("internal_encoding", "iso-8859-1")]);
     let len = |t: &mut TestVm| int(&call(t, "mb_strlen", vec![b(b"\xc3\xb6")]));
-    assert_eq!(text(&call(&mut t, "mb_internal_encoding", vec![])), "ISO-8859-1");
+    assert_eq!(
+        text(&call(&mut t, "mb_internal_encoding", vec![])),
+        "ISO-8859-1"
+    );
     assert_eq!(len(&mut t), 2);
     t.vm.ini_set("mbstring.internal_encoding", "utf-8");
     assert_eq!(text(&call(&mut t, "mb_internal_encoding", vec![])), "UTF-8");
@@ -143,7 +196,10 @@ fn internal_encoding_follows_ini() {
     t.vm.ini_set("internal_encoding", "iso-8859-2");
     assert_eq!(text(&call(&mut t, "mb_internal_encoding", vec![])), "UTF-8");
     t.vm.ini_set("mbstring.internal_encoding", "");
-    assert_eq!(text(&call(&mut t, "mb_internal_encoding", vec![])), "ISO-8859-2");
+    assert_eq!(
+        text(&call(&mut t, "mb_internal_encoding", vec![])),
+        "ISO-8859-2"
+    );
     assert_eq!(len(&mut t), 2);
     // mb_internal_encoding() takes precedence over the core setting.
     call(&mut t, "mb_internal_encoding", vec![s("utf-8")]);
@@ -151,7 +207,10 @@ fn internal_encoding_follows_ini() {
     t.vm.ini_set("internal_encoding", "iso-8859-3");
     assert_eq!(text(&call(&mut t, "mb_internal_encoding", vec![])), "UTF-8");
     t.vm.ini_set("mbstring.internal_encoding", "");
-    assert_eq!(text(&call(&mut t, "mb_internal_encoding", vec![])), "ISO-8859-3");
+    assert_eq!(
+        text(&call(&mut t, "mb_internal_encoding", vec![])),
+        "ISO-8859-3"
+    );
     assert_eq!(len(&mut t), 2);
 
     // ini_encoding.phpt
@@ -185,7 +244,10 @@ fn http_input_output() {
     let mut t = TestVm::new();
     // mb_http_output.phpt
     for e in ["ASCII", "SJIS", "JIS", "UTF-8", "EUC-JP"] {
-        assert_eq!(dump_str(&mut t, "mb_http_output", vec![s(e)]), "bool(true)\n");
+        assert_eq!(
+            dump_str(&mut t, "mb_http_output", vec![s(e)]),
+            "bool(true)\n"
+        );
         assert_eq!(text(&call(&mut t, "mb_http_output", vec![])), e);
     }
     assert_eq!(
@@ -208,27 +270,45 @@ fn http_input_output() {
     }
     // Nothing was parsed in the CLI.
     for ty in ["G", "P", "C", "S"] {
-        assert_eq!(dump_str(&mut t, "mb_http_input", vec![s(ty)]), "bool(false)\n");
+        assert_eq!(
+            dump_str(&mut t, "mb_http_input", vec![s(ty)]),
+            "bool(false)\n"
+        );
     }
     assert_eq!(dump_str(&mut t, "mb_http_input", vec![]), "bool(false)\n");
     assert_eq!(text(&call(&mut t, "mb_http_input", vec![s("L")])), "UTF-8");
     // mb_http_input_pass.phpt: "pass" as the input encoding
     let mut t = vm_with(&[("input_encoding", "pass")]);
-    assert_eq!(strings(&call(&mut t, "mb_http_input", vec![s("I")])), ["pass"]);
+    assert_eq!(
+        strings(&call(&mut t, "mb_http_input", vec![s("I")])),
+        ["pass"]
+    );
     assert_eq!(text(&call(&mut t, "mb_http_input", vec![s("L")])), "pass");
     // mb_http_input.phpt: aliases resolve to canonical names
     let mut t = vm_with(&[("input_encoding", "latin1")]);
-    assert_eq!(strings(&call(&mut t, "mb_http_input", vec![s("I")])), ["ISO-8859-1"]);
+    assert_eq!(
+        strings(&call(&mut t, "mb_http_input", vec![s("I")])),
+        ["ISO-8859-1"]
+    );
 }
 
 #[test]
 fn substitute_character() {
     let mut t = TestVm::new();
     // mb_substitute_character.phpt (without the CP932 conversions)
-    assert_eq!(dump_str(&mut t, "mb_substitute_character", vec![Value::Int(0x3044)]), "bool(true)\n");
-    assert_eq!(dump_str(&mut t, "mb_substitute_character", vec![]), "int(12356)\n");
+    assert_eq!(
+        dump_str(&mut t, "mb_substitute_character", vec![Value::Int(0x3044)]),
+        "bool(true)\n"
+    );
+    assert_eq!(
+        dump_str(&mut t, "mb_substitute_character", vec![]),
+        "int(12356)\n"
+    );
     for mode in ["long", "none", "entity"] {
-        assert_eq!(dump_str(&mut t, "mb_substitute_character", vec![s(mode)]), "bool(true)\n");
+        assert_eq!(
+            dump_str(&mut t, "mb_substitute_character", vec![s(mode)]),
+            "bool(true)\n"
+        );
         assert_eq!(text(&call(&mut t, "mb_substitute_character", vec![])), mode);
     }
     assert_eq!(
@@ -244,7 +324,13 @@ fn substitute_character() {
     // mb_substitute_character_variation2.phpt
     let mut t = TestVm::new();
     let mb = "日本語テキスト";
-    let conv = |t: &mut TestVm| hex(&call(t, "mb_convert_encoding", vec![s(mb), s("ISO-8859-1"), s("UTF-8")]));
+    let conv = |t: &mut TestVm| {
+        hex(&call(
+            t,
+            "mb_convert_encoding",
+            vec![s(mb), s("ISO-8859-1"), s("UTF-8")],
+        ))
+    };
     assert_eq!(conv(&mut t), "3f3f3f3f3f3f3f");
     call(&mut t, "mb_substitute_character", vec![Value::Int(66)]);
     assert_eq!(conv(&mut t), "42424242424242");
@@ -254,18 +340,48 @@ fn substitute_character() {
     assert_eq!(conv(&mut t), "3f3f3f3f3f3f3f");
     // "long" and "entity" markers
     call(&mut t, "mb_substitute_character", vec![s("long")]);
-    assert_eq!(text(&call(&mut t, "mb_convert_encoding", vec![s("a♠"), s("ASCII"), s("UTF-8")])), "aU+2660");
+    assert_eq!(
+        text(&call(
+            &mut t,
+            "mb_convert_encoding",
+            vec![s("a♠"), s("ASCII"), s("UTF-8")]
+        )),
+        "aU+2660"
+    );
     call(&mut t, "mb_substitute_character", vec![s("entity")]);
-    assert_eq!(text(&call(&mut t, "mb_convert_encoding", vec![s("a♠"), s("ASCII"), s("UTF-8")])), "a&#x2660;");
+    assert_eq!(
+        text(&call(
+            &mut t,
+            "mb_convert_encoding",
+            vec![s("a♠"), s("ASCII"), s("UTF-8")]
+        )),
+        "a&#x2660;"
+    );
     // Bad input becomes the substitute character (280, not encodable).
-    assert_eq!(text(&call(&mut t, "mb_convert_encoding", vec![b(b"a\xff"), s("ASCII"), s("UTF-8")])), "a");
+    assert_eq!(
+        text(&call(
+            &mut t,
+            "mb_convert_encoding",
+            vec![b(b"a\xff"), s("ASCII"), s("UTF-8")]
+        )),
+        "a"
+    );
     // The ini setting
     let mut t = vm_with(&[("mbstring.substitute_character", "123")]);
-    assert_eq!(dump_str(&mut t, "mb_substitute_character", vec![]), "int(123)\n");
+    assert_eq!(
+        dump_str(&mut t, "mb_substitute_character", vec![]),
+        "int(123)\n"
+    );
     let mut t = vm_with(&[("mbstring.substitute_character", "none")]);
-    assert_eq!(text(&call(&mut t, "mb_substitute_character", vec![])), "none");
+    assert_eq!(
+        text(&call(&mut t, "mb_substitute_character", vec![])),
+        "none"
+    );
     let mut t = vm_with(&[("mbstring.substitute_character", "U+3000")]);
-    assert_eq!(dump_str(&mut t, "mb_substitute_character", vec![]), "int(63)\n");
+    assert_eq!(
+        dump_str(&mut t, "mb_substitute_character", vec![]),
+        "int(63)\n"
+    );
 }
 
 #[test]
@@ -283,26 +399,43 @@ fn mime_names_aliases_list() {
         ("UCS2", "UCS-2"),
         ("UCS4", "UCS-4"),
     ] {
-        assert_eq!(text(&call(&mut t, "mb_preferred_mime_name", vec![s(name)])), mime);
+        assert_eq!(
+            text(&call(&mut t, "mb_preferred_mime_name", vec![s(name)])),
+            mime
+        );
     }
     assert_eq!(
         err(&mut t, "mb_preferred_mime_name", vec![s("BAD_NAME")]),
         "ValueError: mb_preferred_mime_name(): Argument #1 ($encoding) must be a valid encoding, \"BAD_NAME\" given"
     );
-    assert_eq!(vd(&mut t, "mb_preferred_mime_name", vec![s("UTF7-IMAP")]),
-        "\nWarning: mb_preferred_mime_name(): No MIME preferred name corresponding to \"UTF7-IMAP\" in /t.php on line 3\nbool(false)\n");
+    assert_eq!(
+        vd(&mut t, "mb_preferred_mime_name", vec![s("UTF7-IMAP")]),
+        "\nWarning: mb_preferred_mime_name(): No MIME preferred name corresponding to \"UTF7-IMAP\" in /t.php on line 3\nbool(false)\n"
+    );
     // mb_encoding_aliases.phpt
     let mut aliases = strings(&call(&mut t, "mb_encoding_aliases", vec![s("ASCII")]));
     aliases.sort();
     assert_eq!(
         aliases,
         [
-            "ANSI_X3.4-1968", "ANSI_X3.4-1986", "IBM-367", "IBM367", "ISO646-US",
-            "ISO_646.irv:1991", "US-ASCII", "cp367", "csASCII", "iso-ir-6", "us"
+            "ANSI_X3.4-1968",
+            "ANSI_X3.4-1986",
+            "IBM-367",
+            "IBM367",
+            "ISO646-US",
+            "ISO_646.irv:1991",
+            "US-ASCII",
+            "cp367",
+            "csASCII",
+            "iso-ir-6",
+            "us"
         ]
     );
     assert!(strings(&call(&mut t, "mb_encoding_aliases", vec![s("7bit")])).is_empty());
-    assert_eq!(strings(&call(&mut t, "mb_encoding_aliases", vec![s("8bit")])), ["binary"]);
+    assert_eq!(
+        strings(&call(&mut t, "mb_encoding_aliases", vec![s("8bit")])),
+        ["binary"]
+    );
     assert_eq!(
         err(&mut t, "mb_encoding_aliases", vec![s("BAD")]),
         "ValueError: mb_encoding_aliases(): Argument #1 ($encoding) must be a valid encoding, \"BAD\" given"
@@ -310,7 +443,17 @@ fn mime_names_aliases_list() {
     // mb_list_encodings.phpt; php-src's order
     let all = strings(&call(&mut t, "mb_list_encodings", vec![]));
     assert_eq!(all.len(), 79);
-    assert_eq!(&all[..6], ["BASE64", "UUENCODE", "HTML-ENTITIES", "Quoted-Printable", "7bit", "8bit"]);
+    assert_eq!(
+        &all[..6],
+        [
+            "BASE64",
+            "UUENCODE",
+            "HTML-ENTITIES",
+            "Quoted-Printable",
+            "7bit",
+            "8bit"
+        ]
+    );
     assert_eq!(all.last().unwrap(), "CP50222");
     assert!(all.contains(&"ASCII".to_string()));
     assert!(!all.contains(&"pass".to_string()));
@@ -326,13 +469,20 @@ fn get_info() {
         ("mbstring.http_input", "ISO-8859-1"),
         ("mbstring.http_output", "ISO-8859-15"),
         ("mbstring.http_output_conv_mimetypes", "abc"),
-        ("mbstring.detect_order", "UTF-8,ISO-8859-15,ISO-8859-1,ASCII"),
+        (
+            "mbstring.detect_order",
+            "UTF-8,ISO-8859-15,ISO-8859-1,ASCII",
+        ),
         ("mbstring.substitute_character", "123"),
         ("mbstring.strict_detection", "1"),
     ]);
     let r = Value::Ref(php_runtime::PhpRef::new(Value::Null));
     call(&mut t, "mb_parse_str", vec![s("abc=def"), r]);
-    call(&mut t, "mb_convert_encoding", vec![b(b"\xff\xff"), s("Shift_JIS"), s("UCS-2BE")]);
+    call(
+        &mut t,
+        "mb_convert_encoding",
+        vec![b(b"\xff\xff"), s("Shift_JIS"), s("UCS-2BE")],
+    );
     let info = call(&mut t, "mb_get_info", vec![]);
     assert_eq!(
         dump(&mut t, info.clone()),
@@ -375,15 +525,23 @@ fn get_info() {
 }
 "#
     );
-    let Value::Array(a) = &info else { unreachable!() };
+    let Value::Array(a) = &info else {
+        unreachable!()
+    };
     for (k, v) in a.iter() {
         let one = call(&mut t, "mb_get_info", vec![k.to_value()]);
         assert_eq!(dump(&mut t, one), dump(&mut t, v.clone()));
     }
     // mb_get_info_errors.phpt
     let mut t = TestVm::new();
-    assert_eq!(dump_str(&mut t, "mb_get_info", vec![s("http_input")]), "NULL\n");
-    assert_eq!(strings(&call(&mut t, "mb_get_info", vec![s("detect_order")])), ["ASCII", "UTF-8"]);
+    assert_eq!(
+        dump_str(&mut t, "mb_get_info", vec![s("http_input")]),
+        "NULL\n"
+    );
+    assert_eq!(
+        strings(&call(&mut t, "mb_get_info", vec![s("detect_order")])),
+        ["ASCII", "UTF-8"]
+    );
     assert_eq!(
         vd(&mut t, "mb_get_info", vec![s("non_sense")]),
         "\nWarning: mb_get_info(): argument #1 ($type) must be a valid type in /t.php on line 3\nbool(false)\n"
@@ -401,9 +559,15 @@ fn parse_str() {
     };
     let (ok, a) = parse(&mut t, b"foo=abc&bar=def");
     assert!(matches!(ok, Value::Bool(true)));
-    assert_eq!(dump(&mut t, a), "array(2) {\n  [\"foo\"]=>\n  string(3) \"abc\"\n  [\"bar\"]=>\n  string(3) \"def\"\n}\n");
+    assert_eq!(
+        dump(&mut t, a),
+        "array(2) {\n  [\"foo\"]=>\n  string(3) \"abc\"\n  [\"bar\"]=>\n  string(3) \"def\"\n}\n"
+    );
     let (_, a) = parse(&mut t, b"%2bfoo=def&-bar=jkl");
-    assert_eq!(dump(&mut t, a), "array(2) {\n  [\"+foo\"]=>\n  string(3) \"def\"\n  [\"-bar\"]=>\n  string(3) \"jkl\"\n}\n");
+    assert_eq!(
+        dump(&mut t, a),
+        "array(2) {\n  [\"+foo\"]=>\n  string(3) \"def\"\n  [\"-bar\"]=>\n  string(3) \"jkl\"\n}\n"
+    );
     let (_, a) = parse(&mut t, b"foo[]=abc&foo[]=def&foo[]=ghi&bar[]=jkl");
     assert_eq!(
         dump(&mut t, a),
@@ -418,7 +582,10 @@ fn parse_str() {
     let mut t = vm_with(&[("arg_separator.input", "&#")]);
     let (_, a) = parse(&mut t, b"foo=abc#bar=def&fubar=ghi");
     assert_eq!(dump(&mut t, a).matches("string(3)").count(), 3);
-    let (_, a) = parse(&mut t, b"  foo[]=abc&foo[]=def#foo[]=ghi#bar[]=#foo[]&fubar[]==");
+    let (_, a) = parse(
+        &mut t,
+        b"  foo[]=abc&foo[]=def#foo[]=ghi#bar[]=#foo[]&fubar[]==",
+    );
     assert_eq!(
         dump(&mut t, a),
         "array(3) {\n  [\"foo\"]=>\n  array(4) {\n    [0]=>\n    string(3) \"abc\"\n    [1]=>\n    string(3) \"def\"\n    [2]=>\n    string(3) \"ghi\"\n    [3]=>\n    string(0) \"\"\n  }\n  [\"bar\"]=>\n  array(1) {\n    [0]=>\n    string(0) \"\"\n  }\n  [\"fubar\"]=>\n  array(1) {\n    [0]=>\n    string(1) \"=\"\n  }\n}\n"
@@ -427,8 +594,14 @@ fn parse_str() {
     // mb_parse_str_error.phpt
     let mut t = vm_with(&[("internal_encoding", "UTF-8")]);
     let (_, a) = parse(&mut t, b"\x80\x80\x80");
-    assert_eq!(dump(&mut t, a), "array(1) {\n  [\"???\"]=>\n  string(0) \"\"\n}\n");
+    assert_eq!(
+        dump(&mut t, a),
+        "array(1) {\n  [\"???\"]=>\n  string(0) \"\"\n}\n"
+    );
     let (_, a) = parse(&mut t, b"\xFF=\xFF");
-    assert_eq!(dump(&mut t, a), "array(1) {\n  [\"?\"]=>\n  string(1) \"?\"\n}\n");
+    assert_eq!(
+        dump(&mut t, a),
+        "array(1) {\n  [\"?\"]=>\n  string(1) \"?\"\n}\n"
+    );
     assert_eq!(text(&call(&mut t, "mb_http_input", vec![])), "UTF-8");
 }
