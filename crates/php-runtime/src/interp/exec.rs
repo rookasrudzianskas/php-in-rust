@@ -592,20 +592,33 @@ fn iterate_object_ex(
     if let Some(gi) = class.handlers.get_iterator {
         if !overrides_iteration(&class) {
             let it = gi(vm, o, by_ref)?;
-            if let Some(cell) = it.downcast_ref::<super::internal_iterator::IteratorCell>() {
-                cell.borrow_mut().rewind(vm)?;
+            if let Some(iter) = super::internal_iterator::iterator_from_any(it) {
+                // ZEND_FE_RESET_R / ZEND_FE_FETCH_R over a zend_object_iterator.
+                if iter.can_rewind() {
+                    iter.rewind(vm)?;
+                }
+                if !iter.valid(vm)? {
+                    return Ok(());
+                }
+                let mut index = 0i64;
                 loop {
-                    if !cell.borrow_mut().valid(vm)? {
-                        break;
-                    }
-                    let v = cell.borrow_mut().current(vm)?;
-                    let k = if want_key { cell.borrow_mut().key(vm)? } else { Value::Null };
+                    let Some(v) = iter.current(vm)? else {
+                        return Ok(());
+                    };
+                    let k = if want_key {
+                        iter.key(vm)?.unwrap_or(Value::Int(index))
+                    } else {
+                        Value::Null
+                    };
                     if !f(vm, k, v)? {
                         return Ok(());
                     }
-                    cell.borrow_mut().next(vm)?;
+                    index += 1;
+                    iter.move_forward(vm)?;
+                    if !iter.valid(vm)? {
+                        return Ok(());
+                    }
                 }
-                return Ok(());
             }
         }
     }

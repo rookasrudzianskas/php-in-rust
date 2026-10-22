@@ -1,85 +1,149 @@
 //! `InternalIterator` (`Zend/zend_interfaces.c`): the `Iterator` object that
 //! `IteratorAggregate::getIterator()` returns for internal classes whose
-//! iteration is a native [`ObjectHandlers::get_iterator`] handler
-//! (`zend_create_internal_iterator_zval`).
+//! iteration is a native `zend_object_iterator`
+//! ([`ObjectIterator`], from a `get_iterator` handler);
+//! `zend_create_internal_iterator_zval`.
 //!
-//! [`ObjectHandlers::get_iterator`]: crate::class::ObjectHandlers::get_iterator
+//! Extensions create one with [`create_internal_iterator`] (or
+//! [`Vm::create_internal_iterator`] from the object's `get_iterator`
+//! handler). `foreach` over an `InternalIterator` drives the wrapped
+//! iterator directly, as `foreach` over the original object would.
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use crate::class::{ClassEntry, Function, InternalIterator, class_flags, fn_flags, member_flags};
+use crate::class::{
+    ClassEntry, ClassRef, Function, InternalIterator, ObjectIterator, class_flags, fn_flags, member_flags,
+};
 use crate::native::{Args, NativeFunction, Registry};
 use crate::object::ObjRef;
 use crate::value::Value;
-use crate::vm::{PResult, Vm};
+use crate::vm::{Flow, PResult, Vm};
 
-/// How a `get_iterator` handler hands out its iterator.
+/// The legacy `get_iterator` result type (see [`InternalIterator`]).
 pub type IteratorCell = RefCell<Box<dyn InternalIterator>>;
+
+pub const INTERNAL_ITERATOR: &str = "InternalIterator";
+
+/// Packs an iterator for a `get_iterator` handler's `Rc<dyn Any>` result.
+pub fn iterator_any(iter: Rc<dyn ObjectIterator>) -> Rc<dyn Any> {
+    Rc::new(iter)
+}
+
+/// Unpacks a `get_iterator` handler result: an [`iterator_any`] value or a
+/// legacy [`IteratorCell`].
+pub fn iterator_from_any(it: Rc<dyn Any>) -> Option<Rc<dyn ObjectIterator>> {
+    if let Some(i) = it.downcast_ref::<Rc<dyn ObjectIterator>>() {
+        return Some(i.clone());
+    }
+    match it.downcast::<IteratorCell>() {
+        Ok(cell) => Some(cell as Rc<dyn ObjectIterator>),
+        Err(_) => None,
+    }
+}
+
+/// `zend_throw_error(NULL, "An iterator cannot be used with foreach by reference")`.
+pub fn by_ref_error(vm: &mut Vm) -> Flow {
+    vm.throw_error("Error", "An iterator cannot be used with foreach by reference")
+}
 
 /// `zend_internal_iterator`.
 struct State {
-    iter: Rc<IteratorCell>,
+    iter: Option<Rc<dyn ObjectIterator>>,
     rewind_called: Cell<bool>,
+    /// `iter->index`.
+    index: Cell<i64>,
+}
+
+fn create(_vm: &mut Vm, ce: &ClassRef) -> PResult<ObjRef> {
+    let obj = ObjRef::new(ce.clone());
+    obj.set_native(State {
+        iter: None,
+        rewind_called: Cell::new(false),
+        index: Cell::new(0),
+    });
+    Ok(obj)
+}
+
+fn clone_forbidden(vm: &mut Vm, obj: &ObjRef) -> PResult<ObjRef> {
+    Err(vm.throw_error(
+        "Error",
+        format!("Trying to clone an uncloneable object of class {}", obj.class().name),
+    ))
+}
+
+/// `zend_create_internal_iterator_zval`: an `InternalIterator` over `iter`.
+pub fn create_internal_iterator(vm: &mut Vm, iter: Rc<dyn ObjectIterator>) -> PResult<ObjRef> {
+    let ce = match vm.find_class(INTERNAL_ITERATOR.as_bytes()) {
+        Some(ce) => ce,
+        None => {
+            // Embedders that skip `interp::install` (extension unit tests).
+            let mut r = Registry::new(vm, "Core");
+            register(&mut r);
+            vm.find_class(INTERNAL_ITERATOR.as_bytes())
+                .expect("InternalIterator was just registered")
+        }
+    };
+    let obj = ObjRef::new(ce);
+    obj.set_native(State {
+        iter: Some(iter),
+        rewind_called: Cell::new(false),
+        index: Cell::new(0),
+    });
+    Ok(obj)
 }
 
 impl Vm {
-    /// `zend_create_internal_iterator_zval`: wraps the iterator of `obj`'s
-    /// `get_iterator` handler in an `InternalIterator` object (what
-    /// `getIterator()` of an internal `IteratorAggregate` returns).
+    /// `zend_create_internal_iterator_zval` for `obj`: wraps the iterator of
+    /// its class's `get_iterator` handler in an `InternalIterator`.
     pub fn create_internal_iterator(&mut self, obj: &ObjRef) -> PResult<Value> {
+        let no_iter = |vm: &mut Vm| {
+            vm.throw_error("Error", format!("Class {} has no internal iterator", obj.class().name))
+        };
         let Some(gi) = obj.class().handlers.get_iterator else {
-            return Err(self.throw_error(
-                "Error",
-                format!("Class {} has no internal iterator", obj.class().name),
-            ));
+            return Err(no_iter(self));
         };
         let it = gi(self, obj, false)?;
-        let iter = match it.downcast::<IteratorCell>() {
-            Ok(cell) => cell,
-            Err(_) => {
-                return Err(self.throw_error(
-                    "Error",
-                    format!("Class {} has no internal iterator", obj.class().name),
-                ));
-            }
-        };
-        self.wrap_internal_iterator(iter)
+        match iterator_from_any(it) {
+            Some(iter) => Ok(Value::Object(create_internal_iterator(self, iter)?)),
+            None => Err(no_iter(self)),
+        }
     }
 
-    /// Wraps an already created iterator in an `InternalIterator` object.
+    /// Wraps a legacy [`InternalIterator`] in an `InternalIterator` object.
     pub fn create_internal_iterator_from(&mut self, iter: Box<dyn InternalIterator>) -> PResult<Value> {
-        self.wrap_internal_iterator(Rc::new(RefCell::new(iter)))
-    }
-
-    fn wrap_internal_iterator(&mut self, iter: Rc<IteratorCell>) -> PResult<Value> {
-        let class = self
-            .find_class(b"InternalIterator")
-            .expect("InternalIterator is a core class");
-        let o = ObjRef::new(class);
-        o.set_native(State {
-            iter,
-            rewind_called: Cell::new(false),
-        });
-        Ok(Value::Object(o))
+        let iter: Rc<dyn ObjectIterator> = Rc::new(RefCell::new(iter));
+        Ok(Value::Object(create_internal_iterator(self, iter)?))
     }
 }
 
-/// `zend_internal_iterator_fetch` + `zend_internal_iterator_ensure_rewound`.
-fn fetch(vm: &mut Vm, a: &Args, rewind: bool) -> PResult<Rc<IteratorCell>> {
-    let o = a.this().cloned().expect("InternalIterator method without $this");
-    let state = o.native::<State>().map(|s| (s.iter.clone(), s.rewind_called.replace(true)));
-    let Some((iter, was_rewound)) = state else {
-        return Err(vm.throw_error(
+/// `zend_internal_iterator_fetch`: the wrapped iterator (copied out so no
+/// borrow is held while it runs PHP code).
+fn fetch(vm: &mut Vm, a: &Args) -> PResult<(ObjRef, Rc<dyn ObjectIterator>)> {
+    let this = a.this().cloned().expect("InternalIterator method without $this");
+    let iter = this.native::<State>().and_then(|s| s.iter.clone());
+    match iter {
+        Some(iter) => Ok((this, iter)),
+        None => Err(vm.throw_error(
             "Error",
             "The InternalIterator object has not been properly initialized",
-        ));
-    };
-    if rewind && !was_rewound {
-        iter.borrow_mut().rewind(vm)?;
+        )),
     }
-    Ok(iter)
+}
+
+fn with_state<R>(obj: &ObjRef, f: impl FnOnce(&State) -> R) -> R {
+    let st = obj.native::<State>().expect("InternalIterator state");
+    f(&st)
+}
+
+/// `zend_internal_iterator_ensure_rewound`.
+fn ensure_rewound(vm: &mut Vm, obj: &ObjRef, iter: &Rc<dyn ObjectIterator>) -> PResult<()> {
+    let rewound = with_state(obj, |s| s.rewind_called.replace(true));
+    if !rewound && iter.can_rewind() {
+        iter.rewind(vm)?;
+    }
+    Ok(())
 }
 
 fn ii_construct(vm: &mut Vm, _a: &mut Args) -> PResult<Value> {
@@ -87,47 +151,63 @@ fn ii_construct(vm: &mut Vm, _a: &mut Args) -> PResult<Value> {
 }
 
 fn ii_current(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
-    let iter = fetch(vm, a, true)?;
-    let v = iter.borrow_mut().current(vm)?;
-    Ok(v.into_unref())
+    let (this, iter) = fetch(vm, a)?;
+    ensure_rewound(vm, &this, &iter)?;
+    Ok(iter.current(vm)?.map_or(Value::Null, |v| v.into_unref()))
 }
 
 fn ii_key(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
-    let iter = fetch(vm, a, true)?;
-    let k = iter.borrow_mut().key(vm)?;
-    Ok(k)
+    let (this, iter) = fetch(vm, a)?;
+    ensure_rewound(vm, &this, &iter)?;
+    match iter.key(vm)? {
+        Some(k) => Ok(k),
+        None => Ok(Value::Int(with_state(&this, |s| s.index.get()))),
+    }
 }
 
 fn ii_next(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
-    let iter = fetch(vm, a, true)?;
-    iter.borrow_mut().next(vm)?;
+    let (this, iter) = fetch(vm, a)?;
+    ensure_rewound(vm, &this, &iter)?;
+    // Advance the index first to match foreach behaviour.
+    with_state(&this, |s| s.index.set(s.index.get() + 1));
+    iter.move_forward(vm)?;
     Ok(Value::Null)
 }
 
 fn ii_valid(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
-    let iter = fetch(vm, a, true)?;
-    let ok = iter.borrow_mut().valid(vm)?;
-    Ok(Value::Bool(ok))
+    let (this, iter) = fetch(vm, a)?;
+    ensure_rewound(vm, &this, &iter)?;
+    Ok(Value::Bool(iter.valid(vm)?))
 }
 
 fn ii_rewind(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
-    let iter = fetch(vm, a, false)?;
-    iter.borrow_mut().rewind(vm)?;
+    let (this, iter) = fetch(vm, a)?;
+    with_state(&this, |s| s.rewind_called.set(true));
+    if !iter.can_rewind() {
+        // Allow calling rewind() if no iteration has happened yet, even if
+        // the iterator does not support rewinding.
+        if with_state(&this, |s| s.index.get()) != 0 {
+            return Err(vm.throw_error("Error", "Iterator does not support rewinding"));
+        }
+        return Ok(Value::Null);
+    }
+    iter.rewind(vm)?;
+    with_state(&this, |s| s.index.set(0));
     Ok(Value::Null)
 }
 
-/// `foreach` over an `InternalIterator` drives the wrapped iterator.
+/// `foreach` over an `InternalIterator` drives the wrapped iterator; like
+/// `zend_user_it_get_iterator` it counts as having called `rewind()`.
 fn ii_get_iterator(vm: &mut Vm, o: &ObjRef, by_ref: bool) -> PResult<Rc<dyn Any>> {
     if by_ref {
-        return Err(vm.throw_error("Error", "An iterator cannot be used with foreach by reference"));
+        return Err(by_ref_error(vm));
     }
-    // foreach calls rewind() first (zend_user_it_get_iterator).
-    let iter = o.native::<State>().map(|s| {
+    let iter = o.native::<State>().and_then(|s| {
         s.rewind_called.set(true);
         s.iter.clone()
     });
     match iter {
-        Some(iter) => Ok(iter),
+        Some(iter) => Ok(iterator_any(iter)),
         None => Err(vm.throw_error(
             "Error",
             "The InternalIterator object has not been properly initialized",
@@ -160,11 +240,13 @@ static II_REWIND: NativeFunction = NativeFunction {
     handler: ii_rewind,
 };
 
+/// Registers `final class InternalIterator implements Iterator`
+/// (`@not-serializable`), once.
 pub fn register(r: &mut Registry<'_>) {
-    let mut ce = ClassEntry::new(
-        "InternalIterator",
-        class_flags::FINAL | class_flags::NOT_SERIALIZABLE,
-    );
+    if r.find_class(INTERNAL_ITERATOR).is_some() {
+        return;
+    }
+    let mut ce = ClassEntry::new(INTERNAL_ITERATOR, class_flags::FINAL | class_flags::NOT_SERIALIZABLE);
     if let Some(iterator) = r.find_class("Iterator") {
         for sub in iterator.interfaces.clone() {
             ce.interfaces.push(sub);
@@ -173,12 +255,14 @@ pub fn register(r: &mut Registry<'_>) {
     }
     ce.add_method(Function::native_method(
         &II_CONSTRUCT,
-        "InternalIterator",
+        INTERNAL_ITERATOR,
         member_flags::PRIVATE | fn_flags::CTOR,
     ));
     for nf in [&II_CURRENT, &II_KEY, &II_NEXT, &II_VALID, &II_REWIND] {
-        ce.add_method(Function::native_method(nf, "InternalIterator", member_flags::PUBLIC));
+        ce.add_method(Function::native_method(nf, INTERNAL_ITERATOR, member_flags::PUBLIC));
     }
+    ce.handlers.create_object = Some(create);
+    ce.handlers.clone_obj = Some(clone_forbidden);
     ce.handlers.get_iterator = Some(ii_get_iterator);
     r.class(ce);
 }

@@ -1524,8 +1524,12 @@ impl Vm {
             Some((self.current_file.clone(), self.current_line))
         };
         let placed = self.place_native_args(func, call)?;
-        if func.has_flag(fn_flags::DEPRECATED) {
+        if func.has_flag(fn_flags::DEPRECATED) && func.deprecation_note().is_some() {
             // `zend_deprecated_function` (ZEND_DO_ICALL, before the handler).
+            // Only functions registered with their `#[\Deprecated]` data
+            // (Registry::deprecated_function, Function::deprecated) are
+            // reported here; a bare DEPRECATED flag means the handler emits
+            // its own message.
             self.engine_deprecated(func.deprecation_message())?;
         }
         let frame = Frame {

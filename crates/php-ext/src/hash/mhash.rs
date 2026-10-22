@@ -4,7 +4,6 @@
 //! `mhash_count()`.
 
 use php_hash::{HashAlgorithm, HashOptions};
-use php_runtime::class::fn_flags;
 use php_runtime::{Args, NativeFunction, PResult, PhpStr, Registry, Value, Vm};
 
 use super::{check_allocation, digest_value, hmac_digest};
@@ -190,7 +189,8 @@ pub(super) fn register(r: &mut Registry) {
         &MHASH_COUNT,
         &MHASH,
     ] {
-        r.function_with_flags(nf, fn_flags::DEPRECATED);
+        // #[\Deprecated(since: '8.1')]
+        r.deprecated_function(nf, "8.1", "");
     }
     for (value, entry) in MHASH_TO_HASH.iter().enumerate() {
         if let Some((mhash_name, _)) = entry {

@@ -233,6 +233,16 @@ impl Function {
         self.flags & member_flags::PPP_MASK
     }
 
+    /// Marks a built-in function or method `#[\Deprecated(since, message)]`
+    /// (pass `""` for an absent argument): calls then emit
+    /// "Method C::m() is deprecated since X.Y, message" before the handler
+    /// runs, as `zend_deprecated_function` does.
+    pub fn deprecated(mut self, since: &'static str, message: &'static str) -> Function {
+        self.flags |= fn_flags::DEPRECATED;
+        self.attributes.push(Rc::new(DeprecationNote { since, message }));
+        self
+    }
+
     /// The deprecation note of a built-in function, if any.
     pub fn deprecation_note(&self) -> Option<&DeprecationNote> {
         self.attributes
@@ -466,15 +476,59 @@ pub type GetPropertyPtrFn = fn(&mut Vm, &ObjRef, &PhpStr) -> PResult<PropertyPtr
 /// `get_method` + call: `Ok(None)` selects the standard method lookup.
 pub type CallMethodFn = fn(&mut Vm, &ObjRef, &PhpStr, &[Value]) -> PResult<Option<Value>>;
 
-/// An iterator produced by [`ObjectHandlers::get_iterator`]. The handler
-/// returns it as `Rc<RefCell<Box<dyn InternalIterator>>>` inside the
-/// `Rc<dyn Any>` (`zend_object_iterator`), and `foreach` drives it.
+/// `zend_object_iterator_funcs`: the iterator an internal class's
+/// [`ObjectHandlers::get_iterator`] returns, as `Rc<dyn ObjectIterator>`
+/// stored in the handler's `Rc<dyn Any>` (see
+/// [`crate::interp::internal_iterator::iterator_any`]). Implementors keep
+/// their position in `Cell`s so the iterator can be shared and re-entered
+/// from PHP code. `foreach` drives it directly and `InternalIterator`
+/// wraps it for `IteratorAggregate::getIterator()`.
+pub trait ObjectIterator {
+    /// `funcs->valid`.
+    fn valid(&self, vm: &mut Vm) -> PResult<bool>;
+    /// `funcs->get_current_data`; `Ok(None)` is a `NULL` result (`foreach`
+    /// stops, `InternalIterator::current()` returns `null`).
+    fn current(&self, vm: &mut Vm) -> PResult<Option<Value>>;
+    /// `funcs->get_current_key`; `Ok(None)` when the iterator has no key
+    /// function (the iteration index is used instead).
+    fn key(&self, vm: &mut Vm) -> PResult<Option<Value>>;
+    /// `funcs->move_forward`.
+    fn move_forward(&self, vm: &mut Vm) -> PResult<()>;
+    /// `funcs->rewind` (only called when [`ObjectIterator::can_rewind`]).
+    fn rewind(&self, vm: &mut Vm) -> PResult<()>;
+    /// Whether `funcs->rewind` is set.
+    fn can_rewind(&self) -> bool {
+        true
+    }
+}
+
+/// The older, `&mut self` iterator interface; a get_iterator handler may
+/// return it as `Rc<RefCell<Box<dyn InternalIterator>>>` inside the
+/// `Rc<dyn Any>`. It is adapted to [`ObjectIterator`].
 pub trait InternalIterator {
     fn rewind(&mut self, vm: &mut Vm) -> PResult<()>;
     fn valid(&mut self, vm: &mut Vm) -> PResult<bool>;
     fn current(&mut self, vm: &mut Vm) -> PResult<Value>;
     fn key(&mut self, vm: &mut Vm) -> PResult<Value>;
     fn next(&mut self, vm: &mut Vm) -> PResult<()>;
+}
+
+impl ObjectIterator for std::cell::RefCell<Box<dyn InternalIterator>> {
+    fn valid(&self, vm: &mut Vm) -> PResult<bool> {
+        self.borrow_mut().valid(vm)
+    }
+    fn current(&self, vm: &mut Vm) -> PResult<Option<Value>> {
+        self.borrow_mut().current(vm).map(Some)
+    }
+    fn key(&self, vm: &mut Vm) -> PResult<Option<Value>> {
+        self.borrow_mut().key(vm).map(Some)
+    }
+    fn move_forward(&self, vm: &mut Vm) -> PResult<()> {
+        self.borrow_mut().next(vm)
+    }
+    fn rewind(&self, vm: &mut Vm) -> PResult<()> {
+        self.borrow_mut().rewind(vm)
+    }
 }
 
 /// Fetch mode for `read_dimension` (`BP_VAR_R`, `BP_VAR_IS`, `BP_VAR_W`, `BP_VAR_RW`).
