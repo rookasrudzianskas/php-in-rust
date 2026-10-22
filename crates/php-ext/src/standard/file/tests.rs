@@ -970,3 +970,60 @@ fn fputcsv_and_fgetcsv_on_files() {
         b"a,\"b c\",\"q\"\"uote\",5\n"
     );
 }
+
+#[test]
+fn fsync_fdatasync_and_fflush() {
+    // fsync.phpt / fdatasync.phpt
+    let mut t = TestVm::new();
+    let d = scratch("fsync");
+    let f = format!("{d}/s");
+    let fp = t.call("fopen", vec![s(&f), s("w")]).unwrap();
+    assert_eq!(
+        t.call("fwrite", vec![fp.clone(), s("first line")])
+            .unwrap()
+            .as_int(),
+        Some(10)
+    );
+    for func in ["fsync", "fdatasync", "fflush"] {
+        assert_eq!(
+            t.call(func, vec![fp.clone()]).unwrap().as_bool(),
+            Some(true),
+            "{func}"
+        );
+    }
+    assert_eq!(t.call("readfile", vec![s(&f)]).unwrap().as_int(), Some(10));
+    assert_eq!(t.output(), "first line");
+    t.call("fclose", vec![fp]).unwrap();
+    let m = t.call("fopen", vec![s("php://memory"), s("w")]).unwrap();
+    for func in ["fsync", "fdatasync"] {
+        assert_eq!(
+            t.call(func, vec![m.clone()]).unwrap().as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            t.output(),
+            format!("\nWarning: {func}(): Can't fsync this stream! in /t.php on line 3\n")
+        );
+    }
+    assert_eq!(
+        t.call("fflush", vec![m.clone()]).unwrap().as_bool(),
+        Some(true)
+    );
+    let (cls, msg) = thrown(t.call("ftruncate", vec![m, Value::Int(-1)]));
+    assert_eq!(cls, "ValueError");
+    assert_eq!(
+        msg,
+        "ftruncate(): Argument #2 ($size) must be greater than or equal to 0"
+    );
+}
+
+#[test]
+fn umask_returns_previous_mask() {
+    let mut t = TestVm::new();
+    let cur = t.call("umask", vec![]).unwrap().as_int().unwrap();
+    assert_eq!(t.call("umask", vec![]).unwrap().as_int(), Some(cur));
+    assert_eq!(
+        t.call("umask", vec![Value::Int(cur)]).unwrap().as_int(),
+        Some(cur)
+    );
+}
