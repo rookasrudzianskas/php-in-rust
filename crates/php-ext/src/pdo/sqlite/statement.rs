@@ -300,7 +300,7 @@ impl StmtMethods for SqliteStmt {
                 "explain mode must be one of the Pdo\\Sqlite::EXPLAIN_MODE_* constants",
             ));
         }
-        Ok(self.stmt.explain(mode as i32) == ffi::SQLITE_OK)
+        Ok(self.stmt.explain_vm(vm, mode as i32) == ffi::SQLITE_OK)
     }
 
     fn supports_get_attribute(&self) -> bool {

@@ -8,6 +8,7 @@ mod fetch;
 mod harness;
 mod sqlite;
 mod statement;
+mod subclasses;
 
 macro_rules! phpt {
     ($path:literal) => {
