@@ -503,3 +503,96 @@ fn filters_append_and_remove_without_factories() {
         "stream_filter_remove(): supplied resource is not a valid stream filter resource"
     );
 }
+
+#[test]
+fn meta_data_for_directories_and_servers() {
+    // stream_get_meta_data_dir_basic.phpt
+    let mut t = TestVm::new();
+    let d = scratch("metadir");
+    let h = t.call("opendir", vec![s(&d)]).unwrap();
+    let m = t.call("stream_get_meta_data", vec![h]).unwrap();
+    assert_eq!(
+        keys(&m),
+        [
+            "timed_out",
+            "blocked",
+            "eof",
+            "wrapper_type",
+            "stream_type",
+            "mode",
+            "unread_bytes",
+            "seekable"
+        ]
+    );
+    let a = m.as_array().unwrap();
+    assert_eq!(bytes(a.get_str(b"stream_type").unwrap()), b"dir");
+    assert_eq!(bytes(a.get_str(b"mode").unwrap()), b"r");
+    assert_eq!(a.get_str(b"seekable").unwrap().as_bool(), Some(true));
+    assert_eq!(a.get_str(b"eof").unwrap().as_bool(), Some(false));
+    // stream_get_meta_data_socket_basic.phpt
+    let srv = t
+        .call("stream_socket_server", vec![s("tcp://127.0.0.1:0")])
+        .unwrap();
+    let m = t.call("stream_get_meta_data", vec![srv]).unwrap();
+    assert_eq!(
+        keys(&m),
+        [
+            "timed_out",
+            "blocked",
+            "eof",
+            "stream_type",
+            "mode",
+            "unread_bytes",
+            "seekable",
+            "uri"
+        ]
+    );
+    let a = m.as_array().unwrap();
+    assert_eq!(bytes(a.get_str(b"stream_type").unwrap()), b"tcp_socket");
+    assert_eq!(bytes(a.get_str(b"mode").unwrap()), b"r+");
+    assert_eq!(a.get_str(b"seekable").unwrap().as_bool(), Some(false));
+}
+
+#[test]
+fn temp_stream_keeps_position_when_switching_to_file() {
+    // temp_stream_seek.phpt
+    let mut t = TestVm::new();
+    let f = t
+        .call("fopen", vec![s("php://temp/maxmemory:1024"), s("r+")])
+        .unwrap();
+    t.call("fwrite", vec![f.clone(), Value::from("1".repeat(738))])
+        .unwrap();
+    t.call("fseek", vec![f.clone(), Value::Int(0), Value::Int(0)])
+        .unwrap();
+    t.call("fwrite", vec![f.clone(), Value::from("2".repeat(512))])
+        .unwrap();
+    t.call("fseek", vec![f.clone(), Value::Int(0), Value::Int(0)])
+        .unwrap();
+    assert_eq!(
+        bytes(&t.call("fread", vec![f.clone(), Value::Int(16)]).unwrap()),
+        b"2222222222222222"
+    );
+    t.call("fseek", vec![f.clone(), Value::Int(0), Value::Int(2)])
+        .unwrap();
+    assert_eq!(t.call("ftell", vec![f]).unwrap().as_int(), Some(738));
+}
+
+#[test]
+fn socket_pair_fread() {
+    // stream_socket_pair.phpt
+    let mut t = TestVm::new();
+    let p = t
+        .call(
+            "stream_socket_pair",
+            vec![Value::Int(1), Value::Int(1), Value::Int(0)],
+        )
+        .unwrap();
+    let a = p.as_array().unwrap();
+    let (x, y) = (a.get_int(0).unwrap().clone(), a.get_int(1).unwrap().clone());
+    t.call("fwrite", vec![x.clone(), s("foo")]).unwrap();
+    assert_eq!(
+        bytes(&t.call("fread", vec![y, Value::Int(3)]).unwrap()),
+        b"foo"
+    );
+    assert_eq!(t.call("fclose", vec![x]).unwrap().as_bool(), Some(true));
+}
