@@ -742,7 +742,7 @@ fn iterator_iterator_exception_in_current() {
     let it = new_obj(vm, "IteratorIterator", vec![Value::Object(inner)]).unwrap();
     assert_eq!(
         thrown(foreach_kv(vm, &it).map(|_| Value::Null)),
-        ("Exception".into(), "current".into())
+        ("Exception".into(), "BlaIterator::current()".into())
     );
     assert!(vm.call_method(&it, b"current", vec![]).unwrap().is_null());
     assert!(vm.call_method(&it, b"key", vec![]).unwrap().is_null());
