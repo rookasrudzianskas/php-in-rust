@@ -605,14 +605,13 @@ unsafe fn decode_sockaddr(p: *const std::ffi::c_void) -> Option<SockAddr> {
             target_os = "netbsd",
             target_os = "openbsd"
         )))]
-        let (family, v4_off, v6_off) = (
-            u16::from_ne_bytes([*b, *b.add(1)]) as i64,
-            4usize,
-            8usize,
-        );
+        let (family, v4_off, v6_off) = (u16::from_ne_bytes([*b, *b.add(1)]) as i64, 4usize, 8usize);
         let af_inet6: i64 = if cfg!(target_os = "macos") || cfg!(target_os = "ios") {
             30
-        } else if cfg!(target_os = "freebsd") || cfg!(target_os = "netbsd") || cfg!(target_os = "openbsd") {
+        } else if cfg!(target_os = "freebsd")
+            || cfg!(target_os = "netbsd")
+            || cfg!(target_os = "openbsd")
+        {
             28
         } else {
             10
