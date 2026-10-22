@@ -38,6 +38,11 @@ pub(crate) fn statpage(vm: &mut Vm) -> PageStat {
     stat
 }
 
+/// `php_getuid()`.
+pub(crate) fn getuid(vm: &mut Vm) -> i64 {
+    statpage(vm).uid
+}
+
 /// `sapi_get_stat()`: `stat()` of the primary script.
 fn script_stat(vm: &mut Vm) -> Option<PageStat> {
     let path = script_path(vm)?;
@@ -165,7 +170,10 @@ mod tests {
     #[test]
     fn stats_the_main_script() {
         let mut t = TestVm::new();
-        set_main_script(&mut t.vm, concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
+        set_main_script(
+            &mut t.vm,
+            concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
+        );
         assert!(t.call("getmyinode", vec![]).unwrap().as_int().unwrap() > 0);
         assert!(t.call("getlastmod", vec![]).unwrap().as_int().unwrap() > 1_000_000_000);
     }

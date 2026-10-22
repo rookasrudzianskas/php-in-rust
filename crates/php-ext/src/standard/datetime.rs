@@ -43,15 +43,26 @@ mod tests {
     fn parses_and_reports_unparsed_tail() {
         let mut t = TestVm::new();
         let r = t
-            .call("strptime", vec![Value::str("2020-02-29 trailing"), Value::str("%Y-%m-%d")])
+            .call(
+                "strptime",
+                vec![Value::str("2020-02-29 trailing"), Value::str("%Y-%m-%d")],
+            )
             .unwrap();
         let out = t.output();
-        assert!(out.contains("Deprecated: Function strptime() is deprecated since 8.2"), "{out}");
-        let Value::Array(a) = r else { panic!("array expected") };
+        assert!(
+            out.contains("Deprecated: Function strptime() is deprecated since 8.2"),
+            "{out}"
+        );
+        let Value::Array(a) = r else {
+            panic!("array expected")
+        };
         assert_eq!(a.get_str(b"tm_year").unwrap().as_int(), Some(120));
         assert_eq!(a.get_str(b"tm_mon").unwrap().as_int(), Some(1));
         assert_eq!(a.get_str(b"tm_mday").unwrap().as_int(), Some(29));
-        assert_eq!(a.get_str(b"unparsed").unwrap().as_str().unwrap(), " trailing");
+        assert_eq!(
+            a.get_str(b"unparsed").unwrap().as_str().unwrap(),
+            " trailing"
+        );
     }
 
     #[test]
