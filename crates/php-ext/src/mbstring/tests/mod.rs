@@ -1,0 +1,87 @@
+//! Unit tests of the mbstring functions, with expectations taken from
+//! php-src's `ext/mbstring/tests/*.phpt`.
+
+mod functions;
+
+use php_runtime::{PhpArray, Value};
+
+use crate::testing::TestVm;
+
+/// `var_dump($v)` output.
+pub fn dump(t: &mut TestVm, v: Value) -> String {
+    t.output();
+    call(t, "var_dump", vec![v]);
+    t.output()
+}
+
+/// Calls `name` and returns its `var_dump` (plus any diagnostics printed).
+pub fn vd(t: &mut TestVm, name: &str, args: Vec<Value>) -> String {
+    let v = call(t, name, args);
+    let before = t.output();
+    format!("{before}{}", dump(t, v))
+}
+
+/// An int result.
+pub fn int(v: &Value) -> i64 {
+    match v {
+        Value::Int(i) => *i,
+        other => panic!("expected int, got {other:?}"),
+    }
+}
+
+/// A PHP string from bytes.
+pub fn b(s: &[u8]) -> Value {
+    Value::bytes(s)
+}
+
+/// A PHP string from text.
+pub fn s(s: &str) -> Value {
+    Value::from(s)
+}
+
+/// Calls `name` and unwraps the result.
+pub fn call(t: &mut TestVm, name: &str, args: Vec<Value>) -> Value {
+    match t.call(name, args) {
+        Ok(v) => v,
+        Err(e) => panic!("{name}() failed: {e:?} / output: {}", t.output()),
+    }
+}
+
+/// The bytes of a string result.
+pub fn bytes(v: &Value) -> Vec<u8> {
+    match v {
+        Value::String(s) => s.to_vec(),
+        other => panic!("expected string, got {other:?}"),
+    }
+}
+
+/// A string result as text.
+pub fn text(v: &Value) -> String {
+    String::from_utf8_lossy(&bytes(v)).into_owned()
+}
+
+/// Lowercase hex of a string result (`bin2hex`).
+pub fn hex(v: &Value) -> String {
+    bytes(v).iter().map(|c| format!("{c:02x}")).collect()
+}
+
+/// Decodes hex text.
+pub fn unhex(h: &str) -> Vec<u8> {
+    (0..h.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+/// A list array of strings.
+pub fn list(items: &[&str]) -> Value {
+    Value::array(items.iter().map(|i| Value::from(*i)).collect::<PhpArray>())
+}
+
+/// The values of an array result as strings.
+pub fn strings(v: &Value) -> Vec<String> {
+    match v {
+        Value::Array(a) => a.values().map(text).collect(),
+        other => panic!("expected array, got {other:?}"),
+    }
+}
