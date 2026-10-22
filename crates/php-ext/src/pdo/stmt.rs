@@ -880,7 +880,7 @@ fn do_fetch_rows(
             if flags & FETCH_CLASSTYPE != 0 {
                 let name = fetch_value(vm, stmt, dbh, column_index, None)?;
                 column_index += 1;
-                ce = None;
+                // Only a string column replaces the fetch class.
                 if let Value::String(s) = &name {
                     ce = vm.lookup_class(s)?;
                 }
