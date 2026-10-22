@@ -1237,6 +1237,17 @@ impl Stmt {
         unsafe { ffi::sqlite3_stmt_explain(self.raw, mode) }
     }
 
+    /// [`Stmt::explain`] with `vm` reachable by callbacks: switching modes
+    /// may re-prepare the statement, which consults the authorizer.
+    pub fn explain_vm(&mut self, vm: &mut Vm, mode: c_int) -> c_int {
+        if self.raw.is_null() {
+            return ffi::SQLITE_MISUSE;
+        }
+        let raw = self.raw;
+        // SAFETY: live statement.
+        with_vm(vm, || unsafe { ffi::sqlite3_stmt_explain(raw, mode) })
+    }
+
     /// `sqlite3_sql()`.
     pub fn sql(&self) -> Option<&[u8]> {
         if self.raw.is_null() {

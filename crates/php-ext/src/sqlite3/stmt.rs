@@ -85,13 +85,18 @@ pub(crate) fn free_list_dtor(core: &StmtRef) {
     drop(stmt);
 }
 
-/// `sqlite3_step()`. The handle is taken out of the core while SQLite runs
-/// so that callbacks re-entering the extension never meet a borrowed core.
-pub(crate) fn step(vm: &mut Vm, core: &StmtRef) -> c_int {
+/// Runs a SQLite call that may invoke PHP callbacks. The handle is taken
+/// out of the core meanwhile, so callbacks re-entering the extension never
+/// meet a borrowed core.
+fn with_callbacks(
+    vm: &mut Vm,
+    core: &StmtRef,
+    f: impl FnOnce(&mut Vm, &mut capi::Stmt) -> c_int,
+) -> c_int {
     let Some(mut s) = core.borrow_mut().stmt.take() else {
         return ffi::SQLITE_MISUSE;
     };
-    let rc = s.step(vm);
+    let rc = f(vm, &mut s);
     let mut c = core.borrow_mut();
     if c.initialised && c.stmt.is_none() {
         c.stmt = Some(s);
@@ -102,6 +107,11 @@ pub(crate) fn step(vm: &mut Vm, core: &StmtRef) -> c_int {
         drop(s);
     }
     rc
+}
+
+/// `sqlite3_step()`.
+pub(crate) fn step(vm: &mut Vm, core: &StmtRef) -> c_int {
+    with_callbacks(vm, core, |vm, s| s.step(vm))
 }
 
 /// `sqlite3_reset()`.
@@ -434,8 +444,9 @@ fn set_explain(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
         ));
     }
     let ctx = checked_stmt(vm, &this(args))?;
-    let rc = with_stmt(&ctx.core, |s| s.explain(mode as c_int));
-    Ok(Value::Bool(rc == ffi::SQLITE_OK))
+    let p = pending(&ctx);
+    let rc = with_callbacks(vm, &ctx.core, |vm, s| s.explain_vm(vm, mode as c_int));
+    p.finish(Value::Bool(rc == ffi::SQLITE_OK))
 }
 
 fn get_sql(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
