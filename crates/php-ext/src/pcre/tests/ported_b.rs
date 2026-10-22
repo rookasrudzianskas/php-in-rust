@@ -250,11 +250,8 @@ fn bug76514_recursive_json_pattern() {
     );
     let mut pattern = b"{".to_vec();
     pattern.extend_from_slice(&head);
-    pattern.extend_from_slice(
-        &p.call("preg_quote", vec![s("\"require\"")])
-            .as_str()
-            .unwrap(),
-    );
+    let quoted = p.call("preg_quote", vec![s("\"require\"")]);
+    pattern.extend_from_slice(quoted.as_str().unwrap());
     pattern.extend_from_slice(&tail);
     let m = nref();
     let r = p.call(
@@ -521,9 +518,7 @@ fn delimiters() {
         b"{",
         b"\0\0",
     ] {
-        let subject = if pattern == b"@\\@\\@@" {
-            "@@"
-        } else if pattern == b"//z" {
+        let subject = if pattern == b"@\\@\\@@" || pattern == b"//z" {
             "@@"
         } else {
             ""

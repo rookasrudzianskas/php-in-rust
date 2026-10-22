@@ -100,6 +100,12 @@ impl P {
         &mut self.t.vm
     }
 
+    /// `new stdClass`.
+    pub fn std_object(&mut self) -> Value {
+        let class = self.t.vm.find_class("stdClass").expect("stdClass");
+        Value::Object(self.t.vm.instantiate(&class).expect("instantiate"))
+    }
+
     /// Installs `f` as the PHP callback `cb_rust<slot>` (slots 0..4) and
     /// returns its name for use as a `callable` argument. This stands in for
     /// the closures and functions the phpt scripts define; `f` gets the call
