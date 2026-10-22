@@ -1386,25 +1386,40 @@ impl Stream {
             out.truncate(len);
             return Ok(Some(out));
         }
-        let mut buf = vec![0u8; CHUNK_SIZE];
-        loop {
-            let want = if maxlen > 0 {
-                (maxlen - out.len()).min(CHUNK_SIZE)
-            } else {
-                CHUNK_SIZE
-            };
-            if want == 0 {
-                break;
+        // Size the buffer from fstat like php-src (the read sizes show up in
+        // "Read of N bytes failed" notices).
+        let mut buflen = match self.stat(vm)? {
+            Some(sb) if sb.size > 0 => {
+                let n = (sb.size - self.st.position).max(0) as usize + CHUNK_SIZE;
+                if maxlen > 0 && n > maxlen { maxlen } else { n }
             }
-            let r = self.read(vm, &mut buf[..want])?;
+            _ => CHUNK_SIZE,
+        };
+        out.resize(buflen, 0);
+        let min_room = CHUNK_SIZE / 4;
+        let mut len = 0usize;
+        loop {
+            let r = self.read(vm, &mut out[len..buflen])?;
             if r <= 0 {
                 break;
             }
-            out.extend_from_slice(&buf[..r as usize]);
+            len += r as usize;
+            if len + min_room >= buflen {
+                if maxlen == len {
+                    break;
+                }
+                buflen = if maxlen > 0 && buflen + CHUNK_SIZE > maxlen {
+                    maxlen
+                } else {
+                    buflen + CHUNK_SIZE
+                };
+                out.resize(buflen, 0);
+            }
         }
-        if out.is_empty() {
+        if len == 0 {
             return Ok(None);
         }
+        out.truncate(len);
         Ok(Some(out))
     }
 

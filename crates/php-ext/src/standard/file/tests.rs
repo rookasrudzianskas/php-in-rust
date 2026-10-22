@@ -196,9 +196,12 @@ fn file_put_and_get_contents() {
     // a directory
     let r = t.call("file_get_contents", vec![s(&d)]).unwrap();
     assert_eq!(as_bytes(&r), b"");
-    assert_eq!(
-        t.output(),
-        "\nNotice: file_get_contents(): Read of 8192 bytes failed with errno=21 Is a directory in /t.php on line 3\n"
+    // "Read of %d bytes": the size is the directory's st_size + 8192
+    let out = t.output();
+    assert!(
+        out.starts_with("\nNotice: file_get_contents(): Read of ")
+            && out.ends_with(" bytes failed with errno=21 Is a directory in /t.php on line 3\n"),
+        "{out}"
     );
 }
 
@@ -676,7 +679,10 @@ fn data_urls_are_not_writable() {
     // bug79467.phpt
     let mut t = TestVm::new();
     let r = t
-        .call("file_put_contents", vec![s("data://text/plain,cccc"), s("data")])
+        .call(
+            "file_put_contents",
+            vec![s("data://text/plain,cccc"), s("data")],
+        )
         .unwrap();
     assert_eq!(r.as_bool(), Some(false));
     assert_eq!(
@@ -689,7 +695,9 @@ fn data_urls_are_not_writable() {
 fn remote_file_urls_are_rejected() {
     // fopen_variation14.phpt
     let mut t = TestVm::new();
-    let r = t.call("fopen", vec![s("file://dir/x.tmp"), s("r")]).unwrap();
+    let r = t
+        .call("fopen", vec![s("file://dir/x.tmp"), s("r")])
+        .unwrap();
     assert_eq!(r.as_bool(), Some(false));
     assert_eq!(
         t.output(),
@@ -698,10 +706,15 @@ fn remote_file_urls_are_rejected() {
     let d = scratch("fileurl");
     let f = format!("{d}/x");
     std::fs::write(&f, "via url").unwrap();
-    let r = t.call("file_get_contents", vec![s(&format!("file://{f}"))]).unwrap();
+    let r = t
+        .call("file_get_contents", vec![s(&format!("file://{f}"))])
+        .unwrap();
     assert_eq!(as_bytes(&r), b"via url");
     let r = t
-        .call("file_get_contents", vec![s(&format!("file://localhost{f}"))])
+        .call(
+            "file_get_contents",
+            vec![s(&format!("file://localhost{f}"))],
+        )
         .unwrap();
     assert_eq!(as_bytes(&r), b"via url");
 }
@@ -714,7 +727,9 @@ fn write_to_read_only_stream_notices() {
     std::fs::write(&f, "x").unwrap();
     let fp = t.call("fopen", vec![s(&f), s("r")]).unwrap();
     assert_eq!(
-        t.call("fwrite", vec![fp.clone(), s("data")]).unwrap().as_bool(),
+        t.call("fwrite", vec![fp.clone(), s("data")])
+            .unwrap()
+            .as_bool(),
         Some(false)
     );
     let out = t.output();
@@ -770,7 +785,9 @@ fn include_path_lookup() {
         .call("file_get_contents", vec![s("inc.txt"), Value::Bool(true)])
         .unwrap();
     assert_eq!(as_bytes(&r), b"found");
-    let r = t.call("stream_resolve_include_path", vec![s("inc.txt")]).unwrap();
+    let r = t
+        .call("stream_resolve_include_path", vec![s("inc.txt")])
+        .unwrap();
     assert_eq!(as_bytes(&r), format!("{d}/inc.txt").as_bytes());
     let fp = t
         .call("fopen", vec![s("inc.txt"), s("r"), Value::Bool(true)])
@@ -807,7 +824,9 @@ fn flock_would_block_between_handles() {
     let a = t.call("fopen", vec![s(&f), s("w")]).unwrap();
     let b = t.call("fopen", vec![s(&f), s("r")]).unwrap();
     assert_eq!(
-        t.call("flock", vec![a.clone(), Value::Int(2)]).unwrap().as_bool(),
+        t.call("flock", vec![a.clone(), Value::Int(2)])
+            .unwrap()
+            .as_bool(),
         Some(true)
     );
     let wb = Value::Ref(PhpRef::new(Value::Null));
@@ -818,7 +837,9 @@ fn flock_would_block_between_handles() {
     assert_eq!(wb.unref().as_int(), Some(1));
     t.call("fclose", vec![a]).unwrap();
     assert_eq!(
-        t.call("flock", vec![b, Value::Int(2 | 4)]).unwrap().as_bool(),
+        t.call("flock", vec![b, Value::Int(2 | 4)])
+            .unwrap()
+            .as_bool(),
         Some(true)
     );
 }
@@ -865,7 +886,9 @@ fn tmpfile_metadata_and_fstat() {
     assert_eq!(st.get_int(7).and_then(|v| v.as_int()), Some(5));
     assert_eq!(st.get_str(b"size").and_then(|v| v.as_int()), Some(5));
     assert_eq!(
-        t.call("ftruncate", vec![fp.clone(), Value::Int(2)]).unwrap().as_bool(),
+        t.call("ftruncate", vec![fp.clone(), Value::Int(2)])
+            .unwrap()
+            .as_bool(),
         Some(true)
     );
     t.call("fclose", vec![fp]).unwrap();
@@ -881,8 +904,14 @@ fn mac_line_endings_with_auto_detect() {
     std::fs::write(&f, "a\rb\rc").unwrap();
     t.vm.ini_set("auto_detect_line_endings", "1");
     let fp = t.call("fopen", vec![s(&f), s("r")]).unwrap();
-    assert_eq!(as_bytes(&t.call("fgets", vec![fp.clone()]).unwrap()), b"a\r");
-    assert_eq!(as_bytes(&t.call("fgets", vec![fp.clone()]).unwrap()), b"b\r");
+    assert_eq!(
+        as_bytes(&t.call("fgets", vec![fp.clone()]).unwrap()),
+        b"a\r"
+    );
+    assert_eq!(
+        as_bytes(&t.call("fgets", vec![fp.clone()]).unwrap()),
+        b"b\r"
+    );
     assert_eq!(as_bytes(&t.call("fgets", vec![fp]).unwrap()), b"c");
     let r = t.call("file", vec![s(&f)]).unwrap();
     assert_eq!(r.as_array().unwrap().len(), 3);
