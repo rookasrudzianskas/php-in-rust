@@ -1488,6 +1488,10 @@ impl Vm {
             Some((self.current_file.clone(), self.current_line))
         };
         let placed = self.place_native_args(func, call)?;
+        if func.has_flag(fn_flags::DEPRECATED) {
+            // `zend_deprecated_function` (ZEND_DO_ICALL, before the handler).
+            self.engine_deprecated(func.deprecation_message())?;
+        }
         let frame = Frame {
             function: Some(func.clone()),
             name: func.name.clone(),
@@ -1572,6 +1576,26 @@ impl<'vm> Registry<'vm> {
         f.flags |= flags;
         let f = Rc::new(f);
         // Surface malformed stub signatures at registration time in debug builds.
+        #[cfg(debug_assertions)]
+        let _ = f.signature();
+        self.vm.functions.insert(lower(&f.name), f.clone());
+        f
+    }
+
+    /// Registers a built-in function marked `#[\Deprecated(since: ..., message: ...)]`
+    /// in its stub (pass `""` for absent arguments). Calls emit php-src's
+    /// "Function f() is deprecated since X.Y, message" before running.
+    pub fn deprecated_function(
+        &mut self,
+        nf: &'static NativeFunction,
+        since: &'static str,
+        message: &'static str,
+    ) -> Rc<Function> {
+        let mut f = Function::native(nf);
+        f.flags |= fn_flags::DEPRECATED;
+        f.attributes
+            .push(Rc::new(crate::class::DeprecationNote { since, message }));
+        let f = Rc::new(f);
         #[cfg(debug_assertions)]
         let _ = f.signature();
         self.vm.functions.insert(lower(&f.name), f.clone());

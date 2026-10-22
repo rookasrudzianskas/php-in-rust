@@ -75,6 +75,7 @@
 pub mod builtins;
 pub mod class;
 pub mod constants;
+pub mod enums;
 pub mod errors;
 pub mod ini;
 pub mod native;

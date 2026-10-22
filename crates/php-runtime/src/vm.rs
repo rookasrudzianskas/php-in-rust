@@ -522,10 +522,10 @@ impl Vm {
         };
         let (value, flags, msg, cname) = (c.value.clone(), c.flags, c.deprecation, c.name.clone());
         if flags & const_flags::DEPRECATED != 0 {
-            let m = match msg {
-                Some(m) => format!("Constant {cname} is deprecated, {m}"),
-                None => format!("Constant {cname} is deprecated"),
-            };
+            let m = format!(
+                "Constant {cname} is deprecated{}",
+                crate::class::deprecation_suffix_text(msg.unwrap_or(""))
+            );
             self.engine_deprecated(m)?;
         }
         Ok(Some(value))
@@ -565,6 +565,16 @@ impl Vm {
                 ),
             )),
             crate::class::ConstValue::Unevaluated(expr) => {
+                // Enum cases with a known backing value are created here, so
+                // they work without an interpreter and stay lazy.
+                if let Some(init) = expr.downcast_ref::<crate::enums::EnumCaseInit>() {
+                    if init.expr.is_none() {
+                        let obj = crate::enums::new_case_object(&ce, init, None);
+                        let v = Value::Object(obj);
+                        *c.value.borrow_mut() = crate::class::ConstValue::Value(v.clone());
+                        return Ok(Some(v));
+                    }
+                }
                 *c.value.borrow_mut() = crate::class::ConstValue::Evaluating;
                 let host = self.host.clone();
                 match host.eval_class_constant(self, &ce, &expr) {

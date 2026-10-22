@@ -4,6 +4,7 @@
 
 mod arrays;
 mod convert;
+mod enums;
 mod errors;
 mod objects;
 mod ops;

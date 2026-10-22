@@ -40,6 +40,11 @@ pub mod class_flags {
     pub const NO_DYNAMIC_INSTANTIATION: u32 = 1 << 10;
     /// Constants have been evaluated.
     pub const CONSTANTS_UPDATED: u32 = 1 << 11;
+    /// Dynamic properties are an Error (`ZEND_ACC_NO_DYNAMIC_PROPERTIES`):
+    /// "Cannot create dynamic property X::$y".
+    pub const NO_DYNAMIC_PROPERTIES: u32 = 1 << 12;
+    /// A user class whose inheritance has been resolved (`ZEND_ACC_LINKED`).
+    pub const LINKED: u32 = 1 << 13;
 }
 
 /// Member flags (visibility etc.) shared by methods, properties and constants.
@@ -63,6 +68,10 @@ pub mod member_flags {
     pub const PROMOTED: u32 = 1 << 12;
     /// Enum case constant.
     pub const ENUM_CASE: u32 = 1 << 13;
+    /// A redeclared property/method shadowing a parent's private member (`ZEND_ACC_CHANGED`).
+    pub const CHANGED: u32 = 1 << 14;
+    /// `#[\Override]`.
+    pub const OVERRIDE: u32 = 1 << 15;
 }
 
 /// Function flags (`ZEND_ACC_*` subset relevant to functions).
@@ -111,6 +120,45 @@ pub struct Function {
 
 /// Methods are functions with a scope and visibility flags.
 pub type Method = Function;
+
+/// `#[\Deprecated(message: ..., since: ...)]` of a built-in function, stored in
+/// [`Function::attributes`] by [`crate::Registry::deprecated_function`].
+#[derive(Clone, Debug)]
+pub struct DeprecationNote {
+    pub since: &'static str,
+    pub message: &'static str,
+}
+
+impl DeprecationNote {
+    /// The message suffix (`get_deprecation_suffix_from_attribute`):
+    /// `" since 8.1"`, `", use X instead"`, `" since 8.1, use X instead"`.
+    pub fn suffix(&self) -> String {
+        let mut s = String::new();
+        if !self.since.is_empty() {
+            s.push_str(" since ");
+            s.push_str(self.since);
+        }
+        if !self.message.is_empty() {
+            s.push_str(", ");
+            s.push_str(self.message);
+        }
+        s
+    }
+}
+
+/// Turns a stub-style deprecation description (`"since 8.4, the error level
+/// was removed"` or just a message) into the suffix php-src appends after
+/// "is deprecated".
+pub fn deprecation_suffix_text(desc: &str) -> String {
+    let d = desc.trim();
+    if d.is_empty() {
+        String::new()
+    } else if let Some(rest) = d.strip_prefix("since ") {
+        format!(" since {rest}")
+    } else {
+        format!(", {d}")
+    }
+}
 
 impl Function {
     /// A native function; the name comes from its stub signature.
@@ -183,6 +231,25 @@ impl Function {
 
     pub fn visibility(&self) -> u32 {
         self.flags & member_flags::PPP_MASK
+    }
+
+    /// The deprecation note of a built-in function, if any.
+    pub fn deprecation_note(&self) -> Option<&DeprecationNote> {
+        self.attributes
+            .iter()
+            .find_map(|a| a.downcast_ref::<DeprecationNote>())
+    }
+
+    /// `zend_deprecated_function` message: "Function f() is deprecated since 8.1".
+    pub fn deprecation_message(&self) -> String {
+        let suffix = self
+            .deprecation_note()
+            .map(DeprecationNote::suffix)
+            .unwrap_or_default();
+        match &self.scope {
+            Some(c) => format!("Method {c}::{}() is deprecated{suffix}", self.name),
+            None => format!("Function {}() is deprecated{suffix}", self.name),
+        }
     }
 
     /// `Class::method` or `function` as used in error messages

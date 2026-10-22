@@ -287,6 +287,7 @@ pub fn register_core(r: &mut Registry<'_>) {
     r.class(ClassEntry::new("Countable", class_flags::INTERFACE));
     r.class(ClassEntry::new("Serializable", class_flags::INTERFACE));
     r.class(ClassEntry::new("Stringable", class_flags::INTERFACE));
+    crate::enums::register_interfaces(r);
 
     exceptions::register(r);
 }
