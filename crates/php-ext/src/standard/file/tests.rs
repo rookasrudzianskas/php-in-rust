@@ -1027,3 +1027,43 @@ fn umask_returns_previous_mask() {
         Some(cur)
     );
 }
+
+#[test]
+fn file_put_contents_lock_and_resource_data() {
+    let mut t = TestVm::new();
+    let r = t
+        .call(
+            "file_put_contents",
+            vec![s("php://memory"), s("x"), Value::Int(2)],
+        )
+        .unwrap();
+    assert_eq!(r.as_bool(), Some(false));
+    assert_eq!(
+        t.output(),
+        "\nWarning: file_put_contents(): Exclusive locks may only be set for regular files in /t.php on line 3\n"
+    );
+    let d = scratch("fpclock");
+    let f = format!("{d}/l");
+    std::fs::write(&f, "old contents").unwrap();
+    // LOCK_EX opens with "c" and truncates after locking
+    let r = t
+        .call("file_put_contents", vec![s(&f), s("new"), Value::Int(2)])
+        .unwrap();
+    assert_eq!(r.as_int(), Some(3));
+    assert_eq!(std::fs::read(&f).unwrap(), b"new");
+    // a stream resource as the data
+    let src = t.call("fopen", vec![s("php://memory"), s("w+")]).unwrap();
+    t.call("fwrite", vec![src.clone(), s("from stream")])
+        .unwrap();
+    t.call("rewind", vec![src.clone()]).unwrap();
+    let r = t.call("file_put_contents", vec![s(&f), src]).unwrap();
+    assert_eq!(r.as_int(), Some(11));
+    assert_eq!(std::fs::read(&f).unwrap(), b"from stream");
+    // objects without __toString give false
+    let ce = t.vm.find_class("stdClass").unwrap();
+    let obj = php_runtime::ObjRef::new(ce);
+    let r = t
+        .call("file_put_contents", vec![s(&f), Value::Object(obj)])
+        .unwrap();
+    assert_eq!(r.as_bool(), Some(false));
+}
