@@ -319,6 +319,8 @@ pub struct ClassDef {
     pub declared: RefCell<Option<crate::class::ClassRef>>,
     /// Bumped when the class was early-bound at compile time.
     pub early_bound: Cell<bool>,
+    /// The declaring file uses `strict_types=1` (attribute arguments).
+    pub strict: bool,
 }
 
 pub struct TraitUseDef {

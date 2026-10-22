@@ -160,18 +160,14 @@ impl IntoRuntime for Flow {
     }
 }
 
-/// `#[\Deprecated]` on a userland function: E_USER_DEPRECATED at call time.
+/// `#[\Deprecated]` on a userland function: E_USER_DEPRECATED at call time
+/// (`zend_deprecated_function`).
 pub fn emit_user_deprecation(vm: &mut Vm, func: &Function) -> PResult<()> {
     let mut suffix = String::new();
     if let Some(ufn) = super::user_fn(func) {
         if let Some(a) = ufn.code.attributes.iter().find(|a| a.name.eq_ignore_ascii_case(b"Deprecated")) {
-            let (msg, since) = deprecated_args(vm, a)?;
-            if let Some(s) = since.filter(|s| !s.is_empty()) {
-                suffix.push_str(&format!(" since {s}"));
-            }
-            if let Some(m) = msg.filter(|m| !m.is_empty()) {
-                suffix.push_str(&format!(", {m}"));
-            }
+            let scope = ufn.scope_class().or_else(|| func.scope.as_ref().and_then(|s| vm.find_class(s)));
+            suffix = deprecation_suffix_in(vm, a, scope.as_ref(), ufn.code.strict())?;
         }
     }
     let msg = match &func.scope {
@@ -181,25 +177,158 @@ pub fn emit_user_deprecation(vm: &mut Vm, func: &Function) -> PResult<()> {
     vm.zend_error(level::E_USER_DEPRECATED, msg)
 }
 
-/// Evaluates `#[\Deprecated(message, since)]` arguments.
-pub fn deprecated_args(vm: &mut Vm, a: &AttrDef) -> PResult<(Option<String>, Option<String>)> {
-    let mut message = None;
-    let mut since = None;
-    for (i, (name, e)) in a.args.iter().enumerate() {
-        let v = eval_detached(vm, e, None)?;
-        let s = match v {
-            Value::String(s) => Some(s.to_string()),
-            _ => None,
-        };
-        match name.as_deref() {
-            Some(b"message") => message = s,
-            Some(b"since") => since = s,
-            None if i == 0 => message = s,
-            None if i == 1 => since = s,
-            _ => {}
+/// Evaluates `#[\Deprecated(message, since)]` arguments by constructing the
+/// attribute object (`zend_get_attribute_object`), so that
+/// `Deprecated::__construct()` validates the argument types.
+pub fn deprecated_args_in(
+    vm: &mut Vm,
+    a: &AttrDef,
+    scope: Option<&ClassRef>,
+    strict: bool,
+) -> PResult<(Option<String>, Option<String>)> {
+    if a.args.is_empty() {
+        return Ok((None, None));
+    }
+    let mut positional = Vec::new();
+    let mut named = Vec::new();
+    for (name, e) in &a.args {
+        let v = eval_detached(vm, e, scope)?;
+        match name {
+            Some(n) => named.push((n.clone(), v)),
+            None => positional.push(v),
         }
     }
-    Ok((message, since))
+    let Some(class) = vm.find_class(b"Deprecated") else { return Ok((None, None)) };
+    let obj = super::call::new_object(vm, &class)?;
+    if let Some(ctor) = class.methods.get(b"__construct".as_slice()).cloned() {
+        super::call::call_function_args(
+            vm,
+            &ctor,
+            crate::native::CallArgs {
+                positional,
+                named,
+                this: Some(obj.clone()),
+                scope: Some(class.clone()),
+                strict,
+                dynamic: false,
+            },
+        )?;
+    }
+    let get = |n: &[u8]| match obj.get_prop(n) {
+        Some(Value::String(s)) => Some(s.to_string()),
+        _ => None,
+    };
+    Ok((get(b"message"), get(b"since")))
+}
+
+/// Evaluates `#[\Deprecated(message, since)]` arguments.
+pub fn deprecated_args(vm: &mut Vm, a: &AttrDef) -> PResult<(Option<String>, Option<String>)> {
+    deprecated_args_in(vm, a, None, false)
+}
+
+/// `get_deprecation_suffix_from_attribute`: " since X, message".
+pub fn deprecation_suffix_in(vm: &mut Vm, a: &AttrDef, scope: Option<&ClassRef>, strict: bool) -> PResult<String> {
+    let (msg, since) = deprecated_args_in(vm, a, scope, strict)?;
+    let mut suffix = String::new();
+    if let Some(s) = since.filter(|s| !s.is_empty()) {
+        suffix.push_str(&format!(" since {s}"));
+    }
+    if let Some(m) = msg.filter(|m| !m.is_empty()) {
+        suffix.push_str(&format!(", {m}"));
+    }
+    Ok(suffix)
+}
+
+thread_local! {
+    /// Class constants whose deprecation is being reported (`CONST_PROTECT_RECURSION`).
+    static DEPRECATING: RefCell<Vec<*const ClassConstant>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `zend_deprecated_class_constant`.
+fn deprecated_class_constant(vm: &mut Vm, c: &Rc<ClassConstant>, name: &[u8]) -> PResult<()> {
+    let ptr = Rc::as_ptr(c);
+    if DEPRECATING.with(|d| d.borrow().contains(&ptr)) {
+        return Ok(());
+    }
+    let owner = vm.find_class(&c.declaring_class);
+    let user = owner.as_ref().is_some_and(|o| class_data(o).is_some());
+    DEPRECATING.with(|d| d.borrow_mut().push(ptr));
+    let r = (|| -> PResult<String> {
+        let mut suffix = String::new();
+        for a in &c.attributes {
+            if let Some(a) = a.downcast_ref::<AttrDef>() {
+                if a.name.eq_ignore_ascii_case(b"Deprecated") {
+                    let strict = owner
+                        .as_ref()
+                        .and_then(|o| class_data(o))
+                        .and_then(|d| d.def.as_ref())
+                        .is_some_and(|d| d.strict);
+                    suffix = deprecation_suffix_in(vm, a, owner.as_ref(), strict)?;
+                }
+            } else if let Some(n) = a.downcast_ref::<crate::class::DeprecationNote>() {
+                suffix = n.suffix();
+            }
+        }
+        Ok(suffix)
+    })();
+    DEPRECATING.with(|d| d.borrow_mut().retain(|p| *p != ptr));
+    let suffix = r?;
+    let kind = if c.flags & member_flags::ENUM_CASE != 0 { "Enum case" } else { "Constant" };
+    let msg = format!(
+        "{kind} {}::{} is deprecated{suffix}",
+        display_class_name(&c.declaring_class),
+        String::from_utf8_lossy(name)
+    );
+    vm.zend_error(if user { level::E_USER_DEPRECATED } else { level::E_DEPRECATED }, msg)
+}
+
+/// Checks the cases of a backed user enum (`zend_enum_build_backed_enum_table`):
+/// backing value types and duplicates. Runs until it succeeds once.
+fn verify_backed_enum(vm: &mut Vm, class: &ClassRef) -> PResult<()> {
+    let Some(data) = class_data(class) else { return Ok(()) };
+    let Some(def) = data.def.clone() else { return Ok(()) };
+    let backing = match def.enum_backing {
+        Some(EnumBacking::Int) => EnumBacking::Int,
+        Some(EnumBacking::String) => EnumBacking::String,
+        _ => return Ok(()),
+    };
+    if data.enum_state.get() != 0 {
+        return Ok(());
+    }
+    data.enum_state.set(1);
+    let r = (|| -> PResult<()> {
+        let mut seen: Vec<(Value, PhpStr)> = Vec::new();
+        for case in &def.cases {
+            let Some(v) = &case.value else { continue };
+            let v = eval_const_expr(vm, v, Some(class))?;
+            let ok = match backing {
+                EnumBacking::Int => matches!(v, Value::Int(_)),
+                _ => matches!(v, Value::String(_)),
+            };
+            if !ok {
+                return Err(vm.throw_type_error(format!(
+                    "Enum case type {} does not match enum backing type {}",
+                    v.type_name(),
+                    if backing == EnumBacking::Int { "int" } else { "string" }
+                )));
+            }
+            if let Some((_, prev)) = seen.iter().find(|(x, _)| x.identical(&v)) {
+                return Err(vm.throw_error(
+                    "Error",
+                    format!(
+                        "Duplicate value in enum {} for cases {} and {}",
+                        display_class_name(&class.name),
+                        prev,
+                        case.name
+                    ),
+                ));
+            }
+            seen.push((v, case.name.clone()));
+        }
+        Ok(())
+    })();
+    data.enum_state.set(if r.is_ok() { 2 } else { 0 });
+    r
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +405,7 @@ pub fn eval_const_expr(vm: &mut Vm, ce: &ConstExpr, scope: Option<&ClassRef>) ->
 /// Host hook: evaluates an `Unevaluated` class constant payload.
 pub fn eval_const_payload(vm: &mut Vm, class: &ClassRef, payload: &Rc<dyn Any>) -> PResult<Value> {
     if let Some(init) = payload.downcast_ref::<crate::enums::EnumCaseInit>() {
+        verify_backed_enum(vm, class)?;
         let value = match &init.expr {
             Some(e) => match e.downcast_ref::<ConstPayload>() {
                 Some(p) => {
@@ -341,12 +471,17 @@ pub fn class_constant_value(vm: &mut Vm, class: &ClassRef, name: &PhpStr, scope:
             format!("Cannot access protected constant {}::{}", display_class_name(&class.name), name),
         ));
     }
+    if class.is_trait() {
+        return Err(vm.throw_error(
+            "Error",
+            format!("Cannot access trait constant {}::{} directly", display_class_name(&class.name), name),
+        ));
+    }
     if c.flags & member_flags::DEPRECATED != 0 {
-        vm.engine_deprecated(format!(
-            "Constant {}::{} is deprecated",
-            display_class_name(&class.name),
-            name
-        ))?;
+        deprecated_class_constant(vm, &c, name)?;
+    }
+    if class.is_enum() && class_data(class).is_some() {
+        verify_backed_enum(vm, class)?;
     }
     if let Some(v) = c.evaluated() {
         return Ok(v);
@@ -981,6 +1116,8 @@ pub struct ClassData {
     pub this: OnceCell<Weak<ClassEntry>>,
     /// Prototypes of the methods of this class (`common.prototype`), by lowercase name.
     pub protos: Vec<(PhpStr, Rc<Function>)>,
+    /// Backed enum case check: 0 = pending, 1 = running, 2 = done.
+    pub enum_state: Cell<u8>,
 }
 
 pub fn class_data(class: &ClassEntry) -> Option<&ClassData> {
@@ -1410,7 +1547,8 @@ fn link_class_outer(vm: &mut Vm, def: &Rc<ClassDef>) -> PResult<ClassRef> {
                 return Err(vm.throw_error("Error", format!("{cname} cannot use {} - it is not a trait", tc.name)));
             }
             if let Some(attr) = class_attr(&tc, "Deprecated") {
-                let suffix = deprecation_suffix(vm, &attr)?;
+                let strict = class_data(&tc).and_then(|d| d.def.as_ref()).is_some_and(|d| d.strict);
+                let suffix = deprecation_suffix_in(vm, &attr, Some(&tc), strict)?;
                 let msg = format!("Trait {} used by {} is deprecated{suffix}", tc.name, cname);
                 vm.zend_error(level::E_USER_DEPRECATED, msg)?;
             }
@@ -1484,18 +1622,6 @@ fn class_attr(c: &ClassEntry, name: &str) -> Option<Rc<AttrDef>> {
         .and_then(|d| d.attributes.iter().find(|a| a.name.eq_ignore_ascii_case(name.as_bytes())).cloned())
 }
 
-/// `get_deprecation_suffix_from_attribute`: " since X, message".
-pub fn deprecation_suffix(vm: &mut Vm, a: &AttrDef) -> PResult<String> {
-    let (msg, since) = deprecated_args(vm, a)?;
-    let mut suffix = String::new();
-    if let Some(s) = since.filter(|s| !s.is_empty()) {
-        suffix.push_str(&format!(" since {s}"));
-    }
-    if let Some(m) = msg.filter(|m| !m.is_empty()) {
-        suffix.push_str(&format!(", {m}"));
-    }
-    Ok(suffix)
-}
 
 fn filtered_constants(ce: &ClassEntry) -> crate::util::NameMap<Rc<ClassConstant>> {
     let mut m = crate::util::NameMap::new();
@@ -1670,6 +1796,7 @@ fn link_class_inner(
         user_slots: Vec::new(),
         this: OnceCell::new(),
         protos: Vec::new(),
+        enum_state: Cell::new(0),
     };
     if let Some(pd) = parent.as_ref().and_then(|p| class_data(p)) {
         data.const_defaults = pd.const_defaults.clone();
@@ -1697,6 +1824,12 @@ fn link_class_inner(
     // ----- constants -----
     for c in &def.consts {
         let value = match &c.value.literal {
+            // Integers are allowed as initializers for floats (`zend_is_valid_default_value`).
+            Some(Value::Int(i))
+                if c.ty.as_ref().is_some_and(|t| t.decl.mask & mask::FLOAT != 0 && t.decl.mask & mask::INT == 0) =>
+            {
+                ConstValue::Value(Value::Float(*i as f64))
+            }
             Some(v) => ConstValue::Value(v.clone()),
             None => ConstValue::Unevaluated(Rc::new(ConstPayload {
                 expr: c.value.clone(),
@@ -1734,7 +1867,16 @@ fn link_class_inner(
         for case in &def.cases {
             let (value, expr) = match &case.value {
                 Some(v) => match &v.literal {
-                    Some(lit) => (Some(lit.clone()), None),
+                    Some(lit) => (
+                        Some(lit.clone()),
+                        // Through the interpreter, which checks the backing values.
+                        Some(Rc::new(ConstPayload {
+                            expr: v.clone(),
+                            scope: def.name.clone(),
+                            ty: None,
+                            name: case.name.clone(),
+                        }) as Rc<dyn Any>),
+                    ),
                     None => (
                         None,
                         Some(Rc::new(ConstPayload {
@@ -2247,9 +2389,11 @@ fn check_override(vm: &mut Vm, def: &ClassDef, rc: &ClassRef, st: &LinkState) ->
         }
     }
     for p in rc.properties.values() {
-        // Own properties are checked by `check_property_overrides`; this
-        // covers properties imported from traits.
-        if !p.declaring_class.eq_ignore_ascii_case(&def.name) || def.props.iter().any(|d| d.name == p.name) {
+        // Own properties flagged OVERRIDE are checked by
+        // `check_property_overrides`; this covers promoted and trait properties.
+        if !p.declaring_class.eq_ignore_ascii_case(&def.name)
+            || def.props.iter().any(|d| d.name == p.name && d.flags & member_flags::OVERRIDE != 0)
+        {
             continue;
         }
         let has = p
@@ -2918,9 +3062,23 @@ fn apply_traits(
     // Constants (zend_do_traits_constant_binding).
     for (i, t) in traits.iter().enumerate() {
         for (n, c) in t.constants.iter() {
+            // The value is evaluated in the scope of the using class.
+            let value = match &*c.value.borrow() {
+                ConstValue::Unevaluated(p) => match p.downcast_ref::<ConstPayload>() {
+                    Some(p) => ConstValue::Unevaluated(Rc::new(ConstPayload {
+                        expr: p.expr.clone(),
+                        scope: def.name.clone(),
+                        ty: p.ty.clone(),
+                        name: p.name.clone(),
+                    })),
+                    None => ConstValue::Unevaluated(p.clone()),
+                },
+                ConstValue::Evaluating => ConstValue::Evaluating,
+                ConstValue::Value(v) => ConstValue::Value(v.clone()),
+            };
             let nc = ClassConstant {
                 name: c.name.clone(),
-                value: RefCell::new(c.value.borrow().clone()),
+                value: RefCell::new(value),
                 flags: c.flags,
                 declaring_class: def.name.clone(),
                 ty: c.ty.clone(),
