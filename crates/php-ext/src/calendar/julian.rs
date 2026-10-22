@@ -16,7 +16,7 @@ fn convert(sdn: i64) -> Option<CalDate> {
         return None;
     }
     // Check for overflow.
-    if sdn > (i64::MAX - JULIAN_SDN_OFFSET * 4 + 1) / 4 || sdn < i64::MIN / 4 {
+    if !(i64::MIN / 4..=(i64::MAX - JULIAN_SDN_OFFSET * 4 + 1) / 4).contains(&sdn) {
         return None;
     }
     let mut temp = sdn * 4 + (JULIAN_SDN_OFFSET * 4 - 1);

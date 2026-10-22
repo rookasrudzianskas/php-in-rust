@@ -17,7 +17,7 @@ mod localtime;
 #[cfg(test)]
 mod tests;
 
-use php_runtime::{ArrayKey, Args, NativeFunction, PResult, PhpArray, Registry, Value, Vm};
+use php_runtime::{Args, ArrayKey, NativeFunction, PResult, PhpArray, Registry, Value, Vm};
 
 use dow::{DAY_NAME_LONG, DAY_NAME_SHORT, day_of_week};
 use french::{FRENCH_MONTH_NAME, french_to_sdn, sdn_to_french};
@@ -267,10 +267,7 @@ fn cal_to_jd(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     check_month(vm, month)?;
 
     if !(INT_MIN..=INT_MAX).contains(&day) {
-        return Err(vm.argument_value_error(
-            3,
-            &format!("must be between {INT_MIN} and {INT_MAX}"),
-        ));
+        return Err(vm.argument_value_error(3, &format!("must be between {INT_MIN} and {INT_MAX}")));
     }
 
     check_year(vm, year, 4)?;
@@ -312,10 +309,7 @@ fn cal_from_jd(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
         ret.insert_str("abbrevmonth", name);
         ret.insert_str("monthname", name);
     } else {
-        ret.insert_str(
-            "abbrevmonth",
-            name_at(calendar.month_name_short, month),
-        );
+        ret.insert_str("abbrevmonth", name_at(calendar.month_name_short, month));
         ret.insert_str("monthname", name_at(calendar.month_name_long, month));
     }
     Ok(Value::array(ret))
@@ -426,9 +420,7 @@ fn jdtojewish(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
 
     let CalDate { year, month, day } = sdn_to_jewish(julday);
     if !heb {
-        return Ok(Value::from(
-            CalDate { year, month, day }.to_php_string(),
-        ));
+        return Ok(Value::from(CalDate { year, month, day }.to_php_string()));
     }
 
     if year <= 0 || year > 9999 {
@@ -457,10 +449,7 @@ fn jewishtojd(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     let (month, day, year) = (args.int(0), args.int(1), args.int(2));
 
     if !(INT_MIN..=INT_MAX).contains(&year) {
-        return Err(vm.argument_value_error(
-            3,
-            &format!("must be between {INT_MIN} and {INT_MAX}"),
-        ));
+        return Err(vm.argument_value_error(3, &format!("must be between {INT_MIN} and {INT_MAX}")));
     }
 
     Ok(Value::Int(jewish_to_sdn(year, month, day)))
@@ -498,9 +487,7 @@ fn jdmonthname(_vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     let mode = args.int(1);
 
     let monthname = match mode {
-        CAL_MONTH_GREGORIAN_LONG => {
-            name_at(&MONTH_NAME_LONG, sdn_to_gregorian(julday).month)
-        }
+        CAL_MONTH_GREGORIAN_LONG => name_at(&MONTH_NAME_LONG, sdn_to_gregorian(julday).month),
         CAL_MONTH_JULIAN_SHORT => name_at(&MONTH_NAME_SHORT, sdn_to_julian(julday).month),
         CAL_MONTH_JULIAN_LONG => name_at(&MONTH_NAME_LONG, sdn_to_julian(julday).month),
         CAL_MONTH_JEWISH => {
@@ -534,11 +521,7 @@ native!(
     cal_from_jd,
     "cal_from_jd(int $julian_day, int $calendar): array"
 );
-native!(
-    CAL_INFO,
-    cal_info,
-    "cal_info(int $calendar = -1): array"
-);
+native!(CAL_INFO, cal_info, "cal_info(int $calendar = -1): array");
 native!(
     CAL_TO_JD,
     cal_to_jd,

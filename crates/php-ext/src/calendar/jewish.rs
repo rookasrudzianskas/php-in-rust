@@ -345,9 +345,8 @@ fn convert(input_day: i64) -> (i64, i64, i64) {
         // The length of the year is needed: find Tishri 1 of this year.
         tishri1_after = tishri1;
         let found = find_tishri_molad(day - 365);
-        tishri1 = i64::from(
-            tishri_1(found.metonic_year, found.molad_day, found.molad_halakim) as i32,
-        );
+        tishri1 =
+            i64::from(tishri_1(found.metonic_year, found.molad_day, found.molad_halakim) as i32);
     }
 
     let year_length = i64::from((tishri1_after - tishri1) as i32);
