@@ -937,6 +937,58 @@ fn method_flags_from_signatures() {
     );
 }
 
+/// The interpreter contract: `Host::autoload` delegates to
+/// `spl::functions::autoload_class`.
+struct AutoloadHost;
+
+impl php_runtime::Host for AutoloadHost {
+    fn autoload(&self, vm: &mut Vm, name: &[u8]) -> PResult<Option<php_runtime::ClassRef>> {
+        super::functions::autoload_class(vm, name)
+    }
+}
+
+#[test]
+fn class_implements_autoloads_through_the_host() {
+    // class_implements_variation.phpt / spl_003.phpt
+    let mut t = TestVm::new();
+    t.vm.set_host(Rc::new(AutoloadHost));
+    let log = Rc::new(RefCell::new(Vec::<String>::new()));
+    let l = log.clone();
+    let loader = closure(&mut t.vm, move |vm, args| {
+        let name = args[0].as_str().unwrap().to_string();
+        l.borrow_mut()
+            .push(format!("attempting to autoload {name}"));
+        if name == "Loadable" {
+            define_class(vm, "Loadable");
+        }
+        Ok(Value::Null)
+    });
+    t.call("spl_autoload_register", vec![loader]).unwrap();
+    let r = t.call("class_implements", vec![s("non_existent")]).unwrap();
+    assert!(r.identical(&Value::Bool(false)));
+    let r = t
+        .call(
+            "class_implements",
+            vec![s("non_existent2"), Value::Bool(false)],
+        )
+        .unwrap();
+    assert!(r.identical(&Value::Bool(false)));
+    let r = t.call("class_parents", vec![s("\\Loadable")]).unwrap();
+    assert!(str_list(&r).is_empty());
+    assert_eq!(
+        *log.borrow(),
+        [
+            "attempting to autoload non_existent",
+            "attempting to autoload Loadable"
+        ]
+    );
+    assert_eq!(
+        t.output(),
+        "\nWarning: class_implements(): Class non_existent does not exist and could not be loaded in /t.php on line 3\n\
+         \nWarning: class_implements(): Class non_existent2 does not exist in /t.php on line 3\n"
+    );
+}
+
 #[test]
 fn test_recursive_iterator_helper() {
     let mut t = TestVm::new();
