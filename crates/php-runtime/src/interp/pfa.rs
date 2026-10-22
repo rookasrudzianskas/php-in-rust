@@ -54,6 +54,7 @@ pub fn eval_pfa(vm: &mut Vm, cx: &Ctx, p: &PfaExpr) -> PResult<Value> {
             r
         }
         PfaExpr::UserCall(u) => call::eval_user_call(vm, cx, u),
+        PfaExpr::ConstStaticFcc(cs, m, line) => call::const_static_fcc(vm, cx, cs, m, *line),
         PfaExpr::PipeArg(slot) => {
             let s = cx.slot(*slot);
             let v = std::mem::take(&mut cx.env.vars.borrow_mut()[s as usize]);
@@ -979,6 +980,22 @@ fn compile(vm: &mut Vm, inp: &CompileInput, sent: &SentArgs) -> PResult<Rc<FuncC
         vec![forwarding_call(vm, inp, &argv, &slots, extra_slot, variadic_slot, fn_slot, num_params, false)?]
     };
 
+    // Recompiling the types replays their compile-time diagnostics.
+    let underscores = params
+        .iter()
+        .filter_map(|p| p.ty.as_ref())
+        .chain(view.return_type.as_ref())
+        .flat_map(|t| t.decl.classes.iter())
+        .map(|c| match c {
+            crate::types::ClassType::Name(n) => usize::from(n.as_bytes() == b"_"),
+            crate::types::ClassType::Intersection(v) => v.iter().filter(|n| n.as_bytes() == b"_").count(),
+        })
+        .sum::<usize>();
+    for _ in 0..underscores {
+        vm.current_line = line;
+        vm.engine_deprecated("Using \"_\" as a type name is deprecated since 8.4")?;
+    }
+
     let is_static = !inp.this_is_object && !(view.is_closure && !view.is_static);
     let mut flags = 0;
     if inp.strict {
@@ -1128,6 +1145,7 @@ fn create(vm: &mut Vm, cx: &Ctx, pe: &PartialExpr) -> PResult<Value> {
             magic_name: None,
             from_callable: false,
             pfa,
+            self_obj: Default::default(),
         },
     ))
 }

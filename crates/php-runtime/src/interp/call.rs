@@ -163,12 +163,69 @@ pub fn eval_args(vm: &mut Vm, cx: &Ctx, args: &ArgList, func: Option<&Rc<Functio
                 b.named.push((n.clone(), v));
             }
             Arg::Spread(e) => {
+                // ZEND_SEND_UNPACK: by-reference parameters turn the array's
+                // elements into references (the variable's array is separated).
+                if let Some(f) = func.filter(|f| f.signature().params.iter().any(|p| p.by_ref)) {
+                    if let Expr::Var(cv, _) = e {
+                        let slot = cx.slot(*cv);
+                        if matches!(cx.env.get(slot).unref(), Value::Array(_)) {
+                            let r = cx.env.make_ref(slot);
+                            spread_by_ref(vm, &mut b, &r, f)?;
+                            continue;
+                        }
+                    }
+                }
                 let v = eval(vm, cx, e)?;
                 spread_into(vm, &mut b, v)?;
             }
         }
     }
     Ok(b)
+}
+
+/// `...$array` for a function with by-reference parameters.
+fn spread_by_ref(vm: &mut Vm, b: &mut Bound, r: &PhpRef, f: &Rc<Function>) -> PResult<()> {
+    let Value::Array(mut arr) = r.get() else { return Ok(()) };
+    let keys: Vec<ArrayKey> = arr.keys().collect();
+    let mut changed = false;
+    for k in keys {
+        let idx = match &k {
+            ArrayKey::Int(_) => {
+                if !b.named.is_empty() {
+                    return Err(vm.throw_error("Error", "Cannot use positional argument after named argument during unpacking"));
+                }
+                Some(b.positional.len())
+            }
+            ArrayKey::Str(n) => param_index_by_name(f, n),
+        };
+        let by_ref = match idx {
+            Some(i) => param_by_ref(f, i).0,
+            None => f.signature().variadic().is_some_and(|p| p.by_ref),
+        };
+        let v = if by_ref {
+            let a = Rc::make_mut(&mut arr);
+            let slot = a.get_mut(&k).expect("key exists");
+            match slot {
+                Value::Ref(rr) => Value::Ref(rr.clone()),
+                other => {
+                    let rr = PhpRef::new(std::mem::take(other));
+                    *other = Value::Ref(rr.clone());
+                    changed = true;
+                    Value::Ref(rr)
+                }
+            }
+        } else {
+            arr.get(&k).map(Value::unref).unwrap_or_default()
+        };
+        match k {
+            ArrayKey::Int(_) => b.positional.push(v),
+            ArrayKey::Str(n) => b.named.push((n, v)),
+        }
+    }
+    if changed {
+        r.set(Value::Array(arr));
+    }
+    Ok(())
 }
 
 /// `...$args` in a call.
@@ -524,6 +581,12 @@ pub fn invoke(
 ) -> PResult<Value> {
     match &func.kind {
         FunctionKind::Native(_) => {
+            if super::closure::is_closure_invoke(func) {
+                if let Some(t) = this.as_ref().filter(|t| super::closure::closure_data(t).is_some()) {
+                    let r = super::closure::invoke_via_method(vm, func, t, b, caller)?;
+                    return Ok(if func.has_flag(fn_flags::RETURNS_REF) { r } else { r.into_unref() });
+                }
+            }
             if dynamic && super::pfa::forbids_dynamic_calls(func) && {
                 // ZPP runs first: an arity error wins.
                 let sig = func.signature();
@@ -593,6 +656,7 @@ pub fn call_user(
     env.scope = scope.clone();
     env.called = called.clone();
     env.func = Some(func.clone());
+    env.closure = closure.filter(|c| !c.from_callable).and_then(|c| c.self_obj.get().cloned());
     env.num_params = nparams as u32;
     env.strict = code.strict();
 
@@ -639,7 +703,8 @@ pub fn call_user(
                             format!("Named parameter ${name} overwrites previous argument"),
                         ));
                     }
-                    va.insert(ArrayKey::Str(name), v.into_unref());
+                    let by_ref = code.params.last().is_some_and(|p| p.variadic && p.by_ref);
+                    va.insert(ArrayKey::Str(name), if by_ref { v } else { v.into_unref() });
                 }
                 None => {
                     return Err(vm.throw_error("Error", format!("Unknown named parameter ${name}")));
@@ -735,6 +800,8 @@ fn run_user_body(
         vm.current_line = p.line.max(code.start_line);
         if p.variadic {
             let mut arr = variadic.clone().unwrap_or_default();
+            // Visible to backtraces while the arguments are checked.
+            env.vars.borrow_mut()[p.slot as usize] = Value::array(arr.clone());
             if let Some(ty) = &p.ty {
                 let keys: Vec<ArrayKey> = arr.keys().collect();
                 for (j, k) in keys.into_iter().enumerate() {
@@ -1079,6 +1146,18 @@ pub(crate) fn method_root_class(m: &Function, vm: &Vm) -> PhpStr {
 pub fn method_target(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &PhpStr) -> PResult<Target> {
     let class = obj.class().clone();
     let lc = name.to_ascii_lowercase();
+    if lc.as_bytes() == b"__invoke" {
+        if let Some(c) = super::closure::closure_data(obj) {
+            // zend_closure_get_method.
+            return Ok(Target {
+                func: super::closure::invoke_method_for(&c),
+                this: Some(obj.clone()),
+                called: Some(class.clone()),
+                closure: None,
+                magic_name: None,
+            });
+        }
+    }
     if let Some(m) = class.methods.get(&lc).cloned() {
         let flags = m.flags;
         let decl_same = scope.is_some_and(|s| m.scope.as_ref().is_some_and(|ms| ms.eq_ignore_ascii_case(&s.name)));
@@ -1475,19 +1554,77 @@ fn check_ctor_access(vm: &mut Vm, scope: Option<&ClassRef>, class: &ClassRef, ct
     ))
 }
 
+/// `A::m(...)` in a constant expression: no `__callStatic`, no `$this`.
+pub fn const_static_fcc(vm: &mut Vm, cx: &Ctx, cs: &ClassSpec, name: &PhpStr, line: u32) -> PResult<Value> {
+    let class = eval::resolve_class(vm, cx, cs, line)?;
+    vm.current_line = line;
+    let scope = cx.scope().cloned();
+    let lc = name.to_ascii_lowercase();
+    const MAGIC: &str = "Creating a callable for the magic __callStatic() method is not supported in constant expressions";
+    let f = match class.methods.get(&lc).cloned() {
+        Some(f) => {
+            if !super::callable::method_accessible(vm, &f, scope.as_ref()) {
+                if class.magic.call_static.is_some() {
+                    return Err(vm.throw_error("Error", MAGIC));
+                }
+                return Err(vm.throw_error(
+                    "Error",
+                    format!(
+                        "Call to {} method {}::{}() from {}",
+                        visibility_word(f.flags),
+                        super::decl::display_class_name(&class.name),
+                        f.name,
+                        scope_desc(scope.as_ref())
+                    ),
+                ));
+            }
+            f
+        }
+        None => {
+            if class.magic.call_static.is_some() {
+                return Err(vm.throw_error("Error", MAGIC));
+            }
+            return Err(vm.throw_error(
+                "Error",
+                format!("Call to undefined method {}::{}()", super::decl::display_class_name(&class.name), name),
+            ));
+        }
+    };
+    let fscope = f.scope.clone().unwrap_or_else(|| class.name.clone());
+    if !f.is_static() {
+        return Err(vm.throw_error(
+            "Error",
+            format!("Non-static method {}::{}() cannot be called statically", super::decl::display_class_name(&fscope), f.name),
+        ));
+    }
+    if f.has_flag(member_flags::ABSTRACT) {
+        return Err(vm.throw_error("Error", format!("Cannot call abstract method {}::{}()", fscope, f.name)));
+    }
+    if vm.find_class(&fscope).is_some_and(|c| c.is_trait()) {
+        vm.engine_deprecated(format!(
+            "Calling static trait method {}::{} is deprecated, it should only be called on a class using the trait",
+            fscope, f.name
+        ))?;
+    }
+    super::closure::closure_from_target(
+        vm,
+        Target {
+            func: f,
+            this: None,
+            called: Some(class),
+            closure: None,
+            magic_name: None,
+        },
+    )
+}
+
 /// First-class callable syntax (`f(...)`).
 pub fn callable_convert(vm: &mut Vm, cx: &Ctx, c: &CallableConvert, line: u32) -> PResult<Value> {
     vm.current_line = line;
     let target = match c {
         CallableConvert::Func(Callee::Named(nc)) => {
             let f = resolve_function(vm, nc)?;
-            Target {
-                func: f,
-                this: None,
-                called: None,
-                closure: None,
-                magic_name: None,
-            }
+            return super::closure::cached_function_closure(vm, &f);
         }
         CallableConvert::Func(Callee::Expr(e)) => {
             let v = eval(vm, cx, e)?;
@@ -1586,27 +1723,32 @@ pub fn call_value(vm: &mut Vm, callable: &Value, positional: Vec<Value>, named: 
         }
     };
     let caller = Caller::internal();
-    // By-value arguments for by-reference parameters warn in dynamic calls.
+    // By-value arguments for by-reference parameters warn in dynamic calls
+    // (zend_call_function); internal functions warn in place_native_args.
     let t = info.target;
     let mut positional = positional;
-    if t.magic_name.is_none() {
+    let mut named = named;
+    if t.magic_name.is_none() && !(dynamic && t.func.is_native()) {
         let sig = t.func.signature().clone();
-        for (i, v) in positional.iter_mut().enumerate() {
+        let mut fix = |vm: &mut Vm, i: usize, v: &mut Value| -> PResult<()> {
             let p = if i < sig.num_args() { sig.params.get(i) } else { sig.variadic() };
             if let Some(p) = p {
                 if p.by_ref && !p.prefer_ref && !v.is_ref() {
-                    if dynamic && t.func.is_native() {
-                        // Native functions warn in ZPP (place_native_args).
-                    } else if dynamic {
-                        let mut msg = format!("{}(): Argument #{}", t.func.display_name(), i + 1);
-                        if !p.variadic {
-                            msg.push_str(&format!(" (${})", p.name));
-                        }
-                        msg.push_str(" must be passed by reference, value given");
-                        vm.engine_warning(msg)?;
+                    if dynamic {
+                        param_must_be_ref_warning(vm, &t.func, i)?;
                     }
                     *v = Value::Ref(PhpRef::new(std::mem::take(v)));
                 }
+            }
+            Ok(())
+        };
+        for (i, v) in positional.iter_mut().enumerate() {
+            fix(vm, i, v)?;
+        }
+        for (name, v) in named.iter_mut() {
+            let i = sig.param_index(name).unwrap_or(usize::MAX);
+            if i != usize::MAX || sig.variadic().is_some() {
+                fix(vm, i.min(sig.num_args()), v)?;
             }
         }
     }

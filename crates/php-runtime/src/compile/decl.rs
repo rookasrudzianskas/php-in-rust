@@ -524,6 +524,7 @@ impl Lowerer<'_> {
     // ----- attributes --------------------------------------------------------------
 
     pub(crate) fn attributes(&mut self, groups: &[ast::AttributeGroup]) -> CResult<Vec<Rc<AttrDef>>> {
+        let decl_line = self.line;
         let mut out = Vec::new();
         for g in groups {
             for a in g {
@@ -553,7 +554,11 @@ impl Lowerer<'_> {
                             ast::Arg::Unpack(_) => {
                                 return self.error("Cannot use unpacking in attribute argument list");
                             }
-                            _ => return self.error("Cannot create Closure as attribute argument"),
+                            _ => {
+                                // Reported at the declaration (zend_compile_attributes).
+                                self.line = decl_line;
+                                return self.error("Cannot create Closure as attribute argument");
+                            }
                         }
                     }
                 }
@@ -799,6 +804,10 @@ impl Lowerer<'_> {
                 self.check_const_expr_args(args, allow_new)?;
                 match callee {
                     ast::Callee::Name(_) => true,
+                    ast::Callee::Expr(c) if matches!(c.kind, K::Int(_) | K::Float(_)) => {
+                        self.line = e.line;
+                        return self.error("Illegal function name");
+                    }
                     ast::Callee::Expr(_) => {
                         self.line = e.line;
                         return self.error("Cannot use dynamic function name in constant expression");
@@ -806,6 +815,12 @@ impl Lowerer<'_> {
                 }
             }
             K::StaticCall { class, name, args } if args.is_callable_convert() => {
+                if let ast::ClassRef::Name(n) = class {
+                    if let Some(ast::SpecialClass::Static) = n.special_class() {
+                        self.line = e.line;
+                        return self.error("\"static\" is not allowed in compile-time constants");
+                    }
+                }
                 self.check_const_expr_args(args, allow_new)?;
                 if let ast::ClassRef::Expr(_) = class {
                     self.line = e.line;

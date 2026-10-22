@@ -64,7 +64,7 @@ fn visibility_word(flags: u32) -> &'static str {
 }
 
 /// `zend_check_method_accessible`.
-fn method_accessible(vm: &Vm, f: &Function, scope: Option<&ClassRef>) -> bool {
+pub(crate) fn method_accessible(vm: &Vm, f: &Function, scope: Option<&ClassRef>) -> bool {
     if f.flags & member_flags::PRIVATE != 0 {
         return scope.is_some_and(|s| f.scope.as_ref().is_some_and(|c| c.eq_ignore_ascii_case(&s.name)));
     }
@@ -546,6 +546,14 @@ pub fn is_callable_ex(vm: &mut Vm, v: &Value, suppress: bool) -> PResult<Result<
         }
         _ => return Ok(Err("no array or string given".into())),
     };
+    // `[$closure, "__invoke"]`: the trampoline carries the closure's arginfo.
+    if let (Some(f), Some(o)) = (&fcc.func, &fcc.object) {
+        if super::closure::is_closure_invoke(f) {
+            if let Some(c) = super::closure::closure_data(o) {
+                fcc.func = Some(super::closure::invoke_method_for(&c));
+            }
+        }
+    }
     Ok(r.map(|()| CallableInfo {
         name,
         target: Target {

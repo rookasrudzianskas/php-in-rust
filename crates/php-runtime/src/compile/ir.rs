@@ -619,6 +619,9 @@ pub enum PfaExpr {
     PipeCall(Expr, Slot, Expr),
     /// The pipe operand stored in a hidden slot (taken on read).
     PipeArg(Slot),
+    /// `A::m(...)` in a constant expression (`zend_ast_evaluate_inner`,
+    /// `ZEND_AST_STATIC_CALL` with `ZEND_AST_CALLABLE_CONVERT`).
+    ConstStaticFcc(ClassSpec, PhpStr, u32),
     /// `call_user_func()` / `call_user_func_array()` compiled to
     /// `ZEND_INIT_USER_CALL` + `ZEND_SEND_USER` / `ZEND_SEND_ARRAY`.
     UserCall(Box<UserCallExpr>),

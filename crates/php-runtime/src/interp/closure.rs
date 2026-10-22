@@ -29,6 +29,8 @@ pub struct ClosureData {
     pub from_callable: bool,
     /// Partial application flags ([`PFA`], [`PFA_OF_CLOSURE`]).
     pub pfa: u8,
+    /// The `Closure` object owning this data (`ZEND_CLOSURE_OBJECT`).
+    pub self_obj: std::cell::OnceCell<crate::object::WeakObjRef>,
 }
 
 /// The closure is a partial application (`ZEND_PARTIAL`).
@@ -53,6 +55,7 @@ pub fn new_closure(vm: &mut Vm, data: ClosureData) -> Value {
 
 fn new_closure_object(vm: &mut Vm, data: ClosureData) -> Value {
     let obj = ObjRef::new(closure_class(vm));
+    let _ = data.self_obj.set(obj.downgrade());
     obj.set_native(Rc::new(data));
     Value::Object(obj)
 }
@@ -107,6 +110,7 @@ pub fn create_closure(vm: &mut Vm, cx: &Ctx, c: &ClosureExpr) -> PResult<Value> 
             magic_name: None,
             from_callable: false,
             pfa: 0,
+            self_obj: Default::default(),
         },
     ))
 }
@@ -126,6 +130,7 @@ pub fn closure_from_target(vm: &mut Vm, t: Target) -> PResult<Value> {
                 magic_name: c.magic_name.clone(),
                 from_callable: c.from_callable,
                 pfa: c.pfa,
+                self_obj: Default::default(),
             },
         ));
     }
@@ -141,6 +146,7 @@ pub fn closure_from_target(vm: &mut Vm, t: Target) -> PResult<Value> {
             magic_name: t.magic_name,
             from_callable: true,
             pfa: 0,
+            self_obj: Default::default(),
         },
     ))
 }
@@ -280,6 +286,7 @@ fn create_bound(vm: &mut Vm, c: &ClosureData, scope: Option<ClassRef>, called: O
         magic_name: c.magic_name.clone(),
         from_callable: c.from_callable,
         pfa: c.pfa,
+        self_obj: Default::default(),
     }
 }
 
@@ -381,6 +388,7 @@ fn closure_call(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
         magic_name: c.magic_name.clone(),
         from_callable: c.from_callable,
         pfa: c.pfa,
+        self_obj: Default::default(),
     });
     let rest: Vec<Value> = args.rest(1).to_vec();
     let named: Vec<(PhpStr, Value)> = args.named_rest().to_vec();
@@ -423,6 +431,46 @@ fn closure_invoke(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     call_closure(vm, &c, b, &Caller::internal())
 }
 
+/// `zend_get_closure_invoke_method`: `Closure::__invoke` with the closure's
+/// arginfo (by-reference parameters, return by reference).
+pub fn invoke_method_for(c: &ClosureData) -> Rc<Function> {
+    let mut flags = member_flags::PUBLIC | fn_flags::NAMED_VARIADIC;
+    flags |= c.func.flags & (fn_flags::RETURNS_REF | fn_flags::VARIADIC | fn_flags::HAS_RETURN_TYPE | fn_flags::DEPRECATED);
+    let f = Function::native_method(&INVOKE, "Closure", flags);
+    let _ = f.set_signature(c.func.signature().clone());
+    Rc::new(f)
+}
+
+/// Whether `f` is `Closure::__invoke`.
+pub fn is_closure_invoke(f: &Function) -> bool {
+    matches!(f.kind, FunctionKind::Native(nf) if std::ptr::eq(nf, &INVOKE))
+}
+
+/// Calls `$closure->__invoke(...)`: an internal `Closure->__invoke()` frame,
+/// then the closure (no ZPP on the trampoline's arguments).
+pub fn invoke_via_method(vm: &mut Vm, func: &Rc<Function>, obj: &ObjRef, b: Bound, caller: &Caller) -> PResult<Value> {
+    let Some(c) = closure_data(obj) else {
+        return Err(vm.throw_error("Error", "Closure method called on a non-closure"));
+    };
+    let mut args: Vec<(Option<PhpStr>, Value)> = b.positional.iter().map(|v| (None, v.unref())).collect();
+    args.extend(b.named.iter().map(|(n, v)| (Some(n.clone()), v.unref())));
+    let call_site = if vm.in_native_frame() { None } else { caller.site.clone() };
+    vm.push_frame(crate::vm::Frame {
+        function: Some(func.clone()),
+        name: PhpStr::from("__invoke"),
+        class: Some(PhpStr::from("Closure")),
+        call_type: Some("->"),
+        this: Some(obj.clone()),
+        call_site,
+        args,
+        is_internal: true,
+        env: None,
+    });
+    let r = call_closure(vm, &c, b, &Caller::internal());
+    vm.pop_frame();
+    r
+}
+
 static BIND: NativeFunction = NativeFunction {
     sig: "public static function bind(Closure $closure, ?object $newThis, object|string|null $newScope = \"static\"): ?Closure {}",
     handler: closure_bind,
@@ -435,6 +483,21 @@ static CALL: NativeFunction = NativeFunction {
     sig: "public function call(object $newThis, mixed ...$args): mixed {}",
     handler: closure_call,
 };
+/// `Closure::getCurrent()`: the closure executing the calling frame.
+fn closure_get_current(vm: &mut Vm, _args: &mut Args) -> PResult<Value> {
+    let n = vm.frames.len();
+    let cur = if n >= 2 { vm.frames[n - 2].env.as_ref().and_then(|e| e.closure.clone()) } else { None };
+    match cur.and_then(|w| w.upgrade()) {
+        Some(o) => Ok(Value::Object(o)),
+        None => Err(vm.throw_error("Error", "Current function is not a closure")),
+    }
+}
+
+static GET_CURRENT: NativeFunction = NativeFunction {
+    sig: "public static function getCurrent(): Closure {}",
+    handler: closure_get_current,
+};
+
 static FROM_CALLABLE: NativeFunction = NativeFunction {
     sig: "public static function fromCallable(mixed $callback): Closure {}",
     handler: closure_from_callable,
@@ -443,6 +506,72 @@ static INVOKE: NativeFunction = NativeFunction {
     sig: "public function __invoke(mixed ...$args): mixed {}",
     handler: closure_invoke,
 };
+
+/// `zend_closure_compare`: closures created from the same function or
+/// method (and bound alike) are equal; anything else is uncomparable.
+fn closure_compare(vm: &mut Vm, a: &Value, b: &Value) -> PResult<i32> {
+    let (Value::Object(x), Value::Object(y)) = (a, b) else {
+        return vm.std_compare_objects(a, b);
+    };
+    let (Some(l), Some(r)) = (closure_data(x), closure_data(y)) else {
+        return vm.std_compare_objects(a, b);
+    };
+    if ObjRef::ptr_eq(x, y) {
+        return Ok(0);
+    }
+    const UNCOMPARABLE: i32 = 1;
+    if !(l.from_callable && r.from_callable) {
+        return Ok(UNCOMPARABLE);
+    }
+    let same_this = match (&l.this, &r.this) {
+        (Some(p), Some(q)) => ObjRef::ptr_eq(p, q),
+        (None, None) => true,
+        _ => false,
+    };
+    let same_cls = |p: &Option<ClassRef>, q: &Option<ClassRef>| match (p, q) {
+        (Some(p), Some(q)) => Rc::ptr_eq(p, q),
+        (None, None) => true,
+        _ => false,
+    };
+    if !same_this || !same_cls(&l.called, &r.called) || !same_cls(&l.scope, &r.scope) {
+        return Ok(UNCOMPARABLE);
+    }
+    if l.func.is_native() != r.func.is_native() {
+        return Ok(UNCOMPARABLE);
+    }
+    let ln = l.magic_name.as_ref().unwrap_or(&l.func.name);
+    let rn = r.magic_name.as_ref().unwrap_or(&r.func.name);
+    Ok(if ln == rn { 0 } else { UNCOMPARABLE })
+}
+
+thread_local! {
+    /// `EG(callable_convert_cache)`: `f(...)` of a named function returns the
+    /// same closure object for the whole request.
+    static FCC_CACHE: std::cell::RefCell<std::collections::HashMap<usize, ObjRef>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// The cached first-class callable of a named function.
+pub fn cached_function_closure(vm: &mut Vm, f: &Rc<Function>) -> PResult<Value> {
+    let key = Rc::as_ptr(f) as *const u8 as usize;
+    if let Some(o) = FCC_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return Ok(Value::Object(o));
+    }
+    let v = closure_from_target(
+        vm,
+        Target {
+            func: f.clone(),
+            this: None,
+            called: None,
+            closure: None,
+            magic_name: None,
+        },
+    )?;
+    if let Value::Object(o) = &v {
+        FCC_CACHE.with(|c| c.borrow_mut().insert(key, o.clone()));
+    }
+    Ok(v)
+}
 
 fn closure_get_closure(_vm: &mut Vm, o: &ObjRef) -> PResult<Option<Value>> {
     Ok(Some(Value::Object(o.clone())))
@@ -459,6 +588,7 @@ fn closure_clone(vm: &mut Vm, o: &ObjRef) -> PResult<ObjRef> {
         magic_name: c.magic_name.clone(),
         from_callable: c.from_callable,
         pfa: c.pfa,
+        self_obj: Default::default(),
     };
     let Value::Object(n) = new_closure_object(vm, d) else { unreachable!() };
     Ok(n)
@@ -473,13 +603,17 @@ pub fn register(r: &mut Registry<'_>) {
     let pub_ = member_flags::PUBLIC;
     ce.add_method(Function::native_method(&BIND, "Closure", pub_ | member_flags::STATIC));
     ce.add_method(Function::native_method(&BIND_TO, "Closure", pub_));
-    ce.add_method(Function::native_method(&CALL, "Closure", pub_));
+    let mut call = Function::native_method(&CALL, "Closure", pub_);
+    call.flags |= fn_flags::NAMED_VARIADIC;
+    ce.add_method(call);
     ce.add_method(Function::native_method(&FROM_CALLABLE, "Closure", pub_ | member_flags::STATIC));
+    ce.add_method(Function::native_method(&GET_CURRENT, "Closure", pub_ | member_flags::STATIC));
     let mut inv = Function::native_method(&INVOKE, "Closure", pub_);
     inv.flags |= fn_flags::NAMED_VARIADIC;
     ce.add_method(inv);
     ce.handlers.get_closure = Some(closure_get_closure);
     ce.handlers.clone_obj = Some(closure_clone);
+    ce.handlers.compare = Some(closure_compare);
     r.class(ce);
 }
 
@@ -519,6 +653,38 @@ fn collect_statics<'a>(block: &'a [Stmt], out: &mut Vec<&'a StaticVarDecl>) {
     }
 }
 
+/// A compile-time constant initializer (literals and arrays of literals).
+fn literal_value(e: &Expr) -> Option<Value> {
+    match e {
+        Expr::Lit(v) => Some(v.clone()),
+        Expr::Array(items, _) => {
+            let mut a = crate::value::PhpArray::new();
+            for it in items {
+                if it.by_ref || it.spread {
+                    return None;
+                }
+                let v = literal_value(&it.value)?;
+                match &it.key {
+                    None => {
+                        let _ = a.append(v);
+                    }
+                    Some(k) => {
+                        let k = literal_value(k)?;
+                        let key = match k {
+                            Value::Int(i) => crate::value::array::ArrayKey::Int(i),
+                            Value::String(s) => crate::value::array::ArrayKey::from(s),
+                            _ => return None,
+                        };
+                        a.insert(key, v);
+                    }
+                }
+            }
+            Some(Value::array(a))
+        }
+        _ => None,
+    }
+}
+
 /// The closure's `static_variables` table as shown by `var_dump()`: bound
 /// (`use`) variables, then `static` variables in declaration order (their
 /// current value, the literal initializer, or `null`).
@@ -537,10 +703,7 @@ pub fn closure_static_vars(c: &ClosureData) -> Vec<(PhpStr, Value)> {
     for d in decls {
         let v = match statics.get(d.index as usize).cloned().flatten() {
             Some(r) => Value::Ref(r),
-            None => match &d.init {
-                Some(Expr::Lit(v)) => v.clone(),
-                _ => Value::Null,
-            },
+            None => d.init.as_ref().and_then(literal_value).unwrap_or(Value::Null),
         };
         out.push((d.name.clone(), v));
     }
