@@ -63,6 +63,56 @@ pub fn assoc(pairs: Vec<(&str, Value)>) -> Value {
 /// A PHP session.
 pub struct P {
     pub t: TestVm,
+    /// The phpt this session transliterates (see [`P::phpt`]).
+    name: String,
+}
+
+thread_local! {
+    static ID_BASE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// The handle PHP would show for `o` (`#N` in var_dump): handles taken by
+/// objects alive before the session started are not counted.
+pub fn php_id(o: &ObjRef) -> u32 {
+    o.id() - ID_BASE.with(|b| b.get()).min(o.id().saturating_sub(1))
+}
+
+/// The text of `tests/phpt/ext/date/tests/<name>.phpt`.
+pub fn read_phpt(name: &str) -> String {
+    let path = format!(
+        "{}/../../tests/phpt/ext/date/tests/{name}.phpt",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// The body of a `--NAME--` section of a phpt file.
+pub fn section(file: &str, name: &str) -> Option<String> {
+    let header = format!("--{name}--");
+    let mut out: Option<String> = None;
+    for line in file.split_inclusive('\n') {
+        let trimmed = line.trim_end();
+        let is_header = trimmed.len() > 4
+            && trimmed.starts_with("--")
+            && trimmed.ends_with("--")
+            && trimmed[2..trimmed.len() - 2]
+                .bytes()
+                .all(|c| c.is_ascii_uppercase() || c == b'_');
+        if is_header {
+            if out.is_some() {
+                break;
+            }
+            if trimmed == header {
+                out = Some(String::new());
+            }
+            continue;
+        }
+        if let Some(o) = out.as_mut() {
+            o.push_str(line);
+        }
+    }
+    out
 }
 
 impl Default for P {
@@ -76,7 +126,14 @@ impl P {
     pub fn new() -> P {
         let mut t = TestVm::new();
         t.vm.current_file = PhpStr::from("/t.php");
-        P { t }
+        // Objects the other modules keep alive take the first handles.
+        let live = php_runtime::object::live_objects().len();
+        let base = php_runtime::object::store_top().saturating_sub(1);
+        ID_BASE.with(|b| b.set(if live == base { base as u32 } else { 0 }));
+        P {
+            t,
+            name: String::new(),
+        }
     }
 
     /// A session with `date.timezone=<tz>` (the phpt `--INI--` section).
@@ -84,6 +141,43 @@ impl P {
         let mut p = P::new();
         p.ini("date.timezone", tz);
         p
+    }
+
+    /// A session transliterating `tests/phpt/ext/date/tests/<name>.phpt`:
+    /// its `--INI--` settings are applied and [`P::finish`] compares the
+    /// output with its `--EXPECT--` / `--EXPECTF--` section.
+    pub fn phpt(name: &str) -> P {
+        let mut p = P::new();
+        p.t.vm.current_file = PhpStr::from(format!("/phpt/{name}.php"));
+        p.name = name.to_string();
+        let file = read_phpt(name);
+        if let Some(ini) = section(&file, "INI") {
+            for line in ini.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with(';') {
+                    continue;
+                }
+                if let Some((k, v)) = line.split_once('=') {
+                    let (k, v) = (k.trim(), v.trim().trim_matches('"'));
+                    if p.t.vm.ini.get(k.as_bytes()).is_some() {
+                        p.ini(k, v);
+                    }
+                }
+            }
+        }
+        p
+    }
+
+    /// Compares the output with the phpt's expected section.
+    pub fn finish(&mut self) {
+        let file = read_phpt(&self.name);
+        if let Some(e) = section(&file, "EXPECT") {
+            self.expect(&e);
+        } else if let Some(e) = section(&file, "EXPECTF") {
+            self.expectf(&e);
+        } else {
+            panic!("{}: no EXPECT/EXPECTF section", self.name);
+        }
     }
 
     /// A startup ini setting (`-d name=value`).
@@ -443,7 +537,7 @@ pub fn var_dump_into(vm: &mut Vm, out: &mut Vec<u8>, v: &Value, indent: usize) -
                 format!(
                     "object({})#{} ({}) {{\n",
                     o.class().name,
-                    o.id(),
+                    php_id(o),
                     props.len()
                 )
                 .as_bytes(),
@@ -659,33 +753,57 @@ pub fn expectf_match(pattern: &[u8], text: &[u8]) -> bool {
         };
         ends
     }
-    fn go(p: &[u8], t: &[u8], pi: usize, ti: usize) -> bool {
-        if pi == p.len() {
-            return ti == t.len();
-        }
-        if p[pi] == b'%' && pi + 1 < p.len() {
-            let kind = p[pi + 1];
-            match kind {
+    /// A literal run or a placeholder.
+    enum Tok {
+        Lit(Vec<u8>),
+        Ph(u8),
+    }
+    let mut toks: Vec<Tok> = Vec::new();
+    let mut lit = Vec::new();
+    let mut k = 0;
+    while k < pattern.len() {
+        if pattern[k] == b'%' && k + 1 < pattern.len() {
+            match pattern[k + 1] {
                 b'%' => {
-                    return t.get(ti) == Some(&b'%') && go(p, t, pi + 2, ti + 1);
+                    lit.push(b'%');
+                    k += 2;
+                    continue;
                 }
                 b'e' => {
-                    return t.get(ti) == Some(&b'/') && go(p, t, pi + 2, ti + 1);
+                    lit.push(b'/');
+                    k += 2;
+                    continue;
                 }
-                b's' | b'S' | b'a' | b'A' | b'w' | b'd' | b'i' | b'x' | b'f' | b'c' => {
-                    for len in class_len(kind, t, ti) {
-                        if go(p, t, pi + 2, ti + len) {
-                            return true;
-                        }
+                kind @ (b's' | b'S' | b'a' | b'A' | b'w' | b'd' | b'i' | b'x' | b'f' | b'c') => {
+                    if !lit.is_empty() {
+                        toks.push(Tok::Lit(std::mem::take(&mut lit)));
                     }
-                    return false;
+                    toks.push(Tok::Ph(kind));
+                    k += 2;
+                    continue;
                 }
                 _ => {}
             }
         }
-        t.get(ti) == Some(&p[pi]) && go(p, t, pi + 1, ti + 1)
+        lit.push(pattern[k]);
+        k += 1;
     }
-    go(pattern, text, 0, 0)
+    if !lit.is_empty() {
+        toks.push(Tok::Lit(lit));
+    }
+    // Backtracking over tokens (recursion depth = number of tokens).
+    fn go(toks: &[Tok], t: &[u8], ti: usize) -> bool {
+        let Some(tok) = toks.first() else {
+            return ti == t.len();
+        };
+        match tok {
+            Tok::Lit(l) => t[ti..].starts_with(l) && go(&toks[1..], t, ti + l.len()),
+            Tok::Ph(kind) => class_len(*kind, t, ti)
+                .into_iter()
+                .any(|len| go(&toks[1..], t, ti + len)),
+        }
+    }
+    go(&toks, text, 0)
 }
 
 #[test]

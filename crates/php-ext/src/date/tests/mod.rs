@@ -3,3 +3,4 @@
 mod support;
 
 mod smoke;
+mod core;
