@@ -721,3 +721,65 @@ fn select_preserves_keys_and_emulates_buffered_reads() {
         "stream_select(): Argument #5 ($microseconds) must be null when argument #4 ($seconds) is null"
     );
 }
+
+#[test]
+fn get_contents_offsets_on_tmpfile() {
+    // stream_get_contents_001.phpt
+    let mut t = TestVm::new();
+    let tmp = t.call("tmpfile", vec![]).unwrap();
+    t.call("fwrite", vec![tmp.clone(), s("12345")]).unwrap();
+    let get = |t: &mut TestVm, args: Vec<Value>| -> Vec<u8> {
+        let mut a = vec![tmp.clone()];
+        a.extend(args);
+        bytes(&t.call("stream_get_contents", a).unwrap())
+    };
+    assert_eq!(get(&mut t, vec![Value::Int(2), Value::Int(5)]), b"");
+    assert_eq!(get(&mut t, vec![Value::Int(2)]), b"");
+    assert_eq!(get(&mut t, vec![Value::Int(2), Value::Int(3)]), b"45");
+    assert_eq!(get(&mut t, vec![Value::Int(2), Value::Int(-1)]), b"");
+}
+
+#[test]
+fn copy_into_append_mode_and_from_spilled_temp() {
+    // stream_copy_to_stream_file_to_file_append.phpt,
+    // stream_copy_to_stream_temp_source_partially_read.phpt
+    let mut t = TestVm::new();
+    let d = scratch("copyappend");
+    let src = format!("{d}/src");
+    let dst = format!("{d}/dst");
+    std::fs::write(&src, "b".repeat(3000)).unwrap();
+    std::fs::write(&dst, "PREFIX-").unwrap();
+    let a = t.call("fopen", vec![s(&src), s("r")]).unwrap();
+    let b = t.call("fopen", vec![s(&dst), s("a")]).unwrap();
+    let n = t
+        .call("stream_copy_to_stream", vec![a.clone(), b.clone()])
+        .unwrap();
+    assert_eq!(n.as_int(), Some(3000));
+    t.call("fclose", vec![a]).unwrap();
+    t.call("fclose", vec![b]).unwrap();
+    let r = std::fs::read(&dst).unwrap();
+    assert_eq!(r.len(), 3007);
+    assert!(r.starts_with(b"PREFIX-b"));
+
+    let src = t
+        .call("fopen", vec![s("php://temp/maxmemory:16"), s("r+")])
+        .unwrap();
+    let data = format!("{}{}", "A".repeat(2000), "B".repeat(2000));
+    t.call("fwrite", vec![src.clone(), Value::from(data)])
+        .unwrap();
+    t.call("rewind", vec![src.clone()]).unwrap();
+    let first = t
+        .call("fread", vec![src.clone(), Value::Int(2000)])
+        .unwrap();
+    assert_eq!(bytes(&first).len(), 2000);
+    let dst = t.call("tmpfile", vec![]).unwrap();
+    let n = t
+        .call("stream_copy_to_stream", vec![src, dst.clone()])
+        .unwrap();
+    assert_eq!(n.as_int(), Some(2000));
+    t.call("rewind", vec![dst.clone()]).unwrap();
+    assert_eq!(
+        bytes(&t.call("stream_get_contents", vec![dst]).unwrap()),
+        "B".repeat(2000).as_bytes()
+    );
+}
