@@ -684,11 +684,19 @@ fn array_map_argument_numbers_bug77931() {
         "TypeError: array_map(): Argument #3 must be of type array, int given"
     );
     assert_eq!(
-        run_err(&mut t, "array_map", vec![s("t_id"), php("[]"), php("[]"), b(true)]),
+        run_err(
+            &mut t,
+            "array_map",
+            vec![s("t_id"), php("[]"), php("[]"), b(true)]
+        ),
         "TypeError: array_map(): Argument #4 must be of type array, true given"
     );
     assert_eq!(
-        run_err(&mut t, "array_map", vec![s("t_id"), php("[]"), php("[]"), php("[]"), Value::Null]),
+        run_err(
+            &mut t,
+            "array_map",
+            vec![s("t_id"), php("[]"), php("[]"), php("[]"), Value::Null]
+        ),
         "TypeError: array_map(): Argument #5 must be of type array, null given"
     );
 }
@@ -698,6 +706,8 @@ fn array_sum_overflows_to_float_bug65304() {
     let mut t = vm();
     let r = t.call("array_sum", vec![php("[PHP_INT_MAX, 1]")]).unwrap();
     assert!(matches!(r, Value::Float(f) if f == 9.223372036854775808e18));
-    let r = t.call("array_product", vec![php("[PHP_INT_MAX, 2]")]).unwrap();
+    let r = t
+        .call("array_product", vec![php("[PHP_INT_MAX, 2]")])
+        .unwrap();
     assert!(matches!(r, Value::Float(f) if f == 1.8446744073709552e19));
 }

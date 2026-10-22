@@ -304,7 +304,10 @@ fn array_merge_recursive_next_free_index_bugs() {
         run(
             &mut t,
             "array_merge_recursive",
-            vec![php("['k' => [2 => 100, 98 => 200]]"), php("['k' => [64 => 300]]")]
+            vec![
+                php("['k' => [2 => 100, 98 => 200]]"),
+                php("['k' => [64 => 300]]")
+            ]
         ),
         "['k' => [2 => 100, 98 => 200, 99 => 300]]"
     );
@@ -315,7 +318,11 @@ fn array_merge_recursive_next_free_index_bugs() {
     let mut top = PhpArray::new();
     top.insert("key".into(), Value::array(inner));
     assert_eq!(
-        run(&mut t, "array_merge_recursive", vec![Value::array(top), php("['key' => [2]]")]),
+        run(
+            &mut t,
+            "array_merge_recursive",
+            vec![Value::array(top), php("['key' => [2]]")]
+        ),
         "['key' => [0 => 0, 2 => 2]]"
     );
 }
@@ -324,13 +331,21 @@ fn array_merge_recursive_next_free_index_bugs() {
 fn replace_and_merge_do_not_leak_references() {
     let mut t = vm();
     // bug72622.phpt: array_walk() leaves a refcount-1 reference in the array.
-    let (_, walked) = call_ref(&mut t, "array_walk", php("['foo' => 'bar']"), vec![s("t_zero")]);
+    let (_, walked) = call_ref(
+        &mut t,
+        "array_walk",
+        php("['foo' => 'bar']"),
+        vec![s("t_zero")],
+    );
     match &walked {
         Value::Array(a) => assert!(matches!(a.get_str(b"foo"), Some(Value::Ref(_)))),
         _ => unreachable!(),
     }
     let r = t
-        .call("array_replace_recursive", vec![php("['foo' => 'foo']"), walked.clone()])
+        .call(
+            "array_replace_recursive",
+            vec![php("['foo' => 'foo']"), walked.clone()],
+        )
         .unwrap();
     match &r {
         Value::Array(a) => assert!(matches!(a.get_str(b"foo"), Some(Value::String(_)))),
@@ -364,7 +379,10 @@ fn array_merge_recursive_bug24198_and_bug42177() {
         .unwrap();
     a1.set(first);
     let second = t.call("array_merge_recursive", vec![a1.get(), a2]);
-    assert_eq!(thrown(second), ("Error".into(), "Recursion detected".into()));
+    assert_eq!(
+        thrown(second),
+        ("Error".into(), "Recursion detected".into())
+    );
 
     // Plain values in both arrays (the first two blocks of bug42177.phpt).
     assert_eq!(
@@ -395,13 +413,21 @@ fn array_merge_recursive_does_not_modify_its_arguments() {
     let array2 = php("['friends' => 10, 'children' => ['cats' => 5]]");
     let before = (show(&array1), show(&array2));
     assert_eq!(
-        run(&mut t, "array_merge_recursive", vec![array1.clone(), array2.clone()]),
+        run(
+            &mut t,
+            "array_merge_recursive",
+            vec![array1.clone(), array2.clone()]
+        ),
         "['friends' => [5, 10], 'children' => ['dogs' => 0, 'cats' => 5]]"
     );
     assert_eq!((show(&array1), show(&array2)), before);
 
     // array_replace_recursive likewise.
     let before = show(&array1);
-    run(&mut t, "array_replace_recursive", vec![array1.clone(), array2]);
+    run(
+        &mut t,
+        "array_replace_recursive",
+        vec![array1.clone(), array2],
+    );
     assert_eq!(show(&array1), before);
 }

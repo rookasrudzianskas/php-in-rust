@@ -1,5 +1,10 @@
 //! The array_diff* and array_intersect* families.
 
+use std::rc::Rc;
+
+use php_runtime::class::{ClassEntry, Function, member_flags};
+use php_runtime::{Args, NativeFunction, ObjRef, PResult, PhpArray, ResRef, Vm};
+
 use super::*;
 
 fn args(items: &[Value]) -> Vec<Value> {
@@ -511,15 +516,317 @@ fn array_diff_uassoc_bug42838() {
     let mut t = vm();
     let a = "['a' => 'green', 'b' => 'Brown', 'c' => 'blue', 0 => 'red']";
     assert_eq!(
-        run(&mut t, "array_diff_uassoc", args(&[php(a), php(a), s("t_cmp")])),
+        run(
+            &mut t,
+            "array_diff_uassoc",
+            args(&[php(a), php(a), s("t_cmp")])
+        ),
         "[]"
     );
     assert_eq!(
-        run(&mut t, "array_diff_ukey", args(&[php(a), php(a), s("t_cmp")])),
+        run(
+            &mut t,
+            "array_diff_ukey",
+            args(&[php(a), php(a), s("t_cmp")])
+        ),
         "[]"
     );
     assert_eq!(
-        run(&mut t, "array_intersect_uassoc", args(&[php(a), php(a), s("t_cmp")])),
+        run(
+            &mut t,
+            "array_intersect_uassoc",
+            args(&[php(a), php(a), s("t_cmp")])
+        ),
         "['a' => 'green', 'b' => 'Brown', 'c' => 'blue', 0 => 'red']"
+    );
+}
+
+fn to_string_object(_vm: &mut Vm, _args: &mut Args) -> PResult<Value> {
+    Ok(Value::from("object"))
+}
+
+static OBJECT_TO_STRING: NativeFunction = NativeFunction {
+    sig: "__toString(): string",
+    handler: to_string_object,
+};
+
+fn throwing_to_string(vm: &mut Vm, _args: &mut Args) -> PResult<Value> {
+    Err(vm.throw_error("Exception", "conversion failed"))
+}
+
+static THROWING_TO_STRING: NativeFunction = NativeFunction {
+    sig: "__toString(): string",
+    handler: throwing_to_string,
+};
+
+fn stringable(name: &str, f: &'static NativeFunction) -> Value {
+    let mut ce = ClassEntry::new(name, 0);
+    ce.add_method(Function::native_method(f, name, member_flags::PUBLIC));
+    ce.link_magic_methods();
+    Value::Object(ObjRef::new(Rc::new(ce)))
+}
+
+#[test]
+fn array_intersect_values_phpt() {
+    // array_intersect_values.phpt
+    let mut t = vm();
+    assert_eq!(
+        run(
+            &mut t,
+            "array_intersect",
+            args(&[
+                php(
+                    "['first' => 1, 'duplicate' => 1, 'leading' => '01', 'plus' => '+1', 'exponent' => '1e0', 'zero' => 0, 'negative-zero' => '-0']"
+                ),
+                php("['1', '0']"),
+            ])
+        ),
+        "['first' => 1, 'duplicate' => 1, 'zero' => 0]"
+    );
+    assert_eq!(
+        run(
+            &mut t,
+            "array_intersect",
+            args(&[
+                php("[1, 2, '2', 3]"),
+                php("[1, 2, 2, '2', 3]"),
+                php("[2, '2', 3]")
+            ])
+        ),
+        "[1 => 2, 2 => '2', 3 => 3]"
+    );
+    // Integers at the limits compare equal to their string forms only.
+    let max = i(i64::MAX);
+    let min = i(i64::MIN);
+    let smax = s(&i64::MAX.to_string());
+    let smin = s(&i64::MIN.to_string());
+    let above = s("9223372036854775808");
+    let below = s("-9223372036854775809");
+    let both = Value::array(PhpArray::from_values(vec![max.clone(), min.clone()]));
+    assert_eq!(
+        run(
+            &mut t,
+            "array_intersect",
+            args(&[
+                both.clone(),
+                Value::array(PhpArray::from_values(vec![smax, smin]))
+            ])
+        ),
+        show(&both)
+    );
+    assert_eq!(
+        run(
+            &mut t,
+            "array_intersect",
+            args(&[
+                both,
+                Value::array(PhpArray::from_values(vec![above.clone(), below.clone()]))
+            ])
+        ),
+        "[]"
+    );
+    let strs = Value::array(PhpArray::from_values(vec![above, below]));
+    assert_eq!(
+        run(
+            &mut t,
+            "array_intersect",
+            args(&[strs.clone(), strs.clone()])
+        ),
+        show(&strs)
+    );
+    // References in the first array are kept when they have other owners.
+    let integer = PhpRef::new(i(2));
+    let string = PhpRef::new(s("2"));
+    let first = PhpArray::from_values(vec![Value::Ref(integer.clone()), i(3)]);
+    let second = PhpArray::from_values(vec![Value::Ref(string), i(3)]);
+    let r = t
+        .call(
+            "array_intersect",
+            args(&[Value::array(first), Value::array(second)]),
+        )
+        .unwrap();
+    integer.set(i(9));
+    let Value::Array(r) = r else { unreachable!() };
+    assert_eq!(show(r.get_int(0).unwrap()), "9");
+    // The result is a copy of the first array: its holes and keys survive.
+    assert_eq!(
+        run(
+            &mut t,
+            "array_intersect",
+            args(&[
+                php("[0 => 'drop', 100 => 'x', 200 => 'y']"),
+                php("['x', 'y']")
+            ])
+        ),
+        "[100 => 'x', 200 => 'y']"
+    );
+}
+
+#[test]
+fn array_intersect_converts_every_value_type() {
+    let mut t = vm();
+    // Resources convert to "Resource id #N", objects through __toString.
+    let resource = ResRef::new("stream", Box::new(()));
+    let rid = format!("Resource id #{}", resource.id());
+    let mut first = PhpArray::new();
+    first.insert("null".into(), Value::Null);
+    first.insert("false".into(), Value::Bool(false));
+    first.insert("true".into(), Value::Bool(true));
+    first.insert("zero-float".into(), Value::Float(0.0));
+    first.insert("float".into(), Value::Float(1.5));
+    first.insert("resource".into(), Value::Resource(resource.clone()));
+    first.insert(
+        "object".into(),
+        stringable("StringableValue", &OBJECT_TO_STRING),
+    );
+    let second = PhpArray::from_values(vec![s(""), s("1"), s("0"), s("1.5"), s(&rid), s("object")]);
+    let third = PhpArray::from_values(vec![
+        Value::Bool(false),
+        Value::Bool(true),
+        i(0),
+        s("1.5"),
+        Value::Resource(resource),
+        stringable("StringableValue2", &OBJECT_TO_STRING),
+    ]);
+    let r = t
+        .call(
+            "array_intersect",
+            args(&[
+                Value::array(first),
+                Value::array(second),
+                Value::array(third),
+            ]),
+        )
+        .unwrap();
+    let Value::Array(r) = r else { unreachable!() };
+    let keys: Vec<String> = r.keys().map(|k| k.to_php_str().to_string()).collect();
+    assert_eq!(
+        keys.join(","),
+        "null,false,true,zero-float,float,resource,object"
+    );
+}
+
+#[test]
+fn array_intersect_conversion_errors() {
+    let mut t = vm();
+    assert_eq!(
+        run_err(
+            &mut t,
+            "array_intersect",
+            args(&[
+                php("['value']"),
+                Value::array(PhpArray::from_values(vec![
+                    stringable("ThrowingStringableValue", &THROWING_TO_STRING),
+                    s("value"),
+                ])),
+            ])
+        ),
+        "Exception: conversion failed"
+    );
+    let std = Value::Object(t.vm.cast_to_object(&Value::Null).unwrap());
+    assert_eq!(
+        run_err(
+            &mut t,
+            "array_intersect",
+            args(&[php("['']"), Value::array(PhpArray::from_values(vec![std]))])
+        ),
+        "Error: Object of class stdClass could not be converted to string"
+    );
+    // Arrays convert to "Array" with a warning.
+    t.output();
+    assert_eq!(
+        run(
+            &mut t,
+            "array_intersect",
+            args(&[php("[[1]]"), php("[[2]]")])
+        ),
+        "[[1]]"
+    );
+    assert!(t.output().contains("Warning: Array to string conversion"));
+}
+
+#[test]
+fn array_intersect_does_not_convert_when_an_argument_is_empty() {
+    // array_intersect_empty.phpt
+    let mut t = vm();
+    let throwing = || {
+        Value::array(PhpArray::from_values(vec![stringable(
+            "ThrowingStringableValue",
+            &THROWING_TO_STRING,
+        )]))
+    };
+    t.output();
+    assert_eq!(
+        run(&mut t, "array_intersect", args(&[php("[]"), php("[[1]]")])),
+        "[]"
+    );
+    assert_eq!(
+        run(&mut t, "array_intersect", args(&[php("[[1]]"), php("[]")])),
+        "[]"
+    );
+    assert_eq!(
+        run(
+            &mut t,
+            "array_intersect",
+            args(&[throwing(), php("['value']"), php("[]")])
+        ),
+        "[]"
+    );
+    assert_eq!(t.output(), "");
+    assert_eq!(
+        run_err(
+            &mut t,
+            "array_intersect",
+            args(&[php("[]"), php("[]"), i(5)])
+        ),
+        "TypeError: array_intersect(): Argument #3 must be of type array, int given"
+    );
+}
+
+#[test]
+fn single_array_arguments_are_returned_unchanged() {
+    // array_diff_single_array.phpt
+    let mut t = vm();
+    let a = php("['a' => 42]");
+    for f in [
+        "array_diff",
+        "array_diff_key",
+        "array_diff_assoc",
+        "array_intersect_key",
+        "array_intersect_assoc",
+    ] {
+        assert_eq!(run(&mut t, f, args(&[a.clone()])), "['a' => 42]", "{f}");
+    }
+    for f in [
+        "array_diff_ukey",
+        "array_diff_uassoc",
+        "array_udiff",
+        "array_udiff_assoc",
+        "array_uintersect",
+        "array_uintersect_assoc",
+        "array_intersect_ukey",
+        "array_intersect_uassoc",
+    ] {
+        assert_eq!(
+            run(&mut t, f, args(&[a.clone(), s("t_cmp")])),
+            "['a' => 42]",
+            "{f}"
+        );
+    }
+    assert_eq!(
+        run(
+            &mut t,
+            "array_udiff_uassoc",
+            args(&[a.clone(), s("t_cmp"), s("t_cmp")])
+        ),
+        "['a' => 42]"
+    );
+    assert_eq!(
+        run(
+            &mut t,
+            "array_uintersect_uassoc",
+            args(&[a, s("t_cmp"), s("t_cmp")])
+        ),
+        "['a' => 42]"
     );
 }
