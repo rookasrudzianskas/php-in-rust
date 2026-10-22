@@ -662,7 +662,7 @@ impl Lowerer<'_> {
             },
             M::Property => match &self.fs.hook_prop {
                 Some(p) => s(&p.clone()),
-                None => self.error("Cannot use __PROPERTY__ outside a property hook"),
+                None => s(&PhpStr::new()),
             },
         }
     }
@@ -1162,6 +1162,11 @@ impl Lowerer<'_> {
                 }
                 let b = if is_this(object) {
                     self.fs.flags |= code_flags::USES_THIS;
+                    if let (Some(hp), ast::MemberName::Ident(n)) = (&self.fs.hook_prop, name) {
+                        if hp.as_bytes() == n.as_bytes() {
+                            self.fs.hook_uses_prop = true;
+                        }
+                    }
                     LVal::This
                 } else {
                     self.lval_base(object, mode)?
