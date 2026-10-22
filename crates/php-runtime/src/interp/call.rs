@@ -800,6 +800,8 @@ fn run_user_body(
         vm.current_line = p.line.max(code.start_line);
         if p.variadic {
             let mut arr = variadic.clone().unwrap_or_default();
+            // Visible to backtraces while the arguments are checked.
+            env.vars.borrow_mut()[p.slot as usize] = Value::array(arr.clone());
             if let Some(ty) = &p.ty {
                 let keys: Vec<ArrayKey> = arr.keys().collect();
                 for (j, k) in keys.into_iter().enumerate() {
@@ -1552,6 +1554,70 @@ fn check_ctor_access(vm: &mut Vm, scope: Option<&ClassRef>, class: &ClassRef, ct
     ))
 }
 
+/// `A::m(...)` in a constant expression: no `__callStatic`, no `$this`.
+pub fn const_static_fcc(vm: &mut Vm, cx: &Ctx, cs: &ClassSpec, name: &PhpStr, line: u32) -> PResult<Value> {
+    let class = eval::resolve_class(vm, cx, cs, line)?;
+    vm.current_line = line;
+    let scope = cx.scope().cloned();
+    let lc = name.to_ascii_lowercase();
+    const MAGIC: &str = "Creating a callable for the magic __callStatic() method is not supported in constant expressions";
+    let f = match class.methods.get(&lc).cloned() {
+        Some(f) => {
+            if !super::callable::method_accessible(vm, &f, scope.as_ref()) {
+                if class.magic.call_static.is_some() {
+                    return Err(vm.throw_error("Error", MAGIC));
+                }
+                return Err(vm.throw_error(
+                    "Error",
+                    format!(
+                        "Call to {} method {}::{}() from {}",
+                        visibility_word(f.flags),
+                        super::decl::display_class_name(&class.name),
+                        f.name,
+                        scope_desc(scope.as_ref())
+                    ),
+                ));
+            }
+            f
+        }
+        None => {
+            if class.magic.call_static.is_some() {
+                return Err(vm.throw_error("Error", MAGIC));
+            }
+            return Err(vm.throw_error(
+                "Error",
+                format!("Call to undefined method {}::{}()", super::decl::display_class_name(&class.name), name),
+            ));
+        }
+    };
+    let fscope = f.scope.clone().unwrap_or_else(|| class.name.clone());
+    if !f.is_static() {
+        return Err(vm.throw_error(
+            "Error",
+            format!("Non-static method {}::{}() cannot be called statically", super::decl::display_class_name(&fscope), f.name),
+        ));
+    }
+    if f.has_flag(member_flags::ABSTRACT) {
+        return Err(vm.throw_error("Error", format!("Cannot call abstract method {}::{}()", fscope, f.name)));
+    }
+    if vm.find_class(&fscope).is_some_and(|c| c.is_trait()) {
+        vm.engine_deprecated(format!(
+            "Calling static trait method {}::{} is deprecated, it should only be called on a class using the trait",
+            fscope, f.name
+        ))?;
+    }
+    super::closure::closure_from_target(
+        vm,
+        Target {
+            func: f,
+            this: None,
+            called: Some(class),
+            closure: None,
+            magic_name: None,
+        },
+    )
+}
+
 /// First-class callable syntax (`f(...)`).
 pub fn callable_convert(vm: &mut Vm, cx: &Ctx, c: &CallableConvert, line: u32) -> PResult<Value> {
     vm.current_line = line;
@@ -1657,27 +1723,32 @@ pub fn call_value(vm: &mut Vm, callable: &Value, positional: Vec<Value>, named: 
         }
     };
     let caller = Caller::internal();
-    // By-value arguments for by-reference parameters warn in dynamic calls.
+    // By-value arguments for by-reference parameters warn in dynamic calls
+    // (zend_call_function); internal functions warn in place_native_args.
     let t = info.target;
     let mut positional = positional;
-    if t.magic_name.is_none() {
+    let mut named = named;
+    if t.magic_name.is_none() && !(dynamic && t.func.is_native()) {
         let sig = t.func.signature().clone();
-        for (i, v) in positional.iter_mut().enumerate() {
+        let mut fix = |vm: &mut Vm, i: usize, v: &mut Value| -> PResult<()> {
             let p = if i < sig.num_args() { sig.params.get(i) } else { sig.variadic() };
             if let Some(p) = p {
                 if p.by_ref && !p.prefer_ref && !v.is_ref() {
-                    if dynamic && t.func.is_native() {
-                        // Native functions warn in ZPP (place_native_args).
-                    } else if dynamic {
-                        let mut msg = format!("{}(): Argument #{}", t.func.display_name(), i + 1);
-                        if !p.variadic {
-                            msg.push_str(&format!(" (${})", p.name));
-                        }
-                        msg.push_str(" must be passed by reference, value given");
-                        vm.engine_warning(msg)?;
+                    if dynamic {
+                        param_must_be_ref_warning(vm, &t.func, i)?;
                     }
                     *v = Value::Ref(PhpRef::new(std::mem::take(v)));
                 }
+            }
+            Ok(())
+        };
+        for (i, v) in positional.iter_mut().enumerate() {
+            fix(vm, i, v)?;
+        }
+        for (name, v) in named.iter_mut() {
+            let i = sig.param_index(name).unwrap_or(usize::MAX);
+            if i != usize::MAX || sig.variadic().is_some() {
+                fix(vm, i.min(sig.num_args()), v)?;
             }
         }
     }

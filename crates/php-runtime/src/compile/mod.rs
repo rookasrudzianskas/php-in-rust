@@ -1009,7 +1009,10 @@ pub(crate) fn is_variable_like(e: &ast::Expr) -> bool {
 pub(crate) fn is_call(e: &ast::Expr) -> bool {
     matches!(
         e.kind,
-        ast::ExprKind::Call { .. } | ast::ExprKind::MethodCall { .. } | ast::ExprKind::StaticCall { .. }
+        ast::ExprKind::Call { .. }
+            | ast::ExprKind::MethodCall { .. }
+            | ast::ExprKind::StaticCall { .. }
+            | ast::ExprKind::Binary { op: ast::BinaryOp::Pipe, .. }
     )
 }
 

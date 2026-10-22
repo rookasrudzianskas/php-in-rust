@@ -223,7 +223,7 @@ impl Lowerer<'_> {
                 nullsafe,
             } => {
                 if args.is_callable_convert() {
-                    if *nullsafe {
+                    if *nullsafe || is_short_circuited(object) {
                         return self.error("Cannot combine nullsafe operator with Closure creation");
                     }
                     let obj = self.expr_chain_base(object)?;
@@ -252,6 +252,12 @@ impl Lowerer<'_> {
                 let cs = self.class_spec(class)?;
                 let m = self.member(name)?;
                 if args.is_callable_convert() {
+                    if self.in_const_expr && is_fcc(args) {
+                        if let Member::Name(mn) = &m {
+                            let mn = mn.clone();
+                            return Ok(Expr::Pfa(Box::new(PfaExpr::ConstStaticFcc(cs, mn, line))));
+                        }
+                    }
                     let target = CallableConvert::Static(cs, m);
                     if !is_fcc(args) {
                         return self.partial(target, args, line);
@@ -1353,7 +1359,7 @@ impl Lowerer<'_> {
                     if is_this(&it.value) {
                         return self.error("Cannot re-assign $this");
                     }
-                    if !is_variable_like(&it.value) {
+                    if !is_variable_like(&it.value) && !is_call(&it.value) {
                         return self.error("Assignments can only happen to writable values");
                     }
                     self.ensure_writable(&it.value)?;
@@ -1483,6 +1489,11 @@ impl Lowerer<'_> {
                 let v = self.expr_chain_base(e)?;
                 Ok(LVal::Temp(Box::new(v)))
             }
+            // A pipe is compiled as a call.
+            K::Binary {
+                op: ast::BinaryOp::Pipe,
+                ..
+            } => Ok(LVal::Temp(Box::new(self.expr(e)?))),
             K::Array {
                 syntax: ast::ArraySyntax::List,
                 ..
@@ -1513,6 +1524,10 @@ impl Lowerer<'_> {
                 let v = self.expr_chain_base(e)?;
                 Ok(LVal::Temp(Box::new(v)))
             }
+            K::Binary {
+                op: ast::BinaryOp::Pipe,
+                ..
+            } => Ok(LVal::Temp(Box::new(self.expr(e)?))),
             _ => {
                 if mode != LvMode::Isset && !matches!(e.kind, K::Const(_) | K::ClassConst { .. }) {
                     // `"str"[0] = ...`, `[1][0] = ...`

@@ -1383,6 +1383,12 @@ fn spv_get_value(_vm: &mut Vm, a: &mut Args) -> PResult<Value> {
     Ok(a.this().and_then(|o| o.get_prop(b"value")).unwrap_or(Value::Null))
 }
 
+/// `attributes_sensitive_parameter_value_get_properties_for`: no properties
+/// for (array) casts, var_export(), json_encode(), ...
+fn spv_properties_for(_vm: &mut Vm, _o: &ObjRef, _p: PropPurpose) -> PResult<Option<PhpArray>> {
+    Ok(Some(PhpArray::new()))
+}
+
 fn spv_debug_info(_vm: &mut Vm, _a: &mut Args) -> PResult<Value> {
     Ok(Value::array(PhpArray::new()))
 }
@@ -1468,6 +1474,7 @@ fn register_attributes(r: &mut Registry<'_>) {
     spv.add_method(Function::native_method(&SPV_CTOR, "SensitiveParameterValue", pub_));
     spv.add_method(Function::native_method(&SPV_GET_VALUE, "SensitiveParameterValue", pub_));
     spv.add_method(Function::native_method(&SPV_DEBUG_INFO, "SensitiveParameterValue", pub_));
+    spv.handlers.get_properties_for = Some(spv_properties_for);
     r.class(spv);
     let _ = ObjRef::ptr_eq;
 }

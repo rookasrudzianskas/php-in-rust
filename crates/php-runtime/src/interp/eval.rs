@@ -626,7 +626,7 @@ pub fn resolve_class(vm: &mut Vm, cx: &Ctx, cs: &ClassSpec, line: u32) -> PResul
             match v.into_unref() {
                 Value::Object(o) => Ok(o.class().clone()),
                 Value::String(s) => lookup_class_or_error(vm, &s, line),
-                _ => Err(vm.throw_error("Error", "Cannot use value as class name")),
+                _ => Err(vm.throw_error("Error", "Class name must be a valid object or a string")),
             }
         }
     }

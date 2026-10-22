@@ -64,7 +64,7 @@ fn visibility_word(flags: u32) -> &'static str {
 }
 
 /// `zend_check_method_accessible`.
-fn method_accessible(vm: &Vm, f: &Function, scope: Option<&ClassRef>) -> bool {
+pub(crate) fn method_accessible(vm: &Vm, f: &Function, scope: Option<&ClassRef>) -> bool {
     if f.flags & member_flags::PRIVATE != 0 {
         return scope.is_some_and(|s| f.scope.as_ref().is_some_and(|c| c.eq_ignore_ascii_case(&s.name)));
     }

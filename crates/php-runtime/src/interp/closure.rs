@@ -603,7 +603,9 @@ pub fn register(r: &mut Registry<'_>) {
     let pub_ = member_flags::PUBLIC;
     ce.add_method(Function::native_method(&BIND, "Closure", pub_ | member_flags::STATIC));
     ce.add_method(Function::native_method(&BIND_TO, "Closure", pub_));
-    ce.add_method(Function::native_method(&CALL, "Closure", pub_));
+    let mut call = Function::native_method(&CALL, "Closure", pub_);
+    call.flags |= fn_flags::NAMED_VARIADIC;
+    ce.add_method(call);
     ce.add_method(Function::native_method(&FROM_CALLABLE, "Closure", pub_ | member_flags::STATIC));
     ce.add_method(Function::native_method(&GET_CURRENT, "Closure", pub_ | member_flags::STATIC));
     let mut inv = Function::native_method(&INVOKE, "Closure", pub_);
