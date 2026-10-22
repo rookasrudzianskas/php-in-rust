@@ -426,6 +426,23 @@ pub type WritePropertyFn = fn(&mut Vm, &ObjRef, &PhpStr, Value) -> PResult<bool>
 pub type GetIteratorFn = fn(&mut Vm, &ObjRef, bool) -> PResult<Rc<dyn Any>>;
 pub type DtorFn = fn(&mut Vm, &ObjRef) -> PResult<()>;
 pub type GetClosureFn = fn(&mut Vm, &ObjRef) -> PResult<Option<Value>>;
+/// `has_property`: `Ok(None)` selects the standard behaviour; the bool is `check_empty`.
+pub type HasPropertyFn = fn(&mut Vm, &ObjRef, &PhpStr, bool) -> PResult<Option<bool>>;
+/// `unset_property`: returns `true` when handled.
+pub type UnsetPropertyFn = fn(&mut Vm, &ObjRef, &PhpStr) -> PResult<bool>;
+/// `get_method` + call: `Ok(None)` selects the standard method lookup.
+pub type CallMethodFn = fn(&mut Vm, &ObjRef, &PhpStr, &[Value]) -> PResult<Option<Value>>;
+
+/// An iterator produced by [`ObjectHandlers::get_iterator`]. The handler
+/// returns it as `Rc<RefCell<Box<dyn InternalIterator>>>` inside the
+/// `Rc<dyn Any>` (`zend_object_iterator`), and `foreach` drives it.
+pub trait InternalIterator {
+    fn rewind(&mut self, vm: &mut Vm) -> PResult<()>;
+    fn valid(&mut self, vm: &mut Vm) -> PResult<bool>;
+    fn current(&mut self, vm: &mut Vm) -> PResult<Value>;
+    fn key(&mut self, vm: &mut Vm) -> PResult<Value>;
+    fn next(&mut self, vm: &mut Vm) -> PResult<()>;
+}
 
 /// Fetch mode for `read_dimension` (`BP_VAR_R`, `BP_VAR_IS`, `BP_VAR_W`, `BP_VAR_RW`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -459,6 +476,10 @@ pub struct ObjectHandlers {
     /// Internal destructor, run in addition to (before) a userland `__destruct`.
     pub dtor_obj: Option<DtorFn>,
     pub get_closure: Option<GetClosureFn>,
+    pub has_property: Option<HasPropertyFn>,
+    pub unset_property: Option<UnsetPropertyFn>,
+    /// Intercepts `$obj->method(...)` calls (e.g. `__PHP_Incomplete_Class`).
+    pub call_method: Option<CallMethodFn>,
 }
 
 /// Cached magic methods (`ce->constructor`, `ce->__get`, ...), filled by

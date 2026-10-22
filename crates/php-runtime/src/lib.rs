@@ -74,10 +74,12 @@
 
 pub mod builtins;
 pub mod class;
+pub mod compile;
 pub mod constants;
 pub mod enums;
 pub mod errors;
 pub mod ini;
+pub mod interp;
 pub mod native;
 pub mod object;
 pub mod output;

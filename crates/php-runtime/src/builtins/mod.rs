@@ -276,17 +276,28 @@ pub fn register_core(r: &mut Registry<'_>) {
         "stdClass",
         class_flags::ALLOW_DYNAMIC_PROPERTIES,
     ));
+    let iface = |name: &str| {
+        let mut ce = ClassEntry::new(name, class_flags::INTERFACE);
+        for nf in crate::interp::builtins::interface_methods(name) {
+            ce.add_method(crate::class::Function::native_method(
+                nf,
+                name,
+                crate::class::member_flags::PUBLIC | crate::class::member_flags::ABSTRACT,
+            ));
+        }
+        ce
+    };
     let traversable = r.class(ClassEntry::new("Traversable", class_flags::INTERFACE));
-    let mut iterator = ClassEntry::new("Iterator", class_flags::INTERFACE);
+    let mut iterator = iface("Iterator");
     iterator.interfaces.push(traversable.clone());
     r.class(iterator);
-    let mut aggregate = ClassEntry::new("IteratorAggregate", class_flags::INTERFACE);
+    let mut aggregate = iface("IteratorAggregate");
     aggregate.interfaces.push(traversable);
     r.class(aggregate);
-    r.class(ClassEntry::new("ArrayAccess", class_flags::INTERFACE));
-    r.class(ClassEntry::new("Countable", class_flags::INTERFACE));
-    r.class(ClassEntry::new("Serializable", class_flags::INTERFACE));
-    r.class(ClassEntry::new("Stringable", class_flags::INTERFACE));
+    r.class(iface("ArrayAccess"));
+    r.class(iface("Countable"));
+    r.class(iface("Serializable"));
+    r.class(iface("Stringable"));
     crate::enums::register_interfaces(r);
 
     exceptions::register(r);

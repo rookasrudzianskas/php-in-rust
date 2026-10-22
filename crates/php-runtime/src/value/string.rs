@@ -271,9 +271,11 @@ impl Ord for PhpStr {
     }
 }
 
+// Must agree with `Borrow<[u8]>` so `HashMap<PhpStr, _>` can be queried
+// with `&[u8]` keys.
 impl Hash for PhpStr {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write_u64(self.hash_code());
+        self.as_bytes().hash(state);
     }
 }
 

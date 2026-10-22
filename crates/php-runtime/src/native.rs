@@ -108,6 +108,8 @@ pub struct Signature {
     pub returns_ref: bool,
     /// `required_num_args`.
     pub required: usize,
+    /// `required` was raised by a `@min-args` annotation (arity only).
+    pub min_args_override: bool,
 }
 
 /// A parameter (`zend_arg_info`).
@@ -187,6 +189,7 @@ impl Signature {
             return_type: None,
             returns_ref: false,
             required: 0,
+            min_args_override: false,
         }
     }
 
@@ -207,6 +210,7 @@ impl Signature {
             return_type,
             returns_ref,
             required,
+            min_args_override: false,
         }
     }
 
@@ -295,7 +299,21 @@ impl Signature {
                 }
             }
         }
-        Ok(Signature::new(&name, params, return_type, returns_ref))
+        let mut out = Signature::new(&name, params, return_type, returns_ref);
+        // `/** @min-args N */`: functions doing their own arity check in
+        // php-src (e.g. `array_udiff` needs at least 2 arguments).
+        if let Some(i) = sig.find("@min-args") {
+            let n: String = sig[i + 9..]
+                .trim_start()
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            if let Ok(n) = n.parse::<usize>() {
+                out.required = out.required.max(n);
+                out.min_args_override = true;
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -1015,12 +1033,12 @@ impl Args {
         let mut out: Vec<(Option<PhpStr>, Value)> = self.vals[..self.num_slots]
             .iter()
             .chain(self.vals[self.rest_start..].iter())
-            .map(|v| (None, v.unref()))
+            .map(|v| (None, v.clone()))
             .collect();
         out.extend(
             self.named_rest
                 .iter()
-                .map(|(n, v)| (Some(n.clone()), v.unref())),
+                .map(|(n, v)| (Some(n.clone()), v.clone())),
         );
         out
     }
@@ -1060,12 +1078,12 @@ impl PlacedArgs {
             .iter()
             .flatten()
             .chain(self.extra.iter())
-            .map(|v| (None, v.unref()))
+            .map(|v| (None, v.clone()))
             .collect();
         out.extend(
             self.named_rest
                 .iter()
-                .map(|(n, v)| (Some(n.clone()), v.unref())),
+                .map(|(n, v)| (Some(n.clone()), v.clone())),
         );
         out
     }
@@ -1078,6 +1096,18 @@ impl CallArgs {
             ..CallArgs::default()
         }
     }
+}
+
+/// The expected-type wording of ZPP errors (`Z_EXPECTED_*`), which differs
+/// from the stub type for some parameter kinds.
+fn zpp_expected(p: &Param) -> String {
+    if let Some(ty) = &p.ty {
+        // Z_PARAM_ARRAY_OR_OBJECT reports "array".
+        if ty.classes.is_empty() && ty.mask & !mask::NULL == mask::ARRAY | mask::OBJECT {
+            return if ty.allows_null() { "?array".into() } else { "array".into() };
+        }
+    }
+    p.type_string()
 }
 
 fn arg_label(sig: &Signature, i: usize) -> String {
@@ -1130,7 +1160,7 @@ impl Vm {
         let msg = format!(
             "{fname}(): Argument {} must be of type {}, {} given",
             arg_label(sig, i),
-            p.type_string(),
+            zpp_expected(p),
             v.value_name()
         );
         self.throw_error("TypeError", msg)
@@ -1501,6 +1531,7 @@ impl Vm {
             call_site,
             args: placed.trace_args(),
             is_internal: true,
+            env: None,
         };
         self.push_frame(frame);
         let result = self.finish_native_args(func, placed).and_then(|mut args| {

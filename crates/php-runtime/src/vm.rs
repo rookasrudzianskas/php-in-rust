@@ -60,6 +60,9 @@ pub struct Frame {
     /// Arguments as passed (named ones carry their name).
     pub args: Vec<(Option<PhpStr>, Value)>,
     pub is_internal: bool,
+    /// Variable scope of a userland frame (or of the includer for
+    /// `include`/`eval` frames); backtraces read live argument values from it.
+    pub env: Option<Rc<crate::interp::Env>>,
 }
 
 impl Frame {
@@ -83,6 +86,7 @@ impl Frame {
             args: args.into_iter().map(|v| (None, v)).collect(),
             is_internal: false,
             function: Some(function),
+            env: None,
         }
     }
 }
@@ -383,6 +387,30 @@ pub struct Vm {
     /// Arrays currently being compared (recursion detection).
     pub(crate) compare_guard: Vec<usize>,
     ext_data: HashMap<TypeId, Box<dyn Any>>,
+    /// Interpreter state (scopes, included files, shutdown functions, autoloaders).
+    pub interp: crate::interp::State,
+    /// Engine → extension callbacks.
+    pub hooks: Hooks,
+}
+
+/// `interface_gets_implemented`: called with (interface, class) when a class
+/// implementing the interface is linked.
+pub type InterfaceHook = fn(&mut Vm, &ClassRef, &ClassRef) -> PResult<()>;
+
+/// Callbacks extensions register to react to engine events (php-runtime
+/// cannot depend on php-ext).
+#[derive(Default, Clone)]
+pub struct Hooks {
+    /// `(lowercase interface name, hook)`, e.g. `("serializable", ...)`.
+    pub interface_implemented: Vec<(PhpStr, InterfaceHook)>,
+}
+
+impl Hooks {
+    /// Registers an `interface_gets_implemented` callback for `interface`.
+    pub fn on_interface_implemented(&mut self, interface: &str, hook: InterfaceHook) {
+        self.interface_implemented
+            .push((PhpStr::from(interface.to_ascii_lowercase()), hook));
+    }
 }
 
 impl Default for Vm {
@@ -418,6 +446,8 @@ impl Vm {
             modules: Vec::new(),
             compare_guard: Vec::new(),
             ext_data: HashMap::new(),
+            interp: crate::interp::State::default(),
+            hooks: Hooks::default(),
         };
         vm.register_module("Core", crate::builtins::register_core);
         // sapi/cli HARDCODED_INI and INI_DEFAULT values.
@@ -743,13 +773,22 @@ impl Vm {
             }
             if !ignore_args {
                 let mut args = PhpArray::new();
-                for (name, v) in &f.args {
+                let live;
+                let fargs: &[(Option<PhpStr>, Value)] = match &f.env {
+                    // Userland frames show the current values of their parameters.
+                    Some(env) if f.function.is_some() && !f.is_internal => {
+                        live = env.trace_args(f.function.as_deref());
+                        &live
+                    }
+                    _ => &f.args,
+                };
+                for (name, v) in fargs {
                     match name {
                         Some(n) => {
-                            args.insert(crate::value::ArrayKey::Str(n.clone()), v.clone());
+                            args.insert(crate::value::ArrayKey::Str(n.clone()), v.unref());
                         }
                         None => {
-                            let _ = args.append(v.clone());
+                            let _ = args.append(v.unref());
                         }
                     }
                 }
@@ -789,11 +828,30 @@ impl Vm {
 
     /// Creates an instance (`object_init_ex`): the class's `create_object`
     /// handler or a plain object with default properties.
+    ///
+    /// The constructor is not called; constant-expression property defaults
+    /// of userland classes are evaluated (`object_init_ex` semantics), so this
+    /// is what `unserialize()` and `newInstanceWithoutConstructor()` use.
     pub fn instantiate(&mut self, class: &ClassRef) -> PResult<ObjRef> {
-        match class.handlers.create_object {
-            Some(f) => f(self, class),
-            None => Ok(ObjRef::new(class.clone())),
-        }
+        crate::interp::objects::instantiate(self, class)
+    }
+
+    /// The class scope of the innermost userland frame (`zend_get_executed_scope`),
+    /// for visibility checks made by built-in functions.
+    pub fn calling_scope(&mut self) -> Option<ClassRef> {
+        crate::interp::call::calling_scope(self)
+    }
+
+    /// Throws php-src's "Maximum call stack size" Error when the native stack
+    /// is nearly exhausted (for recursive built-ins).
+    pub fn check_stack(&mut self) -> PResult<()> {
+        crate::interp::check_stack(self)
+    }
+
+    /// `zend_update_class_constants`: evaluates the class's constant
+    /// expressions (constants, property defaults, static properties).
+    pub fn update_class_constants(&mut self, class: &ClassRef) -> PResult<()> {
+        crate::interp::decl::update_class_constants(self, class)
     }
 
     /// `cast_object` dispatch: the class handler, else the standard handler
