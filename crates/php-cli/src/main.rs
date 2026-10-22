@@ -57,15 +57,28 @@ impl Write for ErrOut {
     }
 }
 
+/// include/require through the stream layer (wrappers, include_path).
+fn include_opener(vm: &mut Vm, path: &[u8], _use_include_path: bool) -> php_runtime::PResult<Option<(PhpStr, Vec<u8>)>> {
+    Ok(php_ext::standard::streams::open_for_include(vm, path)?.map(|(data, resolved)| (resolved, data)))
+}
+
+fn deferred_closes(vm: &mut Vm) -> php_runtime::PResult<()> {
+    php_ext::standard::streams::process_deferred_closes(vm)
+}
+
 fn new_vm(config: &args::CliConfig, out: &SharedOut) -> Vm {
     let mut vm = Vm::with_sink(Box::new(out.clone()));
     vm.stderr = Box::new(ErrOut(out.clone()));
     php_runtime::interp::install(&mut vm);
     php_ext::register_all(&mut vm);
     php_runtime::interp::install_standard(&mut vm);
+    vm.hooks.include_opener = Some(include_opener);
+    vm.hooks.on_statement_boundary(deferred_closes);
+    vm.hooks.on_request_shutdown(deferred_closes);
     for e in &config.ini_entries {
         let name = to_bytes(&e.name);
         let value = to_bytes(&e.value);
+        php_ext::standard::basic::set_cfg_entry(&mut vm, PhpStr::from_vec(name.clone()), Value::String(PhpStr::from_vec(value.clone())));
         vm.ini_set_system(&name, PhpStr::from_vec(value));
     }
     vm
@@ -73,6 +86,8 @@ fn new_vm(config: &args::CliConfig, out: &SharedOut) -> Vm {
 
 /// `$_SERVER`, `$argv`, `$argc` and the other superglobals.
 fn setup_globals(vm: &mut Vm, config: &args::CliConfig, script: &[u8]) {
+    php_ext::standard::basic::set_argv(vm, config.argv().iter().map(|a| PhpStr::from_vec(to_bytes(a))).collect());
+    php_ext::standard::basic::set_main_script(vm, PhpStr::from_bytes(script));
     let g = vm.global_env();
     let argv: Vec<Value> = config.argv().iter().map(|a| Value::String(PhpStr::from_vec(to_bytes(a)))).collect();
     let argc = argv.len() as i64;
