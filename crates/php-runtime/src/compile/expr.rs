@@ -240,6 +240,9 @@ impl Lowerer<'_> {
                 }))
             }
             K::StaticCall { class, name, args } => {
+                if let Some(x) = self.parent_hook_call(class, name, args, line)? {
+                    return Ok(x);
+                }
                 let cs = self.class_spec(class)?;
                 let m = self.member(name)?;
                 if args.is_callable_convert() {
@@ -586,6 +589,64 @@ impl Lowerer<'_> {
             return Ok(inner);
         }
         self.expr(e)
+    }
+
+    /// `parent::$prop::get()` / `parent::$prop::set($v)` inside a property
+    /// hook (`zend_compile_parent_property_hook_call`). Lowered to a static
+    /// call of the pseudo method `$prop::get` on `parent`.
+    fn parent_hook_call(&mut self, class: &ast::ClassRef, name: &ast::MemberName, args: &ast::ArgList, line: u32) -> CResult<Option<Expr>> {
+        let ast::ClassRef::Expr(ce) = class else { return Ok(None) };
+        let ast::ExprKind::StaticProp {
+            class: ast::ClassRef::Name(pn),
+            name: ast::VarName::Name(prop),
+            parenthesized: false,
+        } = &ce.kind
+        else {
+            return Ok(None);
+        };
+        if pn.special_class() != Some(ast::SpecialClass::Parent) {
+            return Ok(None);
+        }
+        let ast::MemberName::Ident(hook) = name else { return Ok(None) };
+        let kind = if hook.eq_ignore_case(b"get") {
+            HookKind::Get
+        } else if hook.eq_ignore_case(b"set") {
+            HookKind::Set
+        } else {
+            return Ok(None);
+        };
+        if self.class.is_none() {
+            return self.error("Cannot use \"parent\" when no class scope is active");
+        }
+        if args.is_callable_convert() {
+            return self.error("Cannot create Closure for parent property hook call");
+        }
+        let Some(active) = self.fs.hook_prop.clone() else {
+            return self.error(format!("Must not use parent::${prop}::{hook}() outside a property hook"));
+        };
+        if active.as_bytes() != prop.as_bytes() {
+            return self.error(format!(
+                "Must not use parent::${prop}::{hook}() in a different property (${active})"
+            ));
+        }
+        if self.fs.hook_kind != Some(kind) {
+            return self.error(format!(
+                "Must not use parent::${prop}::{hook}() in a different property hook ({})",
+                if self.fs.hook_kind == Some(HookKind::Get) { "get" } else { "set" }
+            ));
+        }
+        let a = self.args(args)?;
+        let pseudo = PhpStr::from(format!(
+            "${}::{}",
+            prop,
+            if kind == HookKind::Get { "get" } else { "set" }
+        ));
+        Ok(Some(Expr::StaticCall(Box::new(StaticCallExpr {
+            class: ClassSpec::Parent,
+            name: Member::Name(pseudo),
+            args: a,
+            line,
+        }))))
     }
 
     fn magic_const(&mut self, m: ast::MagicConst, line: u32) -> CResult<Expr> {
