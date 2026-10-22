@@ -563,3 +563,121 @@ fn user_function_exception_propagates() {
     p.catch(r);
     assert_eq!(p.output(), "Exception: boom\nException: boom\n");
 }
+
+#[test]
+fn column_meta_table_names() {
+    let mut p = P::new();
+    let db = p.new_obj("PDO", vec![s("sqlite::memory:")]);
+    p.exec(&db, "CREATE TABLE test_42589 (field1 VARCHAR(10))");
+    p.exec(&db, "INSERT INTO test_42589 VALUES('test')");
+    let result = p.obj(
+        &db,
+        "query",
+        vec![s(
+            "SELECT * FROM test_42589 t1 LEFT JOIN test_42589 t2 ON t1.field1 = t2.field1",
+        )],
+    );
+    for col in [0, 1] {
+        let meta = p.m(&result, "getColumnMeta", vec![i(col)]);
+        let table = meta.as_array().unwrap().get_str(b"table").cloned();
+        p.dump(&Value::Bool(
+            table.and_then(|t| t.as_str().map(|s| s.to_vec())) == Some(b"test_42589".to_vec()),
+        ));
+    }
+    p.check(phpt!("pdo_sqlite/tests/bug_42589.phpt"));
+}
+
+#[test]
+fn column_meta_empty_result_set() {
+    let mut p = P::new();
+    let opts = iassoc(vec![(ATTR_ERRMODE, i(2))]);
+    let pdo = p.new_obj(
+        "PDO",
+        vec![s("sqlite::memory:"), Value::Null, Value::Null, opts],
+    );
+    let stmt = p.obj(&pdo, "query", vec![s("select 1 where 0")]);
+    if p.m(&stmt, "columnCount", vec![]).as_int() != Some(0) {
+        let r = p.m(&stmt, "getColumnMeta", vec![i(0)]);
+        p.dump(&r);
+    }
+    p.check(phpt!("pdo_sqlite/tests/bug79664.phpt"));
+}
+
+#[test]
+fn column_meta_unexecuted_statement() {
+    let mut p = P::new();
+    let db = p.new_obj("PDO", vec![s("sqlite::memory:")]);
+    let stmt = p.obj(&db, "prepare", vec![s("select :a, :b, ?")]);
+    let r = p.m(&stmt, "getColumnMeta", vec![i(0)]);
+    p.dump(&r);
+    p.check(phpt!("pdo_sqlite/tests/gh17837.phpt"));
+    // Declared types and the blob flag.
+    p.exec(&db, "CREATE TABLE m (i INTEGER, f REAL, t TEXT, b BLOB)");
+    p.exec(&db, "INSERT INTO m VALUES (1, 1.5, 'x', x'00')");
+    let st = p.obj(&db, "query", vec![s("SELECT * FROM m")]);
+    for col in 0..4 {
+        let meta = p.m(&st, "getColumnMeta", vec![i(col)]);
+        p.dump(&meta);
+    }
+    // php-src reports sqlite3_errcode() of the last step (SQLITE_ROW).
+    let r = p.tm(&st, "getColumnMeta", vec![i(4)]);
+    p.catch(r);
+    let r = p.tm(&st, "getColumnMeta", vec![i(-1)]);
+    p.catch(r);
+    let out = p.output();
+    assert!(out.contains("[\"native_type\"]=>\n  string(7) \"integer\"\n  [\"pdo_type\"]=>\n  int(1)\n  [\"sqlite:decl_type\"]=>\n  string(7) \"INTEGER\"\n  [\"table\"]=>\n  string(1) \"m\""), "{out}");
+    assert!(
+        out.contains("[\"native_type\"]=>\n  string(6) \"double\""),
+        "{out}"
+    );
+    assert!(
+        out.contains("[\"flags\"]=>\n  array(1) {\n    [0]=>\n    string(4) \"blob\""),
+        "{out}"
+    );
+    assert!(out.ends_with("PDOException: SQLSTATE[HY000]: General error: 100 another row available\nValueError: PDOStatement::getColumnMeta(): Argument #1 ($column) must be greater than or equal to 0\n"), "{out}");
+}
+
+#[test]
+fn persistent_handles_share_transactions() {
+    let mut p = P::new();
+    let dsn = "sqlite::memory:";
+    let opts = || iassoc(vec![(ATTR_PERSISTENT, Value::Bool(true))]);
+    let a = p.new_obj("PDO", vec![s(dsn), Value::Null, Value::Null, opts()]);
+    let b = p.new_obj("PDO", vec![s(dsn), Value::Null, Value::Null, opts()]);
+    p.m(&b, "beginTransaction", vec![]);
+    drop(a);
+    p.vm().run_pending_destructors().unwrap();
+    let r = p.m(&b, "inTransaction", vec![]);
+    p.dump(&r);
+    let r = p.m(&b, "commit", vec![]);
+    p.dump(&r);
+    p.m(&b, "beginTransaction", vec![]);
+    p.exec(&b, "CREATE TABLE test (a int)");
+    drop(b);
+    p.vm().run_pending_destructors().unwrap();
+    let c = p.new_obj("PDO", vec![s(dsn), Value::Null, Value::Null, opts()]);
+    let r = p.m(&c, "inTransaction", vec![]);
+    p.dump(&r);
+    let q = p.obj(
+        &c,
+        "query",
+        vec![s("SELECT count(*) FROM sqlite_master WHERE name = 'test'")],
+    );
+    let r = p.m(&q, "fetchColumn", vec![]);
+    p.dump(&r);
+    p.check(phpt!("pdo_sqlite/tests/gh23962.phpt"));
+    let r = p.m(&c, "getAttribute", vec![i(ATTR_PERSISTENT)]);
+    assert!(matches!(r, Value::Bool(true)));
+    // Statement classes cannot be used with persistent handles.
+    p.m(&c, "setAttribute", vec![i(ATTR_ERRMODE), i(2)]);
+    let r = p.tm(
+        &c,
+        "setAttribute",
+        vec![i(ATTR_STATEMENT_CLASS), arr(vec![s("PDOStatement")])],
+    );
+    p.catch(r);
+    assert_eq!(
+        p.output(),
+        "PDOException: SQLSTATE[HY000]: General error: PDO::ATTR_STATEMENT_CLASS cannot be used with persistent PDO instances\n"
+    );
+}
