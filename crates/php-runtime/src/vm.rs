@@ -783,6 +783,7 @@ impl Vm {
             b"error_prepend_string" => self.errors.prepend = v,
             b"error_append_string" => self.errors.append = v,
             b"implicit_flush" => self.output.implicit_flush = ini::parse_bool(&s),
+            b"memory_limit" => crate::alloc::set_limit(ini::atol_quantity(&s)),
             _ => {}
         }
     }

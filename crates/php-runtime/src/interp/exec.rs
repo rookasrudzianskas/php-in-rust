@@ -35,9 +35,15 @@ pub fn exec_block(vm: &mut Vm, cx: &Ctx, stmts: &[Stmt]) -> PResult<()> {
     Ok(())
 }
 
-/// Runs destructors queued by values dropped during the statement.
+/// Reports a heap that grew past `memory_limit` during the statement and runs
+/// destructors queued by values dropped during it.
 #[inline]
 fn after_stmt(vm: &mut Vm) -> PResult<()> {
+    if let Some((limit, size)) = crate::alloc::take_exhausted() {
+        return Err(vm.fatal_error(format!(
+            "Allowed memory size of {limit} bytes exhausted (tried to allocate {size} bytes)"
+        )));
+    }
     if object::has_pending_destructors() {
         vm.run_pending_destructors()?;
     }

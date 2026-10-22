@@ -341,7 +341,6 @@ tests/phpt/Zend/tests/bug41372.phpt
 tests/phpt/Zend/tests/bug42772.phpt
 tests/phpt/Zend/tests/bug42859.phpt
 tests/phpt/Zend/tests/bug43053.phpt
-tests/phpt/Zend/tests/bug43128.phpt
 tests/phpt/Zend/tests/bug43183.phpt
 tests/phpt/Zend/tests/bug43343.phpt
 tests/phpt/Zend/tests/bug43851.phpt
@@ -1993,7 +1992,6 @@ tests/phpt/Zend/tests/magic_methods/bug70223.phpt
 tests/phpt/Zend/tests/magic_methods/bug70321.phpt
 tests/phpt/Zend/tests/magic_methods/bug70967.phpt
 tests/phpt/Zend/tests/magic_methods/bug71359.phpt
-tests/phpt/Zend/tests/magic_methods/bug71818.phpt
 tests/phpt/Zend/tests/magic_methods/bug72813.phpt
 tests/phpt/Zend/tests/magic_methods/bug72854.phpt
 tests/phpt/Zend/tests/magic_methods/bug73288.phpt
@@ -2790,7 +2788,6 @@ tests/phpt/Zend/tests/return_types/void_disallowed2.phpt
 tests/phpt/Zend/tests/return_types/void_disallowed3.phpt
 tests/phpt/Zend/tests/return_types/void_parameter.phpt
 tests/phpt/Zend/tests/rope_with_exception.phpt
-tests/phpt/Zend/tests/runtime_compile_time_binary_operands.phpt
 tests/phpt/Zend/tests/self_and.phpt
 tests/phpt/Zend/tests/self_class_const_outside_class.phpt
 tests/phpt/Zend/tests/self_mod.phpt

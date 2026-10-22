@@ -72,6 +72,7 @@
 // Let-chains (Rust 1.88) are not available at the workspace MSRV (1.85).
 #![allow(clippy::collapsible_if)]
 
+pub mod alloc;
 pub mod builtins;
 pub mod class;
 pub mod compile;

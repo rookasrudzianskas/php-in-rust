@@ -15,8 +15,18 @@ use php_runtime::value::{ArrayKey, PhpArray};
 use php_runtime::{PhpStr, Value, Vm};
 use php_syntax::ParseOptions;
 
-/// Stack of the interpreter thread: deep PHP recursion runs on it.
+/// Stack of the interpreter thread: deep PHP recursion runs on it. Only the
+/// pages actually touched use memory.
 const STACK_SIZE: usize = 4 << 30;
+
+/// Native stack PHP code may use before "Maximum call stack size reached"
+/// (zend.max_allowed_stack_size); keeps runaway recursion from committing
+/// gigabytes of memory.
+const MAX_STACK_USE: usize = 512 << 20;
+
+/// Counts heap use so `memory_limit` is enforced.
+#[global_allocator]
+static GLOBAL: php_runtime::alloc::TrackingAllocator = php_runtime::alloc::TrackingAllocator;
 
 fn to_bytes(s: &OsStr) -> Vec<u8> {
     #[cfg(unix)]
@@ -187,7 +197,8 @@ fn run_inner(config: &args::CliConfig, argv0: &str, out: &SharedOut) -> i32 {
         let x = 0u8;
         std::hint::black_box(&x) as *const u8 as usize
     };
-    vm.interp.stack_limit.set(top.saturating_sub(STACK_SIZE - (64 << 20)));
+    vm.interp.stack_limit.set(top.saturating_sub(MAX_STACK_USE));
+    php_runtime::alloc::set_limit(vm.ini_int("memory_limit"));
     match config.mode {
         args::Mode::Modules => {
             let mut mods: Vec<&str> = vm.modules.clone();

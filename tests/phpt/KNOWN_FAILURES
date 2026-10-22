@@ -1,0 +1,11 @@
+# Conformance tests that passed only because memory_limit was not enforced.
+# Since the runtime enforces memory_limit (crates/php-runtime/src/alloc.rs)
+# they exceed the limit php-src fits them in. Each line: path, then the reason.
+
+# No cycle collector yet: 100k self-referencing objects are never freed.
+tests/phpt/Zend/tests/magic_methods/bug71818.phpt
+
+# The AST is ~30x the source size (Expr is 96 bytes, Stmt 136): a 10 MB class
+# name and an 11 MB generated include exceed memory_limit while compiling.
+tests/phpt/Zend/tests/bug43128.phpt
+tests/phpt/Zend/tests/runtime_compile_time_binary_operands.phpt
