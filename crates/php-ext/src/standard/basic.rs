@@ -34,6 +34,11 @@ pub struct BasicState {
     /// `$_SERVER['HTTP_USER_AGENT']` for `get_browser()`; the interpreter
     /// records it with [`set_http_user_agent`] when the superglobal exists.
     pub http_user_agent: Option<PhpStr>,
+    /// `php_ini_opened_path`, `php_ini_scanned_path`, `php_ini_scanned_files`
+    /// (set by the CLI through [`set_ini_files`]).
+    pub ini_opened_path: Option<PhpStr>,
+    pub ini_scanned_path: Option<PhpStr>,
+    pub ini_scanned_files: Option<PhpStr>,
     /// `PG(connection_status)`.
     pub connection_status: i64,
     /// `PG(in_error_log)`: guards `php_log_err()` against recursion.
@@ -48,6 +53,20 @@ pub fn set_main_script(vm: &mut Vm, path: impl Into<PhpStr>) {
 /// Records `$_SERVER['argv']` for `getopt()`.
 pub fn set_argv(vm: &mut Vm, argv: Vec<PhpStr>) {
     vm.ext_data::<BasicState>().argv = Some(argv);
+}
+
+/// Records the php.ini files the SAPI loaded (`php_ini_loaded_file()`,
+/// `php_ini_scanned_files()` and the `phpinfo()` rows).
+pub fn set_ini_files(
+    vm: &mut Vm,
+    opened_path: Option<PhpStr>,
+    scanned_path: Option<PhpStr>,
+    scanned_files: Option<PhpStr>,
+) {
+    let st = vm.ext_data::<BasicState>();
+    st.ini_opened_path = opened_path;
+    st.ini_scanned_path = scanned_path;
+    st.ini_scanned_files = scanned_files;
 }
 
 /// Records `$_SERVER['HTTP_USER_AGENT']` for `get_browser()`.
