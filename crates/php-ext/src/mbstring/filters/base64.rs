@@ -41,7 +41,8 @@ pub static VTBL_B64_8BIT: Vtbl = Vtbl {
 };
 
 /// `mbfl_base64_table` (without the trailing NUL).
-const MBFL_BASE64_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const MBFL_BASE64_TABLE: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 #[inline]
 fn b64(i: i32) -> i32 {
@@ -297,5 +298,96 @@ pub fn mb_wchar_to_base64(input: &[u32], buf: &mut ConvertBuf, end: bool) {
         }
     } else {
         buf.state = (cache << 8) | (((chars_output / 4) & 0x3F) << 2) | ((bits / 8) & 0x3);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mbstring::filters::eightbit::MBFL_ENCODING_8BIT;
+    use crate::mbstring::mbfl::convert::{decode_all, mb_fast_convert};
+    use crate::mbstring::mbfl::encoding::ILLEGAL_MODE_CHAR;
+    use crate::mbstring::mbfl::filter::convert_filter_new;
+
+    struct Collect(Vec<u8>);
+    impl FilterOutput for Collect {
+        fn output(&mut self, c: i32) -> i32 {
+            self.0.push(c as u8);
+            0
+        }
+        fn flush(&mut self) -> i32 {
+            0
+        }
+    }
+
+    /// Runs `s` through the legacy filter from `from` to `to`.
+    fn legacy(s: &[u8], from: &'static Encoding, to: &'static Encoding) -> Vec<u8> {
+        let mut f = convert_filter_new(from, to).unwrap();
+        let mut out = Collect(Vec::new());
+        for &c in s {
+            f.feed(c as i32, &mut out);
+        }
+        f.flush(&mut out);
+        out.0
+    }
+
+    fn conv(s: &[u8], from: &'static Encoding, to: &'static Encoding) -> Vec<u8> {
+        mb_fast_convert(s, from, to, b'?' as u32, ILLEGAL_MODE_CHAR).0
+    }
+
+    /// base64_encoding.phpt (plus the same vectors through the legacy filters)
+    #[test]
+    fn base64_encoding() {
+        let long = "ABCDEFGHIJ".repeat(20);
+        let cases: &[(&[u8], &[u8])] = &[
+            (b"", b""),
+            (b"a", b"YQ=="),
+            (b"ab", b"YWI="),
+            (b"\x01\x02\x03", b"AQID"),
+            (b"\xFF\xFE\x11\x22", b"//4RIg=="),
+            (b"\x00", b"AA=="),
+            (b"\x00\x00", b"AAA="),
+            (b"\x00\x00\x00", b"AAAA"),
+            (
+                long.as_bytes(),
+                b"QUJDREVGR0hJSkFCQ0RFRkdISUpBQkNERUZHSElKQUJDREVGR0hJSkFCQ0RFRkdISUpBQkNERUZH\r\nSElKQUJDREVGR0hJSkFCQ0RFRkdISUpBQkNERUZHSElKQUJDREVGR0hJSkFCQ0RFRkdISUpBQkNE\r\nRUZHSElKQUJDREVGR0hJSkFCQ0RFRkdISUpBQkNERUZHSElKQUJDREVGR0hJSkFCQ0RFRkdISUpB\r\nQkNERUZHSElKQUJDREVGR0hJSkFCQ0RFRkdISUo=",
+            ),
+        ];
+        let b64 = &MBFL_ENCODING_BASE64;
+        let bit8 = &MBFL_ENCODING_8BIT;
+        for &(raw, base64) in cases {
+            assert_eq!(conv(raw, bit8, b64), base64, "{raw:X?}");
+            assert_eq!(
+                conv(base64, b64, bit8),
+                raw,
+                "{:?}",
+                String::from_utf8_lossy(base64)
+            );
+            assert_eq!(legacy(raw, bit8, b64), base64, "{raw:X?}");
+            assert_eq!(legacy(base64, b64, bit8), raw);
+        }
+    }
+
+    #[test]
+    fn decode_errors_and_state() {
+        // Bytes outside the alphabet are errors; whitespace and '=' are skipped.
+        // The trailing partial group is only emitted at the end of the input.
+        assert_eq!(
+            decode_all(b"Y Q\r\n=*=", &MBFL_ENCODING_BASE64),
+            [BAD_INPUT, 0x61]
+        );
+        // Decoding with the minimum buffer size keeps the cached bits.
+        let data = format!("{}xy", "ABCDEFGHIJ".repeat(20));
+        let input = conv(data.as_bytes(), &MBFL_ENCODING_8BIT, &MBFL_ENCODING_BASE64);
+        let mut all = Vec::new();
+        let mut buf = [0u32; 3];
+        let mut state = 0;
+        let mut inp = &input[..];
+        while !inp.is_empty() {
+            let n = mb_base64_to_wchar(&mut inp, &mut buf, &mut state);
+            all.extend_from_slice(&buf[..n]);
+        }
+        let expected: Vec<u32> = data.bytes().map(|b| b as u32).collect();
+        assert_eq!(all, expected);
     }
 }

@@ -8,7 +8,9 @@
 
 use crate::mbstring::mbfl::convert::ConvertBuf;
 use crate::mbstring::mbfl::encoding::{ENCTYPE_SBCS, Encoding, NoEncoding};
-use crate::mbstring::mbfl::filter::{ConvertFilter, FilterOutput, Vtbl, ck, common_ctor, common_flush};
+use crate::mbstring::mbfl::filter::{
+    ConvertFilter, FilterOutput, Vtbl, ck, common_ctor, common_flush,
+};
 
 pub static MBFL_ENCODING_UUENCODE: Encoding = Encoding {
     no: NoEncoding::Uuencode,
@@ -212,7 +214,11 @@ pub fn mb_uuencode_to_wchar(input: &mut &[u8], out: &mut [u32], state: &mut u32)
                     size -= 1;
                 }
 
-                st = if size != 0 { UUDEC_STATE_A } else { UUDEC_STATE_SKIP_NEWLINE };
+                st = if size != 0 {
+                    UUDEC_STATE_A
+                } else {
+                    UUDEC_STATE_SKIP_NEWLINE
+                };
             }
             UUDEC_STATE_SKIP_NEWLINE => {
                 st = UUDEC_STATE_SIZE;
@@ -377,4 +383,89 @@ pub fn mb_wchar_to_uuencode(input: &[u32], buf: &mut ConvertBuf, end: bool) {
         | ((n_cached_bits & 0xFF) << 8)
         | ((bytes_encoded & 0x7F) << 1)
         | (buf.state & 1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mbstring::filters::eightbit::MBFL_ENCODING_8BIT;
+    use crate::mbstring::mbfl::convert::{encode_all, mb_fast_convert};
+    use crate::mbstring::mbfl::encoding::ILLEGAL_MODE_CHAR;
+    use crate::mbstring::mbfl::filter::convert_filter_new;
+
+    fn conv(s: &[u8], from: &'static Encoding, to: &'static Encoding) -> Vec<u8> {
+        mb_fast_convert(s, from, to, b'?' as u32, ILLEGAL_MODE_CHAR).0
+    }
+
+    /// uuencode_encoding.phpt
+    #[test]
+    fn uuencode_encoding() {
+        let uu = &MBFL_ENCODING_UUENCODE;
+        let bit8 = &MBFL_ENCODING_8BIT;
+        let cases: &[(&[u8], &[u8])] = &[
+            (b"", b""),
+            // mbstring's uuencode requires the user to strip off the terminating "`\nend\n"
+            (b"begin 0644 filename\n#0V%T\n", b"Cat"),
+            (
+                b"begin 0644 filename\n::'1T<#HO+W=W=RYW:6MI<&5D:6$N;W)G#0H`\n",
+                b"http://www.wikipedia.org\r\n",
+            ),
+            (b"begin 0644 filename\n#`0(#\n", b"\x01\x02\x03"),
+            (b"begin 0644 filename\n$`0(#\"@``\n", b"\x01\x02\x03\n"),
+        ];
+        for &(uuencode, raw) in cases {
+            assert_eq!(
+                conv(uuencode, uu, bit8),
+                raw,
+                "{:?}",
+                String::from_utf8_lossy(uuencode)
+            );
+            assert_eq!(conv(raw, bit8, uu), uuencode, "{raw:X?}");
+        }
+
+        // Round trips (php-src uses 500 random alphanumeric strings of 1-300 bytes)
+        let chars = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let mut seed: u32 = 1000;
+        let mut rand = |n: u32| {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (seed >> 16) % n
+        };
+        for _ in 0..500 {
+            let len = 1 + rand(300) as usize;
+            let data: Vec<u8> = (0..len)
+                .map(|_| chars[rand(chars.len() as u32) as usize])
+                .collect();
+            let encoded = conv(&data, bit8, uu);
+            assert_eq!(conv(&encoded, uu, bit8), data);
+            // Encoding in 128-byte pieces (as mb_fast_convert does) gives the same
+            // result as encoding in one call.
+            let cps: Vec<u32> = data.iter().map(|&b| b as u32).collect();
+            assert_eq!(
+                encode_all(&cps, uu, b'?' as u32, ILLEGAL_MODE_CHAR).out,
+                encoded
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_filter() {
+        struct Collect(Vec<i32>);
+        impl FilterOutput for Collect {
+            fn output(&mut self, c: i32) -> i32 {
+                self.0.push(c);
+                0
+            }
+            fn flush(&mut self) -> i32 {
+                0
+            }
+        }
+        let mut f = convert_filter_new(&MBFL_ENCODING_UUENCODE, &MBFL_ENCODING_8BIT).unwrap();
+        let mut out = Collect(Vec::new());
+        for &c in b"junk\nbegin 0644 filename\n#0V%T\n$`0(#\"@``\n" {
+            f.feed(c as i32, &mut out);
+        }
+        f.flush(&mut out);
+        let bytes: Vec<u8> = out.0.iter().map(|&c| c as u8).collect();
+        assert_eq!(bytes, b"Cat\x01\x02\x03\n");
+    }
 }

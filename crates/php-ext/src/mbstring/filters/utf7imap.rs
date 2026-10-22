@@ -5,10 +5,17 @@
 //! Besides the fast converters and the validity check, the legacy filters
 //! are kept because `mbfl_strcut` walks UTF7-IMAP strings with them.
 
-use crate::mbstring::filters::utf7::{DASH, ILLEGAL, has_surrogate, is_base64_end_valid, restore_state, save_state};
+use crate::mbstring::filters::utf7::{
+    DASH, ILLEGAL, has_surrogate, is_base64_end_valid, restore_state, save_state,
+};
 use crate::mbstring::mbfl::convert::{ConvertBuf, mb_illegal_output};
-use crate::mbstring::mbfl::encoding::{BAD_INPUT, Encoding, NoEncoding, WCSPLANE_SUPMAX, WCSPLANE_SUPMIN, WCSPLANE_UCS2MAX, WCSPLANE_UTF32MAX};
-use crate::mbstring::mbfl::filter::{ConvertFilter, FilterOutput, Vtbl, ck, common_ctor, illegal_output};
+use crate::mbstring::mbfl::encoding::{
+    BAD_INPUT, Encoding, NoEncoding, WCSPLANE_SUPMAX, WCSPLANE_SUPMIN, WCSPLANE_UCS2MAX,
+    WCSPLANE_UTF32MAX,
+};
+use crate::mbstring::mbfl::filter::{
+    ConvertFilter, FilterOutput, Vtbl, ck, common_ctor, illegal_output,
+};
 
 pub static MBFL_ENCODING_UTF7IMAP: Encoding = Encoding {
     no: NoEncoding::Utf7imap,
@@ -43,12 +50,18 @@ pub static VTBL_WCHAR_UTF7IMAP: Vtbl = Vtbl {
 
 /// `mbfl_utf7imap_base64_table` / `mbfl_base64_table` of this file (without
 /// the trailing NUL); both are the same.
-const MBFL_UTF7IMAP_BASE64_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+,";
+const MBFL_UTF7IMAP_BASE64_TABLE: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+,";
 
 /// The common tail of states 4, 7 and 9 of `mbfl_filt_conv_utf7imap_wchar`:
 /// `s` is a complete UTF-16 unit and `n` the bits already received for the
 /// next one.
-fn utf7imap_wchar_emit(mut s: i32, n: i32, f: &mut ConvertFilter, out: &mut dyn FilterOutput) -> i32 {
+fn utf7imap_wchar_emit(
+    mut s: i32,
+    n: i32,
+    f: &mut ConvertFilter,
+    out: &mut dyn FilterOutput,
+) -> i32 {
     if (0xD800..0xDC00).contains(&s) {
         // 1st part of surrogate pair
         s = (((s & 0x3FF) << 16) + 0x40_0000) | n;
@@ -77,7 +90,11 @@ fn utf7imap_wchar_emit(mut s: i32, n: i32, f: &mut ConvertFilter, out: &mut dyn 
     0
 }
 
-pub fn mbfl_filt_conv_utf7imap_wchar(c: i32, f: &mut ConvertFilter, out: &mut dyn FilterOutput) -> i32 {
+pub fn mbfl_filt_conv_utf7imap_wchar(
+    c: i32,
+    f: &mut ConvertFilter,
+    out: &mut dyn FilterOutput,
+) -> i32 {
     let mut n = -1;
 
     if f.status != 0 {
@@ -178,7 +195,10 @@ pub fn mbfl_filt_conv_utf7imap_wchar(c: i32, f: &mut ConvertFilter, out: &mut dy
     0
 }
 
-pub fn mbfl_filt_conv_utf7imap_wchar_flush(f: &mut ConvertFilter, out: &mut dyn FilterOutput) -> i32 {
+pub fn mbfl_filt_conv_utf7imap_wchar_flush(
+    f: &mut ConvertFilter,
+    out: &mut dyn FilterOutput,
+) -> i32 {
     if f.status != 0 {
         // It is illegal for a UTF-7 IMAP string to end in a Base-64 encoded
         // section. It should always change back to ASCII before the end.
@@ -194,7 +214,11 @@ fn b64(i: i32) -> i32 {
     MBFL_UTF7IMAP_BASE64_TABLE[i as usize] as i32
 }
 
-pub fn mbfl_filt_conv_wchar_utf7imap(c: i32, f: &mut ConvertFilter, out: &mut dyn FilterOutput) -> i32 {
+pub fn mbfl_filt_conv_wchar_utf7imap(
+    c: i32,
+    f: &mut ConvertFilter,
+    out: &mut dyn FilterOutput,
+) -> i32 {
     let mut n = 0;
 
     if c == b'&' as i32 {
@@ -290,7 +314,10 @@ pub fn mbfl_filt_conv_wchar_utf7imap(c: i32, f: &mut ConvertFilter, out: &mut dy
 
 /// Unlike the other flush functions this one does not call the next
 /// filter's flush function (as in php-src).
-pub fn mbfl_filt_conv_wchar_utf7imap_flush(f: &mut ConvertFilter, out: &mut dyn FilterOutput) -> i32 {
+pub fn mbfl_filt_conv_wchar_utf7imap_flush(
+    f: &mut ConvertFilter,
+    out: &mut dyn FilterOutput,
+) -> i32 {
     let status = f.status;
     let cache = f.cache;
     f.status = 0;
@@ -374,7 +401,14 @@ fn handle_utf16_cp(cp: u16, out: &mut [u32], o: &mut usize, surrogate1: &mut u16
 }
 
 /// `handle_base64_end`.
-fn handle_base64_end(n: u8, out: &mut [u32], o: &mut usize, base64: &mut bool, abrupt: bool, surrogate1: &mut u16) {
+fn handle_base64_end(
+    n: u8,
+    out: &mut [u32],
+    o: &mut usize,
+    base64: &mut bool,
+    abrupt: bool,
+    surrogate1: &mut u16,
+) {
     if abrupt || n == ILLEGAL || *surrogate1 != 0 {
         out[*o] = BAD_INPUT;
         *o += 1;
@@ -462,7 +496,10 @@ pub fn mb_utf7imap_to_wchar(input: &mut &[u8], out: &mut [u32], state: &mut u32)
                 handle_base64_end(n6, out, &mut o, &mut base64, true, &mut surrogate1);
                 continue;
             }
-            let cp = ((n3 as u32) << 14) | ((n4 as u32) << 8) | ((n5 as u32) << 2) | ((n6 as u32 & 0x30) >> 4);
+            let cp = ((n3 as u32) << 14)
+                | ((n4 as u32) << 8)
+                | ((n5 as u32) << 2)
+                | ((n6 as u32 & 0x30) >> 4);
             handle_utf16_cp(cp as u16, out, &mut o, &mut surrogate1);
             if p == e {
                 if (n6 & 0xF) != 0 || surrogate1 != 0 {
@@ -538,7 +575,10 @@ pub fn mb_wchar_to_utf7imap(input: &[u32], buf: &mut ConvertBuf, end: bool) {
                 // Unconsume codepoint; it will be handled by 'ASCII section' code below
                 i -= 1;
                 if nbits != 0 {
-                    buf.add(MBFL_UTF7IMAP_BASE64_TABLE[(((cache as u32) << (6 - nbits)) & 0x3F) as usize]);
+                    buf.add(
+                        MBFL_UTF7IMAP_BASE64_TABLE
+                            [(((cache as u32) << (6 - nbits)) & 0x3F) as usize],
+                    );
                 }
                 nbits = 0;
                 cache = 0;
@@ -673,8 +713,10 @@ pub fn mb_check_utf7imap(input: &[u8]) -> bool {
             if is_base64_end(n6) {
                 return false;
             }
-            let cp2 = (((n3 as u32) << 14) | ((n4 as u32) << 8) | ((n5 as u32) << 2) | ((n6 as u32 & 0x30) >> 4))
-                as u16;
+            let cp2 = (((n3 as u32) << 14)
+                | ((n4 as u32) << 8)
+                | ((n5 as u32) << 2)
+                | ((n6 as u32 & 0x30) >> 4)) as u16;
             if !is_utf16_cp_valid(cp2, is_surrogate) {
                 return false;
             }
@@ -729,4 +771,408 @@ pub fn mb_check_utf7imap(input: &[u8]) -> bool {
         }
     }
     !base64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mbstring::filters::utf8::MBFL_ENCODING_UTF8;
+    use crate::mbstring::mbfl::convert::{decode_all, encode_all, mb_fast_convert};
+    use crate::mbstring::mbfl::encoding::{
+        ILLEGAL_MODE_CHAR, ILLEGAL_MODE_LONG, MIN_WCHAR_BUFSIZE,
+    };
+    use crate::mbstring::mbfl::strcut::mbfl_strcut;
+
+    const IMAP: &Encoding = &MBFL_ENCODING_UTF7IMAP;
+    const UTF8: &Encoding = &MBFL_ENCODING_UTF8;
+
+    /// `mBase64`: Base64 with ',' for '/' and without padding.
+    fn m_base64(bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for chunk in bytes.chunks(3) {
+            let b = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
+            let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+            for i in 0..=chunk.len() {
+                out.push(MBFL_UTF7IMAP_BASE64_TABLE[((n >> (18 - 6 * i)) & 0x3F) as usize]);
+            }
+        }
+        out
+    }
+
+    fn utf16be(s: &str) -> Vec<u8> {
+        s.encode_utf16().flat_map(u16::to_be_bytes).collect()
+    }
+
+    /// `"&" . mBase64($utf16) . $tail`.
+    fn amp(utf16: &[u8], tail: &[u8]) -> Vec<u8> {
+        [b"&", &m_base64(utf16)[..], tail].concat()
+    }
+
+    fn conv(s: &[u8], from: &'static Encoding, to: &'static Encoding) -> (Vec<u8>, u32) {
+        mb_fast_convert(s, from, to, b'%' as u32, ILLEGAL_MODE_CHAR)
+    }
+
+    /// `testValid`: `testValidString($from, $to, 'UTF7-IMAP', 'UTF-8', $both_ways)`.
+    fn test_valid(from: &[u8], to: &[u8], both_ways: bool) {
+        assert!(
+            mb_check_utf7imap(from),
+            "check failed on good string {:?}",
+            String::from_utf8_lossy(from)
+        );
+        assert_eq!(
+            conv(from, IMAP, UTF8),
+            (to.to_vec(), 0),
+            "{:?}",
+            String::from_utf8_lossy(from)
+        );
+        if both_ways {
+            assert_eq!(
+                conv(to, UTF8, IMAP),
+                (from.to_vec(), 0),
+                "{:?}",
+                String::from_utf8_lossy(to)
+            );
+        }
+    }
+
+    /// `testInvalid`: `testInvalidString($from, $to, 'UTF7-IMAP', 'UTF-8')`.
+    fn test_invalid(from: &[u8], to: &[u8]) {
+        identify_invalid(from);
+        let (out, errors) = conv(from, IMAP, UTF8);
+        assert_eq!(out, to, "{:?}", String::from_utf8_lossy(from));
+        assert!(errors > 0);
+    }
+
+    fn identify_invalid(s: &[u8]) {
+        assert!(
+            !mb_check_utf7imap(s),
+            "check passed on bad string {:?}",
+            String::from_utf8_lossy(s)
+        );
+    }
+
+    #[test]
+    fn utf7imap_encoding() {
+        // An empty string is valid
+        test_valid(b"", b"", true);
+
+        // RFC says that 0x00 should be Base64-encoded
+        assert_eq!(conv(b"\x00", UTF8, IMAP), (b"&AAA-".to_vec(), 0));
+        assert_eq!(conv(b"&AAA-", IMAP, UTF8), (b"\x00".to_vec(), 0));
+        assert!(mb_check_utf7imap(b"&AAA-"));
+
+        // Identification and conversion of ASCII characters (minus &)
+        for i in 0x20..=0x7Eu8 {
+            if i != b'&' {
+                test_valid(&[i], &[i], true);
+            }
+        }
+
+        // Identification and conversion of non-ASCII characters
+        for i in (0..0x20u8).chain(0x7F..=0xFF) {
+            test_invalid(&[i], b"%");
+        }
+
+        // Identification of '&' when Base-64 encoded
+        test_valid(&amp(&utf16be("&"), b"-"), b"&", false);
+
+        // Identification of unterminated & section
+        identify_invalid(b"&");
+        identify_invalid(b"abc&");
+        identify_invalid(&amp(&utf16be("ハムサンドイッチ"), b""));
+
+        // Conversion of Base64-encoded ASCII characters (excluding &)
+        for i in 0x20..=0x7Eu8 {
+            if i != b'&' {
+                test_invalid(&amp(&[0, i], b"-"), b"%");
+            }
+        }
+
+        // Conversion of & encoded as &-
+        test_valid(b"&-", b"&", true);
+        test_valid(b"abc&-", b"abc&", true);
+        test_valid(b"&-.&-", b"&.&", true);
+
+        // Identification of & sections containing non-Base64
+        let test_string = m_base64(&utf16be("我是打酱油的"));
+        assert_eq!(test_string.len(), 16);
+        for i in 0..=255u8 {
+            if i.is_ascii_alphanumeric() || i == b'+' || i == b',' || i == b'-' {
+                continue;
+            }
+            identify_invalid(&[b"&", &test_string[..11], &[i], b"-"].concat());
+        }
+
+        // 1. The second half of a surrogate pair could come first,
+        let pair = utf16be("\u{10400}");
+        assert_eq!(pair.len(), 4);
+        let reversed = [&pair[2..], &pair[..2]].concat();
+        identify_invalid(&amp(&reversed, b"-"));
+        // (Or could appear by itself)
+        let low = reversed[..2].to_vec();
+        identify_invalid(&amp(&low, b"-"));
+
+        // ...and we should detect this wherever it occurs
+        let single: &[u8] = b"\x00\x01";
+        let double = utf16be("\u{10401}");
+        for bad in [&reversed, &low] {
+            for prefix in [
+                vec![],
+                single.to_vec(),
+                [single, single].concat(),
+                [single, single, single].concat(),
+                double.clone(),
+                [single, &double].concat(),
+                [single, single, &double].concat(),
+            ] {
+                identify_invalid(&amp(&[&prefix, &bad[..]].concat(), b"-"));
+            }
+        }
+
+        // 2. The first half of a surrogate pair might be followed by an invalid 2nd part,
+        let bad_pair = [&pair[..2], b"\x00a"].concat();
+        for prefix in [
+            vec![],
+            single.to_vec(),
+            [single, single].concat(),
+            double.clone(),
+        ] {
+            identify_invalid(&amp(&[&prefix, &bad_pair[..]].concat(), b"-"));
+        }
+
+        // 3. The first half of a surrogate pair could come at the end of the string,
+        let high = &pair[..2];
+        test_invalid(&amp(high, b"-"), b"%");
+        test_invalid(&amp(&[single, high].concat(), b"-"), b"\x01%");
+        test_invalid(&amp(&[single, single, high].concat(), b"-"), b"\x01\x01%");
+        // ...and the string could even be improperly terminated...
+        test_invalid(&amp(high, b""), b"%%");
+        test_invalid(&amp(&[single, high].concat(), b""), b"\x01%%");
+        // No error marker for the trailing first half of surrogate pair when the string
+        // abruptly ends after a group of 3 Base64-encoded codepoints
+        test_invalid(&amp(&[single, single, high].concat(), b""), b"\x01\x01%");
+
+        // 4. Or, it could have an odd number of bytes in it!
+        let mut odd = utf16be("ドーナツ");
+        odd.pop();
+        identify_invalid(&amp(&odd, b"-"));
+
+        // The Base64 might not be padded with zeroes
+        let encoded = m_base64(&utf16be("☺⛑"));
+        assert_eq!(encoded.len(), 6);
+        identify_invalid(&[b"&", &encoded[..5], b",-"].concat());
+
+        // OK, let's try valid Base64-encoded text now
+        let long1 = utf16be("\u{10401}");
+        let long2 = "\u{10401}";
+        for text in [
+            "☺".to_string(),
+            "饺子".to_string(),
+            "１２３".to_string(),
+            "ﾰﾱﾲﾳ".to_string(),
+            long2.to_string(),
+            format!("饼{long2}"),
+            format!("{long2}饼"),
+            format!("☺{long2}饼"),
+            format!("西瓜{long2}"),
+            format!("西瓜{long2}☺"),
+            format!("西瓜{long2}{long2}"),
+            format!("西红柿{long2}"),
+        ] {
+            test_valid(&amp(&utf16be(&text), b"-"), text.as_bytes(), true);
+        }
+        assert_eq!(long1.len(), 4);
+
+        // Multiple sections of valid ASCII _and_ Base64-encoded text
+        test_valid(
+            &[
+                b"123",
+                &amp(&utf16be("１２３"), b"-abc")[..],
+                &amp(&utf16be("☺"), b"-."),
+            ]
+            .concat(),
+            "123１２３abc☺.".as_bytes(),
+            true,
+        );
+
+        // If a & character appears right after a non-ASCII character, we must first close the
+        // Base64 section and then emit &-
+        assert_eq!(conv("☺&".as_bytes(), UTF8, IMAP), (b"&Jjo-&-".to_vec(), 0));
+        assert_eq!(
+            conv("西瓜&".as_bytes(), UTF8, IMAP),
+            (b"&iX903A-&-".to_vec(), 0)
+        );
+        assert_eq!(
+            conv("西红柿&".as_bytes(), UTF8, IMAP),
+            (b"&iX9+omf,-&-".to_vec(), 0)
+        );
+
+        // Try illegal Unicode codepoint (> 0x10FFFF)
+        let buf = encode_all(&[0x0020_0000], IMAP, b'%' as u32, ILLEGAL_MODE_CHAR);
+        assert_eq!((buf.out, buf.errors), (b"%".to_vec(), 1));
+
+        // Test "long" illegal character markers
+        let long = |s: &[u8]| mb_fast_convert(s, IMAP, UTF8, b'%' as u32, ILLEGAL_MODE_LONG);
+        assert_eq!(long(b"\x10"), (b"%".to_vec(), 1));
+        assert_eq!(long(b"\x80"), (b"%".to_vec(), 1));
+        // The & starts a Base-64 coded section, which is OK... but there's no data in it
+        assert_eq!(long(b"abc&"), (b"abc%".to_vec(), 1));
+        // When we hit the first bad byte in a Base-64 coded section, it drops us back into
+        // the default mode, so the following characters are literal
+        assert_eq!(long(b"&**-"), (b"%*-".to_vec(), 1));
+
+        // Try strings where Base64 has an extra trailing byte which is not needed
+        assert_eq!(long(b"&RR8I"), (b"\xE4\x94\x9F%".to_vec(), 1));
+        assert_eq!(
+            long(b"&RR8IAAA"),
+            (b"\xE4\x94\x9F\xE0\xA0\x80%".to_vec(), 1)
+        );
+
+        // It is useless for a Base64 section to only contain a single 'A'
+        assert_eq!(decode_all(b"&A", IMAP), [BAD_INPUT]);
+    }
+
+    /// gh10192_utf7imap.phpt: (input, mb_check_encoding, conversion to UTF-8
+    /// with '?' as substitute character, number of errors).
+    #[test]
+    fn gh10192() {
+        let cases: &[(&[u8], bool, &[u8], u32)] = &[
+            (b"A & B", false, b"A ?B", 1),
+            (b"A - B", true, b"A - B", 0),
+            (b"A 1& B", false, b"A 1?B", 1),
+            (b"A 1- B", true, b"A 1- B", 0),
+            (b"A &1 B", false, b"A ?B", 1),
+            (b"A -1 B", true, b"A -1 B", 0),
+            (b"A 1&1 B", false, b"A 1?B", 1),
+            (b"A 1-1 B", true, b"A 1-1 B", 0),
+            (b"A &", false, b"A ?", 1),
+            (b"A -", true, b"A -", 0),
+            (b"A &- B", true, b"A & B", 0),
+            (b"A -& B", false, b"A -?B", 1),
+            (b"A ~ B", true, b"A ~ B", 0),
+            (b"A \x1B B", false, b"A ? B", 1),
+            (b"A &~ B", false, b"A ? B", 1),
+            (b"A &\x1B B", false, b"A ? B", 1),
+            (
+                b"A &ZeVnLIqe- B",
+                true,
+                b"A \xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E B",
+                0,
+            ),
+            (b"A &ZeVnLIq- B", false, b"A \xE6\x97\xA5\xE6\x9C\xAC? B", 1),
+            (
+                b"A &ZeVnLIqe B",
+                false,
+                b"A \xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E?B",
+                1,
+            ),
+            (b"A &ZeVnLIq B", false, b"A \xE6\x97\xA5\xE6\x9C\xAC?B", 1),
+            (
+                b"A &ZeVnLIqe1 B",
+                false,
+                b"A \xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E?B",
+                1,
+            ),
+            (
+                b"A &ZeVnLIq1 B",
+                false,
+                b"A \xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\xB5?B",
+                1,
+            ),
+            (
+                b"A &ZeVnLIqe",
+                false,
+                b"A \xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E?",
+                1,
+            ),
+            (b"A &ZeVnLIq", false, b"A \xE6\x97\xA5\xE6\x9C\xAC?", 1),
+            (b"A &2GfePQ- B", true, b"A \xF0\xA9\xB8\xBD B", 0),
+            (b"A &2Gc- B", false, b"A ? B", 1),
+            (b"A &2GfePQ B", false, b"A \xF0\xA9\xB8\xBD?B", 1),
+            (b"A &2Gc B", false, b"A ?B", 1),
+            (b"A &2GfePQ1 B", false, b"A \xF0\xA9\xB8\xBD?B", 1),
+            (b"A &2Gc1 B", false, b"A ?B", 1),
+            (b"A &2GfePQ", false, b"A \xF0\xA9\xB8\xBD?", 1),
+            (b"A &2Gc", false, b"A ??", 2),
+            (b"A &3j3YZw- B", false, b"A ?? B", 2),
+            (b"A &3j0- B", false, b"A ? B", 1),
+            (b"A &3j3YZw B", false, b"A ??B", 2),
+            (b"A &3j0 B", false, b"A ??B", 2),
+            (b"A &3j3YZw1 B", false, b"A ??B", 2),
+            (b"A &3j01 B", false, b"A ??B", 2),
+            (b"A &3j3YZw", false, b"A ???", 3),
+            (b"A &3j0", false, b"A ??", 2),
+        ];
+        for &(input, valid, expected, errors) in cases {
+            assert_eq!(
+                mb_check_utf7imap(input),
+                valid,
+                "check {:?}",
+                String::from_utf8_lossy(input)
+            );
+            assert_eq!(
+                mb_fast_convert(input, IMAP, UTF8, b'?' as u32, ILLEGAL_MODE_CHAR),
+                (expected.to_vec(), errors),
+                "convert {:?}",
+                String::from_utf8_lossy(input)
+            );
+        }
+    }
+
+    #[test]
+    fn small_output_buffer_keeps_state() {
+        let input = [
+            b"ab",
+            &amp(&utf16be("日本\u{10400}語"), b"-c&-")[..],
+            b"&Jjo",
+        ]
+        .concat();
+        let mut all = Vec::new();
+        let mut buf = [0u32; MIN_WCHAR_BUFSIZE];
+        let mut state = 0;
+        let mut inp = &input[..];
+        while !inp.is_empty() {
+            let n = mb_utf7imap_to_wchar(&mut inp, &mut buf, &mut state);
+            all.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(all, decode_all(&input, IMAP));
+        assert_eq!(
+            all,
+            [
+                0x61, 0x62, 0x65E5, 0x672C, 0x10400, 0x8A9E, 0x63, 0x26, 0x263A, BAD_INPUT
+            ]
+        );
+
+        let cps = [
+            0x41, 0x3042, 0x10400, 0x26, 0x3044, 0x2E, 0x3046, 0x110000, 0x42, 0x3048,
+        ];
+        let whole = encode_all(&cps, IMAP, b'%' as u32, ILLEGAL_MODE_CHAR);
+        for split in 0..=cps.len() {
+            let mut buf = ConvertBuf::new(0, b'%' as u32, ILLEGAL_MODE_CHAR);
+            mb_wchar_to_utf7imap(&cps[..split], &mut buf, false);
+            mb_wchar_to_utf7imap(&cps[split..], &mut buf, true);
+            assert_eq!(
+                (&buf.out, buf.errors),
+                (&whole.out, whole.errors),
+                "split at {split}"
+            );
+        }
+    }
+
+    /// The UTF7-IMAP part of mb_strcut.phpt (through the legacy filters).
+    #[test]
+    fn strcut() {
+        let cut = |s: &[u8], from: usize, len: usize| mbfl_strcut(s, IMAP, from, len).unwrap();
+        assert_eq!(cut(b"\x01", 0, 100), b"?");
+        assert_eq!(cut(b"&Q", 1, 100), b"");
+        assert_eq!(cut(b"&QxxC", 0, 100), b"");
+        assert_eq!(cut(b"&i6o\x83", 0, 100), b"");
+        let s = [b"ab ", &amp(&utf16be("日本語"), b"- &-cd")[..]].concat();
+        assert_eq!(cut(&s, 0, s.len()), s);
+        assert_eq!(cut(&s, 0, 3), b"ab ");
+    }
 }

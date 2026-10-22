@@ -149,15 +149,14 @@ pub fn mbfl_filt_conv_qprintdec(c: i32, f: &mut ConvertFilter, out: &mut dyn Fil
         }
         2 => {
             let m = hex2code((c & 0xFF) as u8);
-            let n;
-            if m < 0 {
+            let n = if m < 0 {
                 ck!(out.output(0x3D)); // '='
                 ck!(out.output(f.cache));
-                n = c;
+                c
             } else {
                 // `cache` always holds a hex digit here.
-                n = (hex2code((f.cache & 0xFF) as u8) << 4) | m;
-            }
+                (hex2code((f.cache & 0xFF) as u8) << 4) | m
+            };
             ck!(out.output(n));
             f.status = 0;
         }
@@ -252,7 +251,11 @@ pub fn mb_qprint_to_wchar(input: &mut &[u8], out: &mut [u32], _state: &mut u32) 
 }
 
 fn qprint_enc_nibble(nibble: u8) -> u8 {
-    if nibble < 10 { nibble + b'0' } else { nibble - 10 + b'A' }
+    if nibble < 10 {
+        nibble + b'0'
+    } else {
+        nibble - 10 + b'A'
+    }
 }
 
 /// `buf.state` is the length of the current output line.
@@ -298,4 +301,90 @@ pub fn mb_wchar_to_qprint(input: &[u32], buf: &mut ConvertBuf, _end: bool) {
     }
 
     buf.state = chars_output;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mbstring::filters::eightbit::MBFL_ENCODING_8BIT;
+    use crate::mbstring::mbfl::convert::mb_fast_convert;
+    use crate::mbstring::mbfl::encoding::ILLEGAL_MODE_CHAR;
+    use crate::mbstring::mbfl::filter::convert_filter_new;
+
+    struct Collect(Vec<u8>);
+    impl FilterOutput for Collect {
+        fn output(&mut self, c: i32) -> i32 {
+            self.0.push(c as u8);
+            0
+        }
+        fn flush(&mut self) -> i32 {
+            0
+        }
+    }
+
+    /// Runs `s` through the legacy filter from `from` to `to`.
+    fn legacy(s: &[u8], from: &'static Encoding, to: &'static Encoding) -> Vec<u8> {
+        let mut f = convert_filter_new(from, to).unwrap();
+        let mut out = Collect(Vec::new());
+        for &c in s {
+            f.feed(c as i32, &mut out);
+        }
+        f.flush(&mut out);
+        out.0
+    }
+
+    fn conv(s: &[u8], from: &'static Encoding, to: &'static Encoding) -> Vec<u8> {
+        mb_fast_convert(s, from, to, b'?' as u32, ILLEGAL_MODE_CHAR).0
+    }
+
+    /// qprint_encoding.phpt (plus the same vectors through the legacy filters)
+    #[test]
+    fn qprint_encoding() {
+        let cases: &[(&[u8], &[u8])] = &[
+            (b"", b""),
+            ("あ".as_bytes(), b"=E3=81=82"),
+            (
+                b"J'interdis aux marchands de vanter trop leurs marchandises. Car ils se font vite p\xC3\xA9dagogues et t'enseignent comme but ce qui n'est par essence qu'un moyen, et te trompant ainsi sur la route \xC3\xA0 suivre les voil\xC3\xA0 bient\xC3\xB4t qui te d\xC3\xA9gradent, car si leur musique est vulgaire ils te fabriquent pour te la vendre une \xC3\xA2me vulgaire.\n\xE2\x80\x94\xE2\x80\x89Antoine de Saint-Exup\xC3\xA9ry, Citadelle",
+                b"J'interdis aux marchands de vanter trop leurs marchandises. Car ils se f=\r\nont vite p=C3=A9dagogues et t'enseignent comme but ce qui n'est par esse=\r\nnce qu'un moyen, et te trompant ainsi sur la route =C3=A0 suivre les voi=\r\nl=C3=A0 bient=C3=B4t qui te d=C3=A9gradent, car si leur musique est vulg=\r\naire ils te fabriquent pour te la vendre une =C3=A2me vulgaire.\r\n=E2=80=94=E2=80=89Antoine de Saint-Exup=C3=A9ry, Citadelle",
+            ),
+            // Regression test, found by a fuzzer
+            (
+                b"***,*-S,\xAC,,\xB7,l,,,,\xB6UTF7,\xB5\xB5\xB5\xB5\xB5\xB5K\xB5\xB5!\xA4\xA4\xA4\xA4\xA4\xBD\xB5,\xB5\xB5\xB5\xB5\xB5\xB5\xB5\xB5\xB5&",
+                b"***,*-S,=AC,,=B7,l,,,,=B6UTF7,=B5=B5=B5=B5=B5=B5K=B5=B5!=A4=A4=A4=A4=A4=BD=\r\n=B5,=B5=B5=B5=B5=B5=B5=B5=B5=B5&",
+            ),
+        ];
+        let qp = &MBFL_ENCODING_QPRINT;
+        let bit8 = &MBFL_ENCODING_8BIT;
+        for &(raw, qprint) in cases {
+            let crlf: Vec<u8> = raw
+                .iter()
+                .flat_map(|&c| {
+                    if c == b'\n' {
+                        vec![b'\r', b'\n']
+                    } else {
+                        vec![c]
+                    }
+                })
+                .collect();
+            assert_eq!(conv(raw, bit8, qp), qprint);
+            assert_eq!(conv(qprint, qp, bit8), crlf);
+            assert_eq!(legacy(raw, bit8, qp), qprint);
+            assert_eq!(legacy(qprint, qp, bit8), crlf);
+        }
+    }
+
+    #[test]
+    fn decode_edge_cases() {
+        let qp = &MBFL_ENCODING_QPRINT;
+        let bit8 = &MBFL_ENCODING_8BIT;
+        // Soft line breaks, a bad hex digit, lowercase hex, '=' at the end
+        let input: &[u8] = b"a=\r\nb=\nc=4G=3d=";
+        assert_eq!(conv(input, qp, bit8), b"abc=4G==");
+        assert_eq!(legacy(input, qp, bit8), b"abc=4G==");
+        // A bad 2nd hex digit is kept literally (even when it is '=')
+        assert_eq!(conv(b"=4=3d", qp, bit8), b"=4=3d");
+        assert_eq!(legacy(b"=4=3d", qp, bit8), b"=4=3d");
+        // A lone CR is dropped by the encoder; NUL passes through
+        assert_eq!(conv(b"a\rb\x00c", bit8, qp), b"ab\x00c");
+    }
 }
