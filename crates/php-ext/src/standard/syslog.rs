@@ -116,12 +116,10 @@ pub(crate) fn php_syslog_str(vm: &Vm, priority: i64, message: &[u8]) {
     for &c in message {
         if (0x20..=0x7e).contains(&c) {
             buf.push(c);
-        } else if c >= 0x80 && filter != Filter::Ascii {
-            buf.push(c);
         } else if c == b'\n' {
             sys::syslog(priority, &buf);
             buf.clear();
-        } else if c < 0x20 && filter == Filter::All {
+        } else if (c >= 0x80 && filter != Filter::Ascii) || (c < 0x20 && filter == Filter::All) {
             buf.push(c);
         } else {
             const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -206,6 +204,7 @@ pub fn register(r: &mut Registry) {
     ] {
         r.vm.ini.register(&def, "Core");
     }
+    super::basic::ini::snapshot_defaults(r.vm);
     for &(name, value) in CONSTANTS {
         r.constant(name, value);
     }

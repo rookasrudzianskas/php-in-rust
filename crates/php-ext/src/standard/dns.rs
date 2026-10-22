@@ -4,6 +4,9 @@
 //! (`/etc/resolv.conf` name servers, search list and `ndots`); the
 //! `gethostby*` functions use the system resolver.
 
+// Let-chains are not available at the workspace MSRV, so nested `if let`s stay.
+#![allow(clippy::collapsible_if)]
+
 pub mod resolver;
 
 use php_runtime::{Args, NativeFunction, PResult, PhpArray, PhpStr, Registry, Value, Vm};
@@ -94,12 +97,10 @@ fn gethostname(vm: &mut Vm, _args: &mut Args) -> PResult<Value> {
 
 /// `php_gethostbyaddr()`: `None` for an invalid address.
 fn php_gethostbyaddr(ip: &[u8]) -> Option<Vec<u8>> {
-    let raw: Vec<u8> = if let Some(b) = netfuncs::inet_pton6(ip) {
-        b.to_vec()
-    } else if let Some(b) = netfuncs::inet_pton4(ip) {
-        b.to_vec()
-    } else {
-        return None; // not a valid IP
+    // not a valid IP otherwise
+    let raw: Vec<u8> = match netfuncs::inet_pton6(ip) {
+        Some(b) => b.to_vec(),
+        None => netfuncs::inet_pton4(ip)?.to_vec(),
     };
     Some(sys::gethostbyaddr(&raw).unwrap_or_else(|| ip.to_vec()))
 }
@@ -368,13 +369,13 @@ fn parserr(
             // See RFC 1010 for values
             a.insert_str("type", "HINFO");
             checkcp!(1);
-            let n = (msg[cp] & 0xff) as usize;
+            let n = msg[cp] as usize;
             cp += 1;
             checkcp!(n);
             a.insert_str("cpu", s(&msg[cp..cp + n]));
             cp += n;
             checkcp!(1);
-            let n = (msg[cp] & 0xff) as usize;
+            let n = msg[cp] as usize;
             cp += 1;
             checkcp!(n);
             a.insert_str("os", s(&msg[cp..cp + n]));
@@ -384,10 +385,10 @@ fn parserr(
             // See RFC 6844 for values
             a.insert_str("type", "CAA");
             checkcp!(1);
-            a.insert_str("flags", (msg[cp] & 0xff) as i64);
+            a.insert_str("flags", msg[cp] as i64);
             cp += 1;
             checkcp!(1);
-            let n = (msg[cp] & 0xff) as usize;
+            let n = msg[cp] as usize;
             cp += 1;
             checkcp!(n);
             a.insert_str("tag", s(&msg[cp..cp + n]));
@@ -448,7 +449,7 @@ fn parserr(
             let p = cp;
             a.insert_str("type", "A6");
             checkcp!(1);
-            let n = (msg[cp] & 0xff) as usize;
+            let n = msg[cp] as usize;
             cp += 1;
             a.insert_str("masklen", n as i64);
             let mut t = V6Text::new();
@@ -504,7 +505,7 @@ fn parserr(
             a.insert_str("pref", v);
             for key in ["flags", "services", "regex"] {
                 checkcp!(1);
-                let n = (msg[cp] & 0xff) as usize;
+                let n = msg[cp] as usize;
                 cp += 1;
                 checkcp!(n);
                 a.insert_str(key, s(&msg[cp..cp + n]));

@@ -6,6 +6,9 @@
 //! friends do observe is validation (warnings), the response code and the
 //! "headers already sent" state.
 
+// Let-chains are not available at the workspace MSRV, so nested `if let`s stay.
+#![allow(clippy::collapsible_if)]
+
 use php_runtime::value::convert::{to_bool_silent, to_int_silent};
 use php_runtime::{Args, NativeFunction, PResult, PhpArray, PhpStr, Registry, Value, Vm};
 

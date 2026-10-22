@@ -1,5 +1,8 @@
 //! ext/standard/mail.c
 
+// Let-chains are not available at the workspace MSRV, so nested `if let`s stay.
+#![allow(clippy::collapsible_if)]
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -61,7 +64,7 @@ fn check_field_value(v: &[u8]) -> HeaderValueError {
 }
 
 fn check_field_name(key: &[u8]) -> bool {
-    !key.iter().any(|&c| c < 33 || c > 126 || c == b':')
+    !key.iter().any(|&c| !(33..=126).contains(&c) || c == b':')
 }
 
 fn key_text(key: &[u8]) -> String {
@@ -615,6 +618,7 @@ pub fn register(r: &mut Registry) {
     ] {
         r.vm.ini.register(&def, "Core");
     }
+    super::basic::ini::snapshot_defaults(r.vm);
     r.function(&MAIL);
 }
 

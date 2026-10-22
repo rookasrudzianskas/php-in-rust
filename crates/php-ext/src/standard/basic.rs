@@ -8,6 +8,9 @@
 //! * [`highlight`] — `highlight_file`, `highlight_string`, `php_strip_whitespace`.
 //! * [`sys`] — the libc calls the standard library does not offer.
 
+// Let-chains are not available at the workspace MSRV, so nested `if let`s stay.
+#![allow(clippy::collapsible_if)]
+
 pub mod getopt;
 pub mod highlight;
 pub mod ini;
@@ -203,10 +206,32 @@ pub(crate) fn open_script_source(
     Ok(None)
 }
 
+/// `main/main.c` directives that the `Core` module table does not list.
+fn register_core_directives(r: &mut Registry) {
+    use php_runtime::ini::{IniDef, modifiable};
+    const ALL: u32 = modifiable::ALL;
+    const SYS: u32 = modifiable::SYSTEM;
+    const SYS_PERDIR: u32 = modifiable::SYSTEM | modifiable::PERDIR;
+    for def in [
+        IniDef::new("report_zend_debug", Some("0"), ALL),
+        IniDef::new("user_ini.filename", Some(".user.ini"), SYS),
+        IniDef::new("user_ini.cache_ttl", Some("300"), SYS),
+        IniDef::new("memory_hard_limit_percent", None, ALL),
+        IniDef::new("max_multipart_body_parts", Some("-1"), SYS_PERDIR),
+        IniDef::new("disable_classes", Some(""), SYS),
+        IniDef::new("zend.signal_check", Some("0"), SYS),
+    ] {
+        if r.vm.ini.get(def.name.as_bytes()).is_none() {
+            r.vm.ini.register(&def, "Core");
+        }
+    }
+}
+
 pub fn register(r: &mut Registry) {
+    register_core_directives(r);
     netfuncs::register(r);
     misc::register(r);
     getopt::register(r);
-    ini::register(r);
     highlight::register(r);
+    ini::register(r);
 }

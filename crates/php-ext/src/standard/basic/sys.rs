@@ -306,6 +306,8 @@ pub struct Rusage {
 }
 
 /// `getrusage(RUSAGE_SELF | RUSAGE_CHILDREN)`; `None` on failure.
+// The fields are `c_long`: the casts only matter on 32-bit targets.
+#[allow(clippy::unnecessary_cast)]
 pub fn getrusage(children: bool) -> Option<Rusage> {
     #[cfg(unix)]
     {

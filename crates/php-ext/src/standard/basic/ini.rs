@@ -84,12 +84,8 @@ fn consume_quantity_prefix(s: &[u8], digits: usize, str_end: usize, base: u32) -
         }
         match at(d + 1) {
             b'x' | b'X' | b'o' | b'O' => d += 2,
-            b'b' | b'B' => {
-                if base != 16 {
-                    // 0b is valid in base 16, but not in the other supported bases
-                    d += 2;
-                }
-            }
+            // 0b is valid in base 16, but not in the other supported bases
+            b'b' | b'B' if base != 16 => d += 2,
             _ => {}
         }
     }
@@ -298,7 +294,9 @@ const CLI_OVERRIDDEN: &[(&str, &str)] = &[
     ("max_input_time", "-1"),
 ];
 
-fn snapshot_defaults(vm: &mut Vm) {
+/// Records the compiled-in defaults of every directive registered so far
+/// (`builtin_default_value`); modules call it right after registering theirs.
+pub(crate) fn snapshot_defaults(vm: &mut Vm) {
     let entries: Vec<(Vec<u8>, Option<PhpStr>)> = vm
         .ini
         .iter()
@@ -337,6 +335,15 @@ fn ini_get(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     })
 }
 
+/// `(name, value, orig_value, modifiable, module)` of a directive.
+type IniRow = (
+    PhpStr,
+    Option<PhpStr>,
+    Option<Option<PhpStr>>,
+    u32,
+    &'static str,
+);
+
 fn ini_get_all(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     let extname = args.str_opt(0).cloned();
     let details = args.bool(1);
@@ -353,13 +360,7 @@ fn ini_get_all(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
         }
     }
 
-    let mut rows: Vec<(
-        PhpStr,
-        Option<PhpStr>,
-        Option<Option<PhpStr>>,
-        u32,
-        &'static str,
-    )> = vm
+    let mut rows: Vec<IniRow> = vm
         .ini
         .iter()
         .map(|e| {
@@ -833,10 +834,10 @@ mod tests {
         assert_eq!(t.vm.ini_get("html_errors").unwrap(), "");
         t.call(
             "ini_set",
-            vec![Value::str("user_agent"), Value::Float(3.14)],
+            vec![Value::str("user_agent"), Value::Float(3.25)],
         )
         .unwrap();
-        assert_eq!(t.vm.ini_get("user_agent").unwrap(), "3.14");
+        assert_eq!(t.vm.ini_get("user_agent").unwrap(), "3.25");
         t.call("ini_set", vec![Value::str("docref_root"), Value::Null])
             .unwrap();
         assert_eq!(t.vm.ini_get("docref_root").unwrap(), "");

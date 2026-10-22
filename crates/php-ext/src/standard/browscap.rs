@@ -4,6 +4,9 @@
 //! directive. The file is read lazily on first use (php-src reads it during
 //! module startup) and cached per file name.
 
+// Let-chains are not available at the workspace MSRV, so nested `if let`s stay.
+#![allow(clippy::collapsible_if)]
+
 use std::collections::HashMap;
 
 use php_runtime::errors::level;
@@ -519,6 +522,7 @@ pub fn register(r: &mut Registry) {
     // `main/main.c` directive, owned by Core.
     r.vm.ini
         .register(&IniDef::new("browscap", None, modifiable::SYSTEM), "Core");
+    super::basic::ini::snapshot_defaults(r.vm);
     r.function(&GET_BROWSER);
 }
 
