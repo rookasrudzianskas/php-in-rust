@@ -84,7 +84,15 @@ struct StatVfs {
     spare: [u64; 8],
 }
 
+/// `struct utimbuf` (two `time_t`s on every supported platform).
+#[repr(C)]
+struct UtimBuf {
+    actime: i64,
+    modtime: i64,
+}
+
 unsafe extern "C" {
+    fn utime(path: *const c_char, times: *const UtimBuf) -> c_int;
     fn flock(fd: c_int, operation: c_int) -> c_int;
     fn umask(mask: ModeT) -> ModeT;
     fn isatty(fd: c_int) -> c_int;
@@ -187,6 +195,20 @@ pub const POLLNVAL: i16 = 0x20;
 pub fn sys_flock(fd: RawFd, op: i32) -> io::Result<()> {
     // SAFETY: flock only takes integers; an invalid fd yields EBADF.
     check(unsafe { flock(fd, op) }).map(|_| ())
+}
+
+/// `utime(path, times)`: `(mtime, atime)`, `None` = now.
+pub fn sys_utime(path: &[u8], times: Option<(i64, i64)>) -> io::Result<()> {
+    let p = cstr(path)?;
+    let buf = times.map(|(m, a)| UtimBuf {
+        actime: a,
+        modtime: m,
+    });
+    let ptr = buf
+        .as_ref()
+        .map_or(std::ptr::null(), |b| b as *const UtimBuf);
+    // SAFETY: `p` is NUL-terminated; `ptr` is null or points to a live utimbuf.
+    check(unsafe { utime(p.as_ptr(), ptr) }).map(|_| ())
 }
 
 /// `umask(mask)`: returns the previous mask.

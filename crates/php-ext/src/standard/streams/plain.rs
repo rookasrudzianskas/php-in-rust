@@ -1250,23 +1250,7 @@ impl Wrapper for PlainWrapper {
 
 /// `utime(path, times)`: `None` sets both to now.
 pub fn touch_times(p: &Path, times: Option<(i64, i64)>) -> io::Result<()> {
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
-    let to_st = |t: i64| {
-        if t >= 0 {
-            UNIX_EPOCH + Duration::from_secs(t as u64)
-        } else {
-            UNIX_EPOCH - Duration::from_secs(t.unsigned_abs())
-        }
-    };
-    let (m, a) = match times {
-        Some((m, a)) => (to_st(m), to_st(a)),
-        None => {
-            let now = SystemTime::now();
-            (now, now)
-        }
-    };
-    let f = File::open(p)?;
-    f.set_times(std::fs::FileTimes::new().set_modified(m).set_accessed(a))
+    sys::sys_utime(p.as_os_str().as_bytes(), times)
 }
 
 /// `is_stream_on_plain_files`-style helper used by `stream_get_meta_data`.
