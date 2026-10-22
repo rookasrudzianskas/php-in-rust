@@ -410,6 +410,49 @@ pub fn echo(vm: &mut Vm, s: &str) -> PResult<()> {
     vm.echo_str("\n")
 }
 
+/// `var_dump()` of null, bools, ints, strings, arrays and objects without
+/// properties (enough for the iterator tests).
+pub fn dump(v: &Value) -> String {
+    fn go(v: &Value, indent: usize, out: &mut String) {
+        let pad = " ".repeat(indent);
+        match v.unref() {
+            Value::Null | Value::Undef => out.push_str(&format!("{pad}NULL\n")),
+            Value::Bool(b) => out.push_str(&format!("{pad}bool({b})\n")),
+            Value::Int(i) => out.push_str(&format!("{pad}int({i})\n")),
+            Value::String(s) => out.push_str(&format!("{pad}string({}) \"{s}\"\n", s.len())),
+            Value::Array(a) => {
+                out.push_str(&format!("{pad}array({}) {{\n", a.len()));
+                for (k, v) in a.iter() {
+                    match k {
+                        php_runtime::ArrayKey::Int(i) => {
+                            out.push_str(&format!("{pad}  [{i}]=>\n"));
+                        }
+                        php_runtime::ArrayKey::Str(s) => {
+                            out.push_str(&format!("{pad}  [\"{s}\"]=>\n"));
+                        }
+                    }
+                    go(v, indent + 2, out);
+                }
+                out.push_str(&format!("{pad}}}\n"));
+            }
+            Value::Object(o) => out.push_str(&format!(
+                "{pad}object({})#{} (0) {{\n{pad}}}\n",
+                o.class().name,
+                o.id()
+            )),
+            other => panic!("cannot dump {other:?}"),
+        }
+    }
+    let mut out = String::new();
+    go(v, 0, &mut out);
+    out
+}
+
+/// `var_dump($v)` to the output.
+pub fn var_dump(vm: &mut Vm, v: &Value) -> PResult<()> {
+    vm.echo_str(&dump(v))
+}
+
 // ---------------------------------------------------------------------------
 // phpt expectations
 // ---------------------------------------------------------------------------

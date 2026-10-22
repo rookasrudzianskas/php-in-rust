@@ -12,6 +12,8 @@ macro_rules! phpt {
     };
 }
 
+mod caching;
 mod dual;
 mod helpers;
 mod recursive;
+mod regex;
