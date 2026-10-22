@@ -5,6 +5,7 @@
 //! native functions; `var_dump()` output is reproduced by a small test-only
 //! dumper so that the `.phpt` expectations can be compared verbatim.
 
+mod classes;
 mod harness;
 mod objects;
 mod scalars;

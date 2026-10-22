@@ -207,7 +207,11 @@ fn allowed_classes_option_validation() {
         (Value::Resource(res), "resource"),
     ] {
         assert_eq!(
-            thrown(unser_opts(&mut t, data, vec![("allowed_classes", list(vec![v]))])),
+            thrown(unser_opts(
+                &mut t,
+                data,
+                vec![("allowed_classes", list(vec![v]))]
+            )),
             (
                 "TypeError".to_string(),
                 format!(
@@ -218,7 +222,11 @@ fn allowed_classes_option_validation() {
     }
     let std = Value::Object(new_obj(&mut t, "stdClass"));
     assert_eq!(
-        thrown(unser_opts(&mut t, data, vec![("allowed_classes", list(vec![std]))])),
+        thrown(unser_opts(
+            &mut t,
+            data,
+            vec![("allowed_classes", list(vec![std]))]
+        )),
         (
             "Error".to_string(),
             "Object of class stdClass could not be converted to string".to_string()
@@ -235,7 +243,11 @@ fn allowed_classes_option_validation() {
         ("have\0nul_byte", "have"),
     ] {
         assert_eq!(
-            thrown(unser_opts(&mut t, data, vec![("allowed_classes", list(vec![s(name)]))])),
+            thrown(unser_opts(
+                &mut t,
+                data,
+                vec![("allowed_classes", list(vec![s(name)]))]
+            )),
             (
                 "ValueError".to_string(),
                 format!(
@@ -270,12 +282,31 @@ fn allowed_classes_make_incomplete_objects() {
         "stdClass"
     );
     // Another list does not allow it.
-    let v = unser_opts(&mut t, data, vec![("allowed_classes", list(vec![s("Foo")]))]).unwrap();
-    let o = v.as_array().unwrap().get_int(0).unwrap().as_object().unwrap().clone();
+    let v = unser_opts(
+        &mut t,
+        data,
+        vec![("allowed_classes", list(vec![s("Foo")]))],
+    )
+    .unwrap();
+    let o = v
+        .as_array()
+        .unwrap()
+        .get_int(0)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .clone();
     assert_eq!(o.class().name, "__PHP_Incomplete_Class");
     // true allows everything.
     let v = unser_opts(&mut t, data, vec![("allowed_classes", Value::Bool(true))]).unwrap();
-    let o = v.as_array().unwrap().get_int(0).unwrap().as_object().unwrap().clone();
+    let o = v
+        .as_array()
+        .unwrap()
+        .get_int(0)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .clone();
     assert_eq!(o.class().name, "stdClass");
     assert_eq!(t.output(), "");
 }
@@ -296,7 +327,11 @@ fn max_depth() {
         )
     );
     assert_eq!(
-        thrown(unser_opts(&mut t, b"i:0;", vec![("max_depth", Value::Int(-1))])),
+        thrown(unser_opts(
+            &mut t,
+            b"i:0;",
+            vec![("max_depth", Value::Int(-1))]
+        )),
         (
             "ValueError".to_string(),
             "unserialize(): Option \"max_depth\" must be greater than or equal to 0".to_string()
@@ -310,14 +345,22 @@ fn max_depth() {
     let md = |n: i64| vec![("max_depth", Value::Int(n))];
     // Arrays.
     let ok = nested(128, "a:1:{i:0;", "}");
-    assert!(!unser_opts(&mut t, ok.as_bytes(), md(128)).unwrap().identical(&Value::Bool(false)));
+    assert!(
+        !unser_opts(&mut t, ok.as_bytes(), md(128))
+            .unwrap()
+            .identical(&Value::Bool(false))
+    );
     let deep = nested(129, "a:1:{i:0;", "}");
     let v = unser_opts(&mut t, deep.as_bytes(), md(128)).unwrap();
     assert!(v.identical(&Value::Bool(false)));
     expectf(&t.output(), &depth_warning(128, 1157, 1294));
     // Objects.
     let ok = nested(128, "O:8:\"stdClass\":1:{i:0;", "}");
-    assert!(!unser_opts(&mut t, ok.as_bytes(), md(128)).unwrap().identical(&Value::Bool(false)));
+    assert!(
+        !unser_opts(&mut t, ok.as_bytes(), md(128))
+            .unwrap()
+            .identical(&Value::Bool(false))
+    );
     let deep = nested(129, "O:8:\"stdClass\":1:{i:0;", "}");
     let v = unser_opts(&mut t, deep.as_bytes(), md(128)).unwrap();
     assert!(v.identical(&Value::Bool(false)));
@@ -331,9 +374,17 @@ fn max_depth() {
     expectf(&t.output(), &depth_warning(128, 1157, 1294));
     // An explicit option takes precedence.
     let ok = nested(256, "a:1:{i:0;", "}");
-    assert!(!unser_opts(&mut t, ok.as_bytes(), md(256)).unwrap().identical(&Value::Bool(false)));
+    assert!(
+        !unser_opts(&mut t, ok.as_bytes(), md(256))
+            .unwrap()
+            .identical(&Value::Bool(false))
+    );
     let deep = nested(257, "a:1:{i:0;", "}");
-    assert!(unser_opts(&mut t, deep.as_bytes(), md(256)).unwrap().identical(&Value::Bool(false)));
+    assert!(
+        unser_opts(&mut t, deep.as_bytes(), md(256))
+            .unwrap()
+            .identical(&Value::Bool(false))
+    );
     expectf(&t.output(), &depth_warning(256, 2309, 2574));
     // 0 disables the limit.
     t.vm.ini_set("unserialize_max_depth", "0");
@@ -393,7 +444,10 @@ fn incomplete_classes() {
 fn incomplete_class_c_format() {
     // incomplete_class_c_format.phpt (first part)
     let mut t = TestVm::new();
-    let v = unser(&mut t, b"a:2:{i:0;C:7:\"Missing\":4:{abcd}i:1;s:4:\"tail\";}");
+    let v = unser(
+        &mut t,
+        b"a:2:{i:0;C:7:\"Missing\":4:{abcd}i:1;s:4:\"tail\";}",
+    );
     expectf(
         &dump_out(&t, &v),
         "Warning: Class __PHP_Incomplete_Class has no unserializer in %s on line %d\narray(2) {\n  [0]=>\n  object(__PHP_Incomplete_Class)#%d (1) {\n    [\"__PHP_Incomplete_Class_Name\"]=>\n    string(7) \"Missing\"\n  }\n  [1]=>\n  string(4) \"tail\"\n}",

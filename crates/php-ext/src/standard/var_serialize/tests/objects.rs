@@ -21,13 +21,28 @@ fn stdclass_numeric_properties() {
     a.set_prop(b"0", s("X"));
     a.set_prop(b"1", s("Y"));
     let data = ser(&mut t, Value::Object(a));
-    assert_eq!(data, "O:8:\"stdClass\":2:{s:1:\"0\";s:1:\"X\";s:1:\"1\";s:1:\"Y\";}");
+    assert_eq!(
+        data,
+        "O:8:\"stdClass\":2:{s:1:\"0\";s:1:\"X\";s:1:\"1\";s:1:\"Y\";}"
+    );
     let b = unser(&mut t, data.as_bytes());
     assert_eq!(ser(&mut t, b.clone()), data);
-    assert!(b.as_object().unwrap().get_prop(b"0").unwrap().identical(&s("X")));
+    assert!(
+        b.as_object()
+            .unwrap()
+            .get_prop(b"0")
+            .unwrap()
+            .identical(&s("X"))
+    );
     // Integer property keys are converted to strings.
     let o = unser(&mut t, b"O:8:\"stdClass\":1:{i:5;s:1:\"Z\";}");
-    assert!(o.as_object().unwrap().get_prop(b"5").unwrap().identical(&s("Z")));
+    assert!(
+        o.as_object()
+            .unwrap()
+            .get_prop(b"5")
+            .unwrap()
+            .identical(&s("Z"))
+    );
 }
 
 #[test]
@@ -47,7 +62,9 @@ fn exception_properties_are_mangled() {
     // A subclass keeps the parent's private names.
     let te = new_obj(&mut t, "TypeError");
     let data = ser(&mut t, Value::Object(te));
-    assert!(data.starts_with("O:9:\"TypeError\":7:{s:10:\"\0*\0message\";s:0:\"\";s:13:\"\0Error\0string\";"));
+    assert!(data.starts_with(
+        "O:9:\"TypeError\":7:{s:10:\"\0*\0message\";s:0:\"\";s:13:\"\0Error\0string\";"
+    ));
 }
 
 #[test]
@@ -152,7 +169,10 @@ fn dynamic_property_creation() {
     // unserialize_overwrite_undeclared_protected.phpt
     let mut t = TestVm::new();
     ClassBuilder::new("Test").public("foo").register(&mut t);
-    let v = unser(&mut t, b"O:4:\"Test\":2:{s:4:\"\0*\0x\";N;s:4:\"\0*\0x\";N;}");
+    let v = unser(
+        &mut t,
+        b"O:4:\"Test\":2:{s:4:\"\0*\0x\";N;s:4:\"\0*\0x\";N;}",
+    );
     expectf(
         &dump_out(&t, &v),
         "Deprecated: Creation of dynamic property Test::$x is deprecated in %s on line %d\nobject(Test)#%d (2) {\n  [\"foo\"]=>\n  NULL\n  [\"x\":protected]=>\n  NULL\n}",
@@ -189,11 +209,26 @@ fn dynamic_property_creation() {
 fn typed_property_refs() {
     // typed_property_refs.phpt
     let mut t = TestVm::new();
-    ClassBuilder::new("A").typed("a", "int").public("b").register(&mut t);
-    ClassBuilder::new("B").public("a").typed("b", "int").register(&mut t);
-    ClassBuilder::new("E").public("a").typed("b", "int").register(&mut t);
-    ClassBuilder::new("C").typed("a", "int").typed("b", "string").register(&mut t);
-    ClassBuilder::new("D").typed("a", "int").typed("b", "float").register(&mut t);
+    ClassBuilder::new("A")
+        .typed("a", "int")
+        .public("b")
+        .register(&mut t);
+    ClassBuilder::new("B")
+        .public("a")
+        .typed("b", "int")
+        .register(&mut t);
+    ClassBuilder::new("E")
+        .public("a")
+        .typed("b", "int")
+        .register(&mut t);
+    ClassBuilder::new("C")
+        .typed("a", "int")
+        .typed("b", "string")
+        .register(&mut t);
+    ClassBuilder::new("D")
+        .typed("a", "int")
+        .typed("b", "float")
+        .register(&mut t);
     for (class, a, b) in [("A", "a", "b"), ("B", "a", "b"), ("E", "a", "b")] {
         let data = format!("O:1:\"{class}\":2:{{s:1:\"{a}\";i:1;s:1:\"{b}\";R:2;}}");
         let v = unser(&mut t, data.as_bytes());
@@ -253,13 +288,20 @@ fn typed_property_refs() {
 fn typed_property_ref_overwrites() {
     // typed_property_ref_overwrite.phpt
     let mut t = TestVm::new();
-    ClassBuilder::new("Test").typed("prop", "?object").register(&mut t);
+    ClassBuilder::new("Test")
+        .typed("prop", "?object")
+        .register(&mut t);
     let v = unser(&mut t, b"O:4:\"Test\":2:{s:4:\"prop\";R:1;s:4:\"prop\";N;}");
-    expectf(&dump_out(&t, &v), "object(Test)#%d (1) {\n  [\"prop\"]=>\n  NULL\n}");
+    expectf(
+        &dump_out(&t, &v),
+        "object(Test)#%d (1) {\n  [\"prop\"]=>\n  NULL\n}",
+    );
 
     // typed_property_ref_overwrite2.phpt
     let mut t = TestVm::new();
-    ClassBuilder::new("Test").typed("prop", "?Test").register(&mut t);
+    ClassBuilder::new("Test")
+        .typed("prop", "?Test")
+        .register(&mut t);
     let v = unser(
         &mut t,
         b"O:4:\"Test\":2:{s:4:\"prop\";N;s:4:\"prop\";O:4:\"Test\":1:{s:4:\"prop\";R:2;}}",
@@ -272,19 +314,29 @@ fn typed_property_ref_overwrites() {
     // overwrite_untyped_ref.phpt
     let mut t = TestVm::new();
     ClassBuilder::new("Test").public("prop").register(&mut t);
-    let v = unser(&mut t, b"O:4:\"Test\":2:{s:4:\"prop\";R:1;s:4:\"prop\";i:0;}");
-    expectf(&dump_out(&t, &v), "object(Test)#%d (1) {\n  [\"prop\"]=>\n  int(0)\n}");
+    let v = unser(
+        &mut t,
+        b"O:4:\"Test\":2:{s:4:\"prop\";R:1;s:4:\"prop\";i:0;}",
+    );
+    expectf(
+        &dump_out(&t, &v),
+        "object(Test)#%d (1) {\n  [\"prop\"]=>\n  int(0)\n}",
+    );
 }
 
 #[test]
 fn typed_property_ref_assignment_failure() {
     // typed_property_ref_assignment_failure.phpt
     let mut t = TestVm::new();
-    ClassBuilder::new("Test").typed("prop", "int").register(&mut t);
+    ClassBuilder::new("Test")
+        .typed("prop", "int")
+        .register(&mut t);
     assert_eq!(
         thrown(t.call(
             "unserialize",
-            vec![s("O:4:\"Test\":1:{s:4:\"prop\";O:8:\"stdClass\":1:{s:1:\"y\";R:2;}}")]
+            vec![s(
+                "O:4:\"Test\":1:{s:4:\"prop\";O:8:\"stdClass\":1:{s:1:\"y\";R:2;}}"
+            )]
         )),
         (
             "TypeError".to_string(),
@@ -353,7 +405,10 @@ fn sleep_and_wakeup_001() {
     o.set_prop(b"d", s("!"));
     let data = ser(&mut t, Value::Object(o));
     expectf(&t.output(), "__sleep called");
-    assert_eq!(data, "O:1:\"s\":2:{s:1:\"a\";s:5:\"hallo\";s:1:\"c\";s:5:\"world\";}");
+    assert_eq!(
+        data,
+        "O:1:\"s\":2:{s:1:\"a\";s:5:\"hallo\";s:1:\"c\";s:5:\"world\";}"
+    );
     let v = unser(&mut t, data.as_bytes());
     expectf(
         &dump_out(&t, &v),
@@ -502,12 +557,11 @@ fn delayed_wakeup_calls() {
         .flags(class_flags::ALLOW_DYNAMIC_PROPERTIES)
         .method(&WAKEUP_ECHO)
         .register(&mut t);
-    ClassBuilder::new("Boom").method(&WAKEUP_THROW).register(&mut t);
+    ClassBuilder::new("Boom")
+        .method(&WAKEUP_THROW)
+        .register(&mut t);
     // Nested objects are woken up first.
-    let v = unser(
-        &mut t,
-        b"O:1:\"W\":1:{s:1:\"x\";a:1:{i:0;O:1:\"W\":0:{}}}",
-    );
+    let v = unser(&mut t, b"O:1:\"W\":1:{s:1:\"x\";a:1:{i:0;O:1:\"W\":0:{}}}");
     expectf(&t.output(), "W::__wakeup called\nW::__wakeup called");
     assert!(v.as_object().is_some());
     // __wakeup() still runs for complete objects when the data is invalid.
@@ -591,7 +645,9 @@ fn magic_serialize_001_002() {
     );
 
     // __serialize_002.phpt
-    ClassBuilder::new("Test2").method(&SER_THIS).register(&mut t);
+    ClassBuilder::new("Test2")
+        .method(&SER_THIS)
+        .register(&mut t);
     let o = Value::Object(new_obj(&mut t, "Test2"));
     assert_eq!(
         thrown(t.call("serialize", vec![o])),
@@ -871,7 +927,10 @@ fn props_for(_vm: &mut Vm, obj: &ObjRef, purpose: PropPurpose) -> PResult<Option
 fn get_properties_for_handler() {
     let mut t = TestVm::new();
     let mut ce = ClassBuilder::new("Custom").public("real").build();
-    std::rc::Rc::get_mut(&mut ce).unwrap().handlers.get_properties_for = Some(props_for);
+    std::rc::Rc::get_mut(&mut ce)
+        .unwrap()
+        .handlers
+        .get_properties_for = Some(props_for);
     t.vm.register_class(ce);
     let o = new_obj(&mut t, "Custom");
     o.set_prop(b"real", Value::Int(5));
@@ -915,7 +974,10 @@ fn incomplete_classes_only_mode() {
     assert_eq!(pos, data.len());
     for i in 0..3 {
         let o = v.as_array().unwrap().get_int(i).unwrap().unref();
-        assert_eq!(o.as_object().unwrap().class().name, "__PHP_Incomplete_Class");
+        assert_eq!(
+            o.as_object().unwrap().class().name,
+            "__PHP_Incomplete_Class"
+        );
     }
     let sd = var_serialize_init(&mut t.vm);
     var_serialize_set_incomplete_classes_only(&sd, true);
@@ -928,6 +990,10 @@ fn incomplete_classes_only_mode() {
     var_unserialize_set_incomplete_classes_only(&d, true);
     let bad = b"O:1:\"X\":1:{s:27:\"__PHP_Incomplete_Class_Name\";s:1:\"Y\";}";
     let mut pos = 0;
-    assert!(var_unserialize(&mut t.vm, &d, bad, &mut pos).unwrap().is_none());
+    assert!(
+        var_unserialize(&mut t.vm, &d, bad, &mut pos)
+            .unwrap()
+            .is_none()
+    );
     var_unserialize_destroy(&mut t.vm, d).unwrap();
 }
