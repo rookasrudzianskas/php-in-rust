@@ -369,3 +369,71 @@ fn nested_arrays_round_trip() {
     let back = unser(&mut t, data.as_bytes());
     assert_eq!(dump(&t, &back), dump(&t, &a));
 }
+
+#[test]
+fn references_into_object_properties() {
+    let mut t = TestVm::new();
+    // An array element referencing a property of an earlier object.
+    let v = unser(
+        &mut t,
+        b"a:2:{i:0;O:8:\"stdClass\":1:{s:1:\"p\";i:5;}i:1;R:3;}",
+    );
+    let a = v.as_array().unwrap().clone();
+    let o = a.get_int(0).unwrap().as_object().unwrap().clone();
+    let prop = o
+        .obj()
+        .dyn_props
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .get_str(b"p")
+        .cloned();
+    let (Some(Value::Ref(p)), Some(Value::Ref(e))) = (prop, a.get_int(1).cloned()) else {
+        panic!("expected references");
+    };
+    assert!(PhpRef::ptr_eq(&p, &e));
+    p.set(Value::Int(6));
+    assert!(e.get().identical(&Value::Int(6)));
+    // And back: the property is written first, the element refers to it.
+    assert_eq!(
+        ser(&mut t, v),
+        "a:2:{i:0;O:8:\"stdClass\":1:{s:1:\"p\";i:6;}i:1;R:3;}"
+    );
+    // References between properties of the same object.
+    let v = unser(&mut t, b"O:8:\"stdClass\":2:{s:1:\"a\";i:1;s:1:\"b\";R:2;}");
+    expectf(
+        &dump(&t, &v),
+        "object(stdClass)#%d (2) {\n  [\"a\"]=>\n  &int(1)\n  [\"b\"]=>\n  &int(1)\n}",
+    );
+    // An object property referring to the object itself.
+    let v = unser(&mut t, b"O:8:\"stdClass\":1:{s:4:\"self\";r:1;}");
+    let o = v.as_object().unwrap();
+    assert!(o.get_prop(b"self").unwrap().identical(&v));
+    assert_eq!(
+        ser(&mut t, v.clone()),
+        "O:8:\"stdClass\":1:{s:4:\"self\";r:1;}"
+    );
+}
+
+#[test]
+fn module_registration() {
+    let t = TestVm::new();
+    assert_eq!(t.vm.ini_get("unserialize_max_depth").unwrap(), "4096");
+    let ic = t.vm.find_class(b"__PHP_Incomplete_Class").unwrap();
+    assert_eq!(ic.name, "__PHP_Incomplete_Class");
+    assert!(ic.has_flag(php_runtime::class::class_flags::FINAL));
+    assert!(ic.has_flag(php_runtime::class::class_flags::ALLOW_DYNAMIC_PROPERTIES));
+    for f in ["serialize", "unserialize"] {
+        assert!(t.vm.find_function(f).is_some());
+    }
+}
+
+#[test]
+fn top_level_calls_number_from_one() {
+    let mut t = TestVm::new();
+    let o = Value::Object(new_obj(&mut t, "stdClass"));
+    let arr = list(vec![o.clone(), o]);
+    let first = ser(&mut t, arr.clone());
+    assert_eq!(first, "a:2:{i:0;O:8:\"stdClass\":0:{}i:1;r:2;}");
+    assert_eq!(ser(&mut t, arr), first);
+}
