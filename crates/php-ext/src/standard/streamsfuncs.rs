@@ -538,12 +538,17 @@ fn stream_select(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
             return Ok(Value::Int(n as i64));
         }
     }
+    // one pollfd per descriptor (a stream may appear several times, and
+    // select() counts ready descriptors, not array entries)
     let events = [sys::POLLIN | sys::POLLHUP, sys::POLLOUT, sys::POLLPRI];
     let mut fds: Vec<(i32, i16)> = Vec::new();
     for (set, ev) in sets.iter().zip(events) {
         for e in set {
             if let Some(fd) = e.fd {
-                fds.push((fd, ev));
+                match fds.iter_mut().find(|(f, _)| *f == fd) {
+                    Some(slot) => slot.1 |= ev,
+                    None => fds.push((fd, ev)),
+                }
             }
         }
     }
@@ -559,24 +564,31 @@ fn stream_select(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
             return Ok(Value::Bool(false));
         }
     };
+    let ready = |k: usize, fd: i32| -> bool {
+        let Some(i) = fds.iter().position(|(f, _)| *f == fd) else {
+            return false;
+        };
+        let re = revents[i];
+        match k {
+            0 => re & (sys::POLLIN | sys::POLLHUP | sys::POLLERR | sys::POLLNVAL) != 0,
+            1 => re & (sys::POLLOUT | sys::POLLERR | sys::POLLHUP) != 0,
+            _ => re & sys::POLLPRI != 0,
+        }
+    };
     let mut total = 0i64;
-    let mut idx = 0;
     for (k, set) in sets.iter().enumerate() {
         let mut out = PhpArray::new();
+        let mut counted: Vec<i32> = Vec::new();
         for e in set {
-            let Some(_) = e.fd else {
+            let Some(fd) = e.fd else {
                 continue;
             };
-            let re = revents[idx];
-            idx += 1;
-            let hit = match k {
-                0 => re & (sys::POLLIN | sys::POLLHUP | sys::POLLERR | sys::POLLNVAL) != 0,
-                1 => re & (sys::POLLOUT | sys::POLLERR | sys::POLLHUP) != 0,
-                _ => re & sys::POLLPRI != 0,
-            };
-            if hit {
+            if ready(k, fd) {
                 out.insert(e.key.clone(), e.value.clone());
-                total += 1;
+                if !counted.contains(&fd) {
+                    counted.push(fd);
+                    total += 1;
+                }
             }
         }
         if arrays[k].is_some() {

@@ -676,3 +676,48 @@ fn timeout_on_closed_and_plain_streams() {
         "stream_set_timeout(): Argument #1 ($stream) must be an open stream resource"
     );
 }
+
+#[test]
+fn select_preserves_keys_and_emulates_buffered_reads() {
+    // stream_select_preserve_keys.phpt, stream_select_null_usec.phpt
+    let mut t = TestVm::new();
+    let d = scratch("sel");
+    let f = format!("{d}/f");
+    std::fs::write(&f, "abc").unwrap();
+    let fp = t.call("fopen", vec![s(&f), s("r")]).unwrap();
+    let mut arr = PhpArray::new();
+    arr.insert(php_runtime::ArrayKey::Int(1), fp.clone());
+    arr.insert_str("myindex", fp.clone());
+    let read = Value::Ref(PhpRef::new(Value::from(arr)));
+    let nul = || Value::Ref(PhpRef::new(Value::Null));
+    t.call(
+        "stream_select",
+        vec![read.clone(), nul(), nul(), Value::Int(0)],
+    )
+    .unwrap();
+    assert_eq!(keys(&read.unref()), ["1", "myindex"]);
+    t.call("fread", vec![fp.clone(), Value::Int(1)]).unwrap();
+    // data is buffered now: the emulated read path keeps both keys too
+    let n = t
+        .call(
+            "stream_select",
+            vec![read.clone(), nul(), nul(), Value::Int(0)],
+        )
+        .unwrap();
+    assert_eq!(n.as_int(), Some(2));
+    assert_eq!(keys(&read.unref()), ["1", "myindex"]);
+    t.call(
+        "stream_select",
+        vec![read.clone(), nul(), nul(), Value::Null, Value::Int(0)],
+    )
+    .unwrap();
+    let (cls, msg) = thrown(t.call(
+        "stream_select",
+        vec![read, nul(), nul(), Value::Null, Value::Int(1)],
+    ));
+    assert_eq!(cls, "ValueError");
+    assert_eq!(
+        msg,
+        "stream_select(): Argument #5 ($microseconds) must be null when argument #4 ($seconds) is null"
+    );
+}
