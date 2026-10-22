@@ -493,11 +493,18 @@ pub fn connect(
     }
 }
 
+/// `ETIMEDOUT`.
+#[cfg(target_os = "linux")]
+pub const ETIMEDOUT: i32 = 110;
+#[cfg(not(target_os = "linux"))]
+pub const ETIMEDOUT: i32 = 60;
+
 fn err_pair(e: &io::Error) -> (i32, String) {
-    if e.kind() == io::ErrorKind::TimedOut {
-        return (sys::errno_of(e).max(60), "Connection timed out".to_string());
-    }
-    let n = sys::errno_of(e);
+    let n = match e.raw_os_error() {
+        Some(n) => n,
+        None if e.kind() == io::ErrorKind::TimedOut => ETIMEDOUT,
+        None => sys::errno_of(e),
+    };
     (n, sys::strerror(n))
 }
 
@@ -535,3 +542,224 @@ pub fn bind(
 
 /// The registered transports (`stream_get_transports`).
 pub const TRANSPORTS: &[&str] = &["tcp", "udp", "unix", "udg"];
+
+/// Persistent sockets (`pfsockopen`, `STREAM_CLIENT_PERSISTENT`), keyed by
+/// their hash key.
+#[derive(Default)]
+pub struct PersistentSockets {
+    pub map: Vec<(Vec<u8>, ResRef)>,
+}
+
+/// `php_stream_xport_create` for clients and servers (`server_flags` are
+/// STREAM_SERVER_BIND/LISTEN). `Err((errno, message))` carries what PHP
+/// reports as `$error_code` / `$error_message`.
+pub fn xport_create(
+    vm: &mut Vm,
+    address: &[u8],
+    server: bool,
+    server_flags: i64,
+    timeout: Option<Duration>,
+    ctx: Option<&ResRef>,
+    persistent_key: Option<&[u8]>,
+) -> PResult<Result<ResRef, (i32, String)>> {
+    if let Some(key) = persistent_key {
+        let found = vm
+            .ext_data::<PersistentSockets>()
+            .map
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, r)| r.clone());
+        if let Some(r) = found {
+            let alive = stream::with_stream(vm, &r, |vm, s| {
+                s.set_option(vm, opt::CHECK_LIVENESS, 0, &mut OptParam::None)
+            })?;
+            if alive == Some(opt::RETURN_OK) {
+                return Ok(Ok(r));
+            }
+            vm.ext_data::<PersistentSockets>()
+                .map
+                .retain(|(k, _)| k != key);
+        }
+    }
+    let target = split_transport(address);
+    if !TRANSPORTS.contains(&target.transport.to_string_lossy().as_ref()) {
+        let name: String = target
+            .transport
+            .to_string_lossy()
+            .chars()
+            .take(31)
+            .collect();
+        return Ok(Err((
+            0,
+            format!(
+                "Unable to find the socket transport \"{name}\" - did you forget to enable it when you configured PHP?"
+            ),
+        )));
+    }
+    let transport = target.transport.as_bytes();
+    let r = if server {
+        if server_flags & 4 != 0 {
+            bind(transport, &target.name, server_flags & 8 != 0)
+        } else {
+            Err((0, String::new()))
+        }
+    } else {
+        connect(transport, &target.name, timeout)
+    };
+    match r {
+        Ok((sock, label)) => {
+            // `timeout` None waits forever (tv_sec == -1)
+            let t = if server { None } else { timeout };
+            let res = alloc_socket(vm, sock, label, t, persistent_key.is_some());
+            if let Some(h) = stream::handle_of(&res) {
+                let mut s = h.borrow_mut();
+                s.st.context = ctx.cloned();
+                s.orig_path = Some(PhpStr::from_bytes(address));
+                if server {
+                    s.st.flags |= stream::flags::NO_IO;
+                }
+            }
+            if let Some(key) = persistent_key {
+                vm.ext_data::<PersistentSockets>()
+                    .map
+                    .push((key.to_vec(), res.clone()));
+            }
+            Ok(Ok(res))
+        }
+        Err(e) => {
+            // the factory allocated (and freed) a stream before connecting
+            drop(ResRef::new("stream", Box::new(())));
+            Ok(Err(e))
+        }
+    }
+}
+
+/// Formats a socket address like `php_network_populate_name_from_sockaddr`.
+pub fn format_addr(a: &SocketAddr) -> String {
+    match a {
+        SocketAddr::V4(v) => format!("{}:{}", v.ip(), v.port()),
+        SocketAddr::V6(v) => format!("[{}]:{}", v.ip(), v.port()),
+    }
+}
+
+fn unix_addr_name(a: &std::os::unix::net::SocketAddr) -> Option<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
+    a.as_pathname().map(|p| p.as_os_str().as_bytes().to_vec())
+}
+
+/// Result of a successful `accept`: the client socket, its ops label and
+/// the peer name.
+pub type Accepted = (Sock, &'static str, Option<Vec<u8>>);
+
+impl SocketOps {
+    /// `STREAM_XPORT_OP_GET_NAME` / `GET_PEER_NAME`.
+    pub fn name(&self, peer: bool) -> Option<Vec<u8>> {
+        let s = self.sock.as_ref()?;
+        let inet = |r: io::Result<SocketAddr>| r.ok().map(|a| format_addr(&a).into_bytes());
+        match s {
+            Sock::Tcp(t) => inet(if peer { t.peer_addr() } else { t.local_addr() }),
+            Sock::Udp(u) => inet(if peer { u.peer_addr() } else { u.local_addr() }),
+            Sock::TcpListener(l) => {
+                if peer {
+                    None
+                } else {
+                    inet(l.local_addr())
+                }
+            }
+            Sock::Unix(u) => (if peer { u.peer_addr() } else { u.local_addr() })
+                .ok()
+                .and_then(|a| unix_addr_name(&a)),
+            Sock::UnixDg(u) => (if peer { u.peer_addr() } else { u.local_addr() })
+                .ok()
+                .and_then(|a| unix_addr_name(&a)),
+            Sock::UnixListener(l) => {
+                if peer {
+                    None
+                } else {
+                    l.local_addr().ok().and_then(|a| unix_addr_name(&a))
+                }
+            }
+            Sock::Generic(_) => None,
+        }
+    }
+
+    /// `php_network_accept_incoming`: waits up to `timeout` for a client.
+    pub fn accept(&mut self, timeout: Option<Duration>) -> Result<Accepted, String> {
+        if self.sock.is_none() {
+            return Err("Unknown error".into());
+        }
+        match self.poll_for(sys::POLLIN, timeout) {
+            Ok(0) => return Err(sys::strerror(ETIMEDOUT)),
+            Ok(_) => {}
+            Err(e) => return Err(sys::strerror(sys::errno_of(&e))),
+        }
+        match self.sock.as_ref().expect("checked") {
+            Sock::TcpListener(l) => match l.accept() {
+                Ok((s, a)) => Ok((
+                    Sock::Tcp(s),
+                    "tcp_socket",
+                    Some(format_addr(&a).into_bytes()),
+                )),
+                Err(e) => Err(sys::strerror(sys::errno_of(&e))),
+            },
+            Sock::UnixListener(l) => match l.accept() {
+                Ok((s, a)) => Ok((Sock::Unix(s), "unix_socket", unix_addr_name(&a))),
+                Err(e) => Err(sys::strerror(sys::errno_of(&e))),
+            },
+            _ => Err(sys::strerror(sys::EINVAL)),
+        }
+    }
+
+    /// `STREAM_XPORT_OP_RECV` (with the sender's address for datagrams).
+    pub fn recvfrom(&mut self, buf: &mut [u8], peek: bool) -> io::Result<(usize, Option<Vec<u8>>)> {
+        match self.sock.as_mut() {
+            Some(Sock::Udp(u)) => {
+                let (n, a) = if peek {
+                    u.peek_from(buf)?
+                } else {
+                    u.recv_from(buf)?
+                };
+                Ok((n, Some(format_addr(&a).into_bytes())))
+            }
+            Some(Sock::UnixDg(u)) => {
+                let (n, a) = u.recv_from(buf)?;
+                Ok((n, unix_addr_name(&a)))
+            }
+            Some(Sock::Tcp(t)) => {
+                let n = if peek { t.peek(buf)? } else { t.read(buf)? };
+                Ok((n, t.peer_addr().ok().map(|a| format_addr(&a).into_bytes())))
+            }
+            Some(s) => Ok((s.read(buf)?, None)),
+            None => Err(io::Error::from_raw_os_error(sys::EBADF)),
+        }
+    }
+
+    /// `STREAM_XPORT_OP_SEND`.
+    pub fn sendto(&mut self, buf: &[u8], addr: Option<SocketAddr>) -> io::Result<usize> {
+        match (self.sock.as_mut(), addr) {
+            (Some(Sock::Udp(u)), Some(a)) => u.send_to(buf, a),
+            (Some(s), _) => s.write(buf),
+            (None, _) => Err(io::Error::from_raw_os_error(sys::EBADF)),
+        }
+    }
+
+    pub fn shutdown(&self, how: Shutdown) -> bool {
+        self.sock.as_ref().is_some_and(|s| s.shutdown(how).is_ok())
+    }
+}
+
+/// `socketpair(2)` for the supported domain/type combinations; `Err(errno)`.
+pub fn socket_pair(domain: i64, ty: i64) -> Result<(Sock, Sock), i32> {
+    if domain != 1 {
+        return Err(if cfg!(target_os = "linux") { 95 } else { 45 });
+    }
+    match ty {
+        1 => UnixStream::pair()
+            .map(|(a, b)| (Sock::Unix(a), Sock::Unix(b)))
+            .map_err(|e| sys::errno_of(&e)),
+        2 => UnixDatagram::pair()
+            .map(|(a, b)| (Sock::UnixDg(a), Sock::UnixDg(b)))
+            .map_err(|e| sys::errno_of(&e)),
+        _ => Err(if cfg!(target_os = "linux") { 94 } else { 44 }),
+    }
+}
