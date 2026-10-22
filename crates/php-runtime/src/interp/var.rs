@@ -65,14 +65,17 @@ pub fn debug_properties(vm: &mut Vm, obj: &ObjRef, purpose: PropPurpose, with_un
     let mut infos: Vec<(usize, PhpStr, Option<TypeDecl>)> = Vec::new();
     let mut ce: Option<ClassRef> = Some(class.clone());
     while let Some(c) = ce {
+        let own = std::rc::Rc::ptr_eq(&c, &class);
         for info in c.properties.values() {
             if info.is_static() || infos.iter().any(|(s, _, _)| *s == info.slot) {
                 continue;
             }
-            if let Some(h) = super::decl::prop_hooks(info) {
-                if h.virtual_ {
-                    continue;
-                }
+            // Parents contribute only their private properties (rebuild_object_properties).
+            if !own && !(info.flags & crate::class::member_flags::PRIVATE != 0 && info.declaring_class.eq_ignore_ascii_case(&c.name)) {
+                continue;
+            }
+            if info.flags & crate::class::member_flags::VIRTUAL != 0 {
+                continue;
             }
             infos.push((info.slot, super::objects::mangled_name(info), info.ty.clone()));
         }
