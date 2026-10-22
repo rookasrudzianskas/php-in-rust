@@ -293,6 +293,20 @@ pub trait StreamOps: AsAny {
         None
     }
 
+    /// `ops->cast` for implementations that run PHP code (userspace
+    /// `stream_cast`). `report_errors` is false when only probing
+    /// (`retptr == NULL`). Defaults to [`StreamOps::cast_fd`].
+    fn cast_vm(
+        &mut self,
+        vm: &mut Vm,
+        st: &mut StreamState,
+        as_: CastAs,
+        report_errors: bool,
+    ) -> PResult<Option<RawFd>> {
+        let _ = (vm, st, report_errors);
+        Ok(self.cast_fd(as_))
+    }
+
     /// `ops->stat`; `Ok(None)` = failure / unsupported.
     fn stat(&mut self, vm: &mut Vm, st: &mut StreamState) -> PResult<Option<StatBuf>> {
         let _ = (vm, st);
@@ -1484,6 +1498,16 @@ impl Stream {
     /// `php_stream_cast(..., PHP_STREAM_AS_FD*)`.
     pub fn cast_fd(&mut self, as_: CastAs) -> Option<RawFd> {
         self.ops.cast_fd(as_)
+    }
+
+    /// `ops->cast` that may run PHP code (userspace `stream_cast`).
+    pub fn cast(
+        &mut self,
+        vm: &mut Vm,
+        as_: CastAs,
+        report_errors: bool,
+    ) -> PResult<Option<RawFd>> {
+        self.ops.cast_vm(vm, &mut self.st, as_, report_errors)
     }
 
     /// Appends (or prepends) a filter to the read or write chain

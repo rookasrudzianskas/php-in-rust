@@ -185,6 +185,9 @@ pub struct StreamGlobals {
     pub default_context: Option<ResRef>,
     /// `BG(umask)` (umask in effect before the first `umask()` call).
     pub saved_umask: Option<u32>,
+    /// `PG(in_user_include)`: a local userspace wrapper is opening a file
+    /// for inclusion, so URL wrappers also obey `allow_url_include`.
+    pub in_user_include: bool,
 }
 
 pub fn globals(vm: &mut Vm) -> &mut StreamGlobals {
@@ -375,10 +378,10 @@ pub fn locate_url_wrapper(vm: &mut Vm, path: &[u8], options: i32) -> PResult<Opt
         }));
     }
     let wrapper = wrapper.expect("protocol implies wrapper");
+    let for_include = options & open::STREAM_OPEN_FOR_INCLUDE != 0 || globals(vm).in_user_include;
     if wrapper.is_url()
         && options & open::STREAM_DISABLE_URL_PROTECTION == 0
-        && (!vm.ini_bool("allow_url_fopen")
-            || (options & open::STREAM_OPEN_FOR_INCLUDE != 0 && !vm.ini_bool("allow_url_include")))
+        && (!vm.ini_bool("allow_url_fopen") || (for_include && !vm.ini_bool("allow_url_include")))
     {
         if options & open::REPORT_ERRORS != 0 {
             let proto = String::from_utf8_lossy(&path[..n]).into_owned();
