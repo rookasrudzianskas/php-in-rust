@@ -10,7 +10,7 @@ use php_runtime::{Args, NativeFunction, PResult, PhpArray, Registry, ResRef, Val
 use super::streams::stream::{self, StreamKind, flags, open, opt};
 use super::streams::wrappers::{self, StatResult};
 use super::streams::{
-    self as st, context_param, handle_of, path_param, plain, stream_param, sys, with_stream,
+    self as st, context_param, csv, handle_of, path_param, plain, stream_param, sys, with_stream,
 };
 
 pub const PHP_LOCK_SH: i64 = 1;
@@ -1114,6 +1114,29 @@ fn fnmatch(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     )))
 }
 
+/// Stream access for the shared CSV code.
+struct ResCsv(ResRef);
+
+impl csv::CsvStream for ResCsv {
+    fn get_line(&mut self, vm: &mut Vm, maxlen: Option<usize>) -> PResult<Option<Vec<u8>>> {
+        st::read_line(vm, &self.0, maxlen)
+    }
+
+    fn write(&mut self, vm: &mut Vm, data: &[u8]) -> PResult<Option<usize>> {
+        st::write(vm, &self.0, data)
+    }
+}
+
+fn fgetcsv(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+    let res = stream_param(vm, args, 0)?;
+    csv::fgetcsv_impl(vm, args, &mut ResCsv(res))
+}
+
+fn fputcsv(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+    let res = stream_param(vm, args, 0)?;
+    csv::fputcsv_impl(vm, args, &mut ResCsv(res))
+}
+
 fn sys_get_temp_dir(vm: &mut Vm, _args: &mut Args) -> PResult<Value> {
     Ok(Value::String(plain::temporary_directory(vm)))
 }
@@ -1160,6 +1183,8 @@ natives! {
     FILE_GET_CONTENTS: "file_get_contents(string $filename, bool $use_include_path = false, $context = null, int $offset = 0, ?int $length = null): string|false" => file_get_contents;
     UNLINK: "unlink(string $filename, $context = null): bool" => unlink;
     FILE_PUT_CONTENTS: "file_put_contents(string $filename, mixed $data, int $flags = 0, $context = null): int|false" => file_put_contents;
+    FPUTCSV: "fputcsv($stream, array $fields, string $separator = \",\", string $enclosure = \"\\\"\", string $escape = \"\\\\\", string $eol = \"\\n\"): int|false" => fputcsv;
+    FGETCSV: "fgetcsv($stream, ?int $length = null, string $separator = \",\", string $enclosure = \"\\\"\", string $escape = \"\\\\\"): array|false" => fgetcsv;
     REALPATH: "realpath(string $path): string|false" => realpath;
     FNMATCH: "fnmatch(string $pattern, string $filename, int $flags = 0): bool" => fnmatch;
     SYS_GET_TEMP_DIR: "sys_get_temp_dir(): string" => sys_get_temp_dir;
