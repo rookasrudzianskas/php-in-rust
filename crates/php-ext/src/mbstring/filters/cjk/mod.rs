@@ -14,6 +14,28 @@ pub mod sjis;
 
 use crate::mbstring::tables::emoji2uni::*;
 
+/// `translit_kana_jisx0201_jisx0208.h`: `mb_convert_kana` mode flags
+/// ("Zen" = fullwidth, "Han" = halfwidth).
+pub mod kana {
+    pub const HAN2ZEN_ALL: u32 = 0x00001;
+    pub const HAN2ZEN_ALPHA: u32 = 0x00002;
+    pub const HAN2ZEN_NUMERIC: u32 = 0x00004;
+    pub const HAN2ZEN_SPACE: u32 = 0x00008;
+    pub const HAN2ZEN_KATAKANA: u32 = 0x00010;
+    pub const HAN2ZEN_HIRAGANA: u32 = 0x00020;
+    pub const HAN2ZEN_SPECIAL: u32 = 0x00040;
+    pub const ZENKAKU_HIRA2KATA: u32 = 0x00080;
+    pub const ZEN2HAN_ALL: u32 = 0x00100;
+    pub const ZEN2HAN_ALPHA: u32 = 0x00200;
+    pub const ZEN2HAN_NUMERIC: u32 = 0x00400;
+    pub const ZEN2HAN_SPACE: u32 = 0x00800;
+    pub const ZEN2HAN_KATAKANA: u32 = 0x01000;
+    pub const ZEN2HAN_HIRAGANA: u32 = 0x02000;
+    pub const ZEN2HAN_SPECIAL: u32 = 0x04000;
+    pub const ZENKAKU_KATA2HIRA: u32 = 0x08000;
+    pub const HAN2ZEN_GLUE: u32 = 0x10000;
+}
+
 /// `mbfl_bisec_srch`: `tbl` holds `n` inclusive ranges as pairs; returns the
 /// index of the range containing `w`, or -1.
 pub fn mbfl_bisec_srch(w: i32, tbl: &[u16], n: usize) -> i32 {

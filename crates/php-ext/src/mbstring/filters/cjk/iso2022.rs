@@ -464,3 +464,11 @@ pub fn mbfl_filt_conv_2022kr_wchar(c: i32, f: &mut ConvertFilter, out: &mut dyn 
 pub fn mbfl_filt_conv_2022kr_wchar_flush(f: &mut ConvertFilter, out: &mut dyn FilterOutput) -> i32 {
     todo!("mbfl_filt_conv_2022kr_wchar_flush")
 }
+
+/// `mb_convert_kana_codepoint`: converts `c` (looking ahead at `next` for
+/// voiced sound marks) according to `mode` (`kana::*` flags). Sets `*consumed`
+/// when `next` was merged into the result and `*second` when a second
+/// codepoint must be emitted after the result.
+pub fn mb_convert_kana_codepoint(c: u32, next: u32, consumed: Option<&mut bool>, second: &mut u32, mode: u32) -> u32 {
+    todo!("mb_convert_kana_codepoint")
+}
