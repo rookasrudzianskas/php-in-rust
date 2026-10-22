@@ -108,6 +108,27 @@ pub fn open(
     wrappers::open_wrapper(vm, path, mode, opts, None, context)
 }
 
+/// `php_stream_open_for_zend_ex` (include/require): opens `path` with
+/// `USE_PATH | REPORT_ERRORS | STREAM_OPEN_FOR_INCLUDE` and returns the
+/// whole contents plus the opened (resolved) path. `None` after the
+/// "Failed to open stream" warning; the caller adds "Failed opening ... for
+/// inclusion".
+pub fn open_for_include(vm: &mut Vm, path: &[u8]) -> PResult<Option<(Vec<u8>, PhpStr)>> {
+    let opts = stream::open::USE_PATH
+        | stream::open::REPORT_ERRORS
+        | stream::open::STREAM_OPEN_FOR_INCLUDE;
+    let mut opened = None;
+    let Some(res) = wrappers::open_wrapper(vm, path, b"rb", opts, Some(&mut opened), None)? else {
+        return Ok(None);
+    };
+    let data = read_to_end(vm, &res)?.unwrap_or_default();
+    close(vm, &res)?;
+    Ok(Some((
+        data,
+        opened.unwrap_or_else(|| PhpStr::from_bytes(path)),
+    )))
+}
+
 /// A `php://memory` stream holding `data` (read/write, positioned at 0).
 pub fn open_memory(vm: &mut Vm, data: &[u8]) -> ResRef {
     memory::memory_open(vm, memory::TEMP_STREAM_DEFAULT, data.to_vec())
