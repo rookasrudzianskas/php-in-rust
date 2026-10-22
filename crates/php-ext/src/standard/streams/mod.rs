@@ -22,6 +22,7 @@
 #![allow(clippy::collapsible_if)]
 
 pub mod context;
+pub mod csv;
 pub mod filter;
 pub mod glob;
 pub mod glob_wrapper;
@@ -234,6 +235,7 @@ pub fn read_all(vm: &mut Vm, path: &[u8]) -> PResult<Option<Vec<u8>>> {
 }
 
 pub fn register(r: &mut Registry) {
+    csv::register(r);
     user_wrapper::register(r);
     ini::register(r);
 
