@@ -80,6 +80,10 @@ fn with_object_table<R>(vm: &mut Vm, o: &ObjRef, f: impl FnOnce(&mut IapTable) -
     let r = f(&mut t);
     let pos = t.table.internal_pointer();
     let st = vm.ext_data::<ObjectIap>();
+    if st.map.len() >= 64 {
+        // Forget the pointers of objects that no longer exist.
+        st.map.retain(|_, (w, _)| w.upgrade().is_some());
+    }
     st.map.insert(o.id(), (o.downgrade(), pos));
     r
 }
