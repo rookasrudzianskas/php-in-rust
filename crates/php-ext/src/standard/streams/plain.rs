@@ -546,7 +546,12 @@ pub fn expand_filepath(path: &[u8]) -> Option<Vec<u8>> {
 
 /// `VCWD_REALPATH` / `tsrm_realpath`: the file must exist.
 pub fn real_path(path: &[u8]) -> Option<PhpStr> {
-    let expanded = expand_only(path)?;
+    // realpath("") is the current directory (tsrm_realpath)
+    let expanded = if path.is_empty() {
+        getcwd_bytes()?
+    } else {
+        expand_only(path)?
+    };
     std::fs::canonicalize(os(&expanded))
         .ok()
         .map(|p| PhpStr::from_bytes(p.as_os_str().as_bytes()))
