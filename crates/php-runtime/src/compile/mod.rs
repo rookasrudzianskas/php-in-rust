@@ -127,6 +127,9 @@ pub(crate) struct FnState {
     /// Property hook context: property name.
     hook_prop: Option<PhpStr>,
     hook_kind: Option<HookKind>,
+    /// The hook body accesses `$this->{hook_prop}` (the property is backed;
+    /// `zend_property_hook_uses_property`).
+    hook_uses_prop: bool,
 }
 
 impl FnState {
@@ -151,6 +154,7 @@ impl FnState {
             is_static: false,
             hook_prop: None,
             hook_kind: None,
+            hook_uses_prop: false,
         }
     }
 }
