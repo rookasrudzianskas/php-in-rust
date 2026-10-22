@@ -7,6 +7,8 @@
 mod charset;
 mod entity;
 mod tables;
+#[cfg(test)]
+mod tests;
 
 use std::borrow::Cow;
 
