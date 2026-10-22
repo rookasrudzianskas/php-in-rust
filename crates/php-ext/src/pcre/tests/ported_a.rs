@@ -1,4 +1,4 @@
-//! Ported .phpt tests, batch A (`001` .. `bug27103` so far).
+//! Ported .phpt tests, batch A (`001` .. `bug70345`).
 //!
 //! Each test transliterates the `--FILE--` section of the phpt of the same
 //! name (see `tests/phpt/ext/pcre/tests/`) and compares what it prints with

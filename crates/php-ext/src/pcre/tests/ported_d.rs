@@ -1,6 +1,6 @@
 //! Ported .phpt tests, batch D (`preg_match_all_basic` .. `ungreedy`).
 //!
-//! Not ported: preg_match_error3 and preg_match_error4 (JIT stack limit),
+//! Not ported: preg_match_error3 (JIT stack limit),
 //! preg_match_frameless_leak (objects with `__toString`), the trampoline
 //! tests, preg_replace_callback_fatal_error_leak (redeclaring a function),
 //! preg_replace_callback_matches_refcount (`debug_zval_dump()`), and
@@ -8,6 +8,7 @@
 //! preg_replace_callback_array_numeric_index_error, whose uncaught errors
 //! are checked by message instead (see `uncaught_errors`).
 
+use super::phpt::{between, file_section};
 use super::support::*;
 use php_runtime::{Args, NativeFunction, PResult, PhpRef, Value, Vm};
 
@@ -1060,6 +1061,53 @@ fn ungreedy() {
     let mut p = P::phpt("ungreedy");
     for pattern in ["/<.*>/", "/<.*>/U", "/(?U)<.*>/"] {
         p.dump_match(pattern, "<aa> <bb> <cc>");
+    }
+    p.finish();
+}
+
+#[test]
+fn preg_match_error1() {
+    let mut p = P::phpt("preg_match_error1");
+    let regex_array = [
+        s("abcdef"),
+        s("/[a-zA-Z]"),
+        s("[a-zA-Z]/"),
+        s("/[a-zA-Z]/F"),
+        strs(&["[a-z]", "[A-Z]", "[0-9]"]),
+        s("/[a-zA-Z]/"),
+    ];
+    let subject = s("this is a test");
+    for regex in regex_array {
+        if let Some(r) = p.try_call("preg_match", vec![regex, subject.clone()]) {
+            p.dump(&r);
+        }
+    }
+    let std = p.std_object();
+    if let Some(r) = p.try_call("preg_match", vec![std, subject]) {
+        p.dump(&r);
+    }
+    p.finish();
+}
+
+/// preg_match_error4.phpt exhausts the JIT stack in a JIT build; without JIT
+/// the pattern has to match without hitting any limit.
+#[test]
+fn preg_match_error4_big_pattern() {
+    let mut p = P::phpt("preg_match_error4");
+    let script = file_section("preg_match_error4");
+    let literal = |start: &[u8], end: &[u8]| {
+        sq_bytes(std::str::from_utf8(&between(&script, start, end)).unwrap())
+    };
+    let re = literal(b"$re = '", b"';\n\n$str");
+    let str_ = literal(b"$str = '", b"';\n\n$count");
+    let m = nref();
+    let r = p.call(
+        "preg_match",
+        vec![Value::from(re), Value::from(str_), rf(&m)],
+    );
+    match r {
+        Value::Int(count) => p.echo(&format!("string(16) \"Done, {count} matches.\"")),
+        other => panic!("preg_match failed: {other:?}, error {}", p.last_error_msg()),
     }
     p.finish();
 }
