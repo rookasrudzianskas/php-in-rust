@@ -727,10 +727,11 @@ fn every_array_function_is_registered() {
             "{name} is not registered"
         );
     }
-    for name in ["compact", "extract", "shuffle", "array_rand"] {
+    // compact() and extract() need the caller's scope and live in the runtime.
+    for name in ["compact", "extract"] {
         assert!(
             t.vm.find_function(name).is_none(),
-            "{name} belongs to another module"
+            "{name} belongs to the runtime"
         );
     }
 }

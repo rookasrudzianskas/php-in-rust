@@ -1,4 +1,4 @@
-//! `min()`, `max()` and `clamp()`.
+//! `min()` and `max()`.
 //!
 //! `min`/`max` mirror php-src's int/float fast paths exactly (they differ from
 //! a plain `zend_compare` loop for NaN and for ties between an int and a
@@ -142,31 +142,6 @@ fn max(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     minmax(vm, args, true)
 }
 
-/// `php_math_clamp` (math.c).
-fn clamp(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
-    let value = args.get(0).clone();
-    let min = args.get(1).clone();
-    let max = args.get(2).clone();
-    if matches!(&min, Value::Float(d) if d.is_nan()) {
-        return Err(vm.argument_value_error(2, "must not be NAN"));
-    }
-    if matches!(&max, Value::Float(d) if d.is_nan()) {
-        return Err(vm.argument_value_error(3, "must not be NAN"));
-    }
-    if vm.compare(&max, &min)? == -1 {
-        return Err(
-            vm.argument_value_error(2, "must be smaller than or equal to argument #3 ($max)")
-        );
-    }
-    if vm.compare(&max, &value)? == -1 {
-        return Ok(max);
-    }
-    if vm.compare(&value, &min)? == -1 {
-        return Ok(min);
-    }
-    Ok(value)
-}
-
 pub static FUNCTIONS: &[NativeFunction] = &[
     NativeFunction {
         sig: "min(mixed $value, mixed ...$values): mixed",
@@ -175,9 +150,5 @@ pub static FUNCTIONS: &[NativeFunction] = &[
     NativeFunction {
         sig: "max(mixed $value, mixed ...$values): mixed",
         handler: max,
-    },
-    NativeFunction {
-        sig: "clamp(mixed $value, mixed $min, mixed $max): mixed",
-        handler: clamp,
     },
 ];

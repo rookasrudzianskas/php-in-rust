@@ -6,7 +6,7 @@
 //!   (`sort`, `usort`, `ksort`, `natsort`, `array_multisort`, ...);
 //! * `unique`: `array_unique`;
 //! * `iter`: the internal pointer functions and `array_walk*`;
-//! * `minmax`: `min`, `max` (and `clamp`);
+//! * `minmax`: `min`, `max`;
 //! * `access`: searching and reading (`in_array`, `array_keys`,
 //!   `array_key_exists`, `array_column`, ...);
 //! * `build`: constructing and reshaping arrays and the stack functions;
