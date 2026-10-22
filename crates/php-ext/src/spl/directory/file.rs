@@ -55,7 +55,16 @@ pub(super) fn file_open(vm: &mut Vm, obj: &ObjRef, use_include_path: bool) -> PR
             st.file_name = None;
         })
     };
-    if matches!(php_stat(vm, &file_name, FS_IS_DIR), Ok(Value::Bool(true))) {
+    // A warning of php_stat() (open_basedir) is the pending exception that
+    // the open's own warnings do not overwrite.
+    let is_dir = match php_stat(vm, &file_name, FS_IS_DIR) {
+        Ok(v) => v.identical(&Value::Bool(true)),
+        Err(e) => {
+            reset(obj);
+            return Err(e);
+        }
+    };
+    if is_dir {
         reset(obj);
         return Err(vm.throw_error(
             "LogicException",

@@ -1328,3 +1328,22 @@ fn file_class_with_default_properties() {
         "php://temp"
     );
 }
+
+#[test]
+fn open_basedir_warnings_become_exceptions() {
+    let allowed = TempDir::new("basedir-in");
+    let outside = TempDir::new("basedir-out");
+    let p = outside.file("secret.txt", "x");
+    let mut t = TestVm::new();
+    assert!(t.vm.ini_set("open_basedir", allowed.root()).is_some());
+    let (class, msg) = thrown(try_new(&mut t, "SplFileObject", vec![s(&p)]));
+    assert_eq!(class, "RuntimeException");
+    assert_eq!(
+        msg,
+        format!(
+            "SplFileObject::__construct(): open_basedir restriction in effect. File({p}) is not within the allowed path(s): ({})",
+            allowed.root()
+        )
+    );
+    assert_eq!(t.output(), "");
+}
