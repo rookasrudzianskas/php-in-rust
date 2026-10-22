@@ -230,7 +230,14 @@ impl StreamOps for SocketOps {
     }
 
     fn stat(&mut self, _vm: &mut Vm, _st: &mut StreamState) -> PResult<Option<StatBuf>> {
-        Ok(None)
+        // zend_fstat(sock->socket) on a duplicate of the descriptor
+        let Some(s) = &self.sock else {
+            return Ok(None);
+        };
+        Ok(sys::sys_dup(s.fd())
+            .ok()
+            .and_then(|fd| File::from(fd).metadata().ok())
+            .map(|m| StatBuf::from_metadata(&m)))
     }
 
     fn set_option(
