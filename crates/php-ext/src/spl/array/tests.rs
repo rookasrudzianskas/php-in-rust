@@ -2545,3 +2545,72 @@ fn unserialize_verifies_typed_properties() {
     a.set(int(2));
     assert!(o.get_prop(b"b").unwrap().identical(&int(2)));
 }
+
+#[test]
+fn hooked_properties_are_not_in_the_table() {
+    // property_hooks.phpt: virtual properties have no slot; an uninitialised
+    // backed property is an unset slot; writes bypass the hooks.
+    let mut t = TestVm::new();
+    let mut ce = ClassEntry::new("TestHooks", 0);
+    let mut first = PropertyInfo::new("first", "TestHooks", PUB);
+    first.ty = Some(php_runtime::types::TypeDecl::parse("string").unwrap());
+    first.default = s("first");
+    ce.declare_property(first);
+    let mut full = PropertyInfo::new("fullName", "TestHooks", PUB | member_flags::VIRTUAL);
+    full.ty = Some(php_runtime::types::TypeDecl::parse("string").unwrap());
+    ce.declare_property(full);
+    let mut user = PropertyInfo::new("username", "TestHooks", PUB);
+    user.ty = Some(php_runtime::types::TypeDecl::parse("string").unwrap());
+    user.default = Value::Undef;
+    ce.declare_property(user);
+    let ce = Rc::new(ce);
+    t.vm.register_class(ce.clone());
+    let o = t.vm.instantiate(&ce).unwrap();
+    let a = new(&mut t, "ArrayObject", vec![obj(&o)]);
+    assert_eq!(t.output(), DEP_AO);
+    assert!(rd(&mut t, &a, s("first")).identical(&s("first")));
+    assert!(rd(&mut t, &a, s("fullName")).is_null());
+    assert!(rd(&mut t, &a, s("username")).is_null());
+    assert_eq!(
+        t.output(),
+        "\nWarning: Undefined array key \"fullName\" in /t.php on line 3\n\
+         \nWarning: Undefined array key \"username\" in /t.php on line 3\n"
+    );
+    wr(&mut t, &a, Some(s("fullName")), s("ArrayObject is hell"));
+    wr(&mut t, &a, Some(s("username")), s("whatever"));
+    assert!(o.get_prop(b"username").unwrap().identical(&s("whatever")));
+    let dynamic = o.obj().dyn_props.borrow().clone().unwrap();
+    assert_eq!(
+        render_array(&mut t, &dynamic),
+        "[\"fullName\"=>\"ArrayObject is hell\"]"
+    );
+    let it = m(&mut t, &a, "getIterator", vec![]);
+    let it = it.as_object().unwrap().clone();
+    assert_eq!(
+        walk(&mut t, &it),
+        pairs(&[
+            ("\"first\"", "\"first\""),
+            ("\"username\"", "\"whatever\""),
+            ("\"fullName\"", "\"ArrayObject is hell\"")
+        ])
+    );
+}
+
+#[test]
+fn exported_helpers() {
+    let mut t = TestVm::new();
+    let it = new(&mut t, "ArrayIterator", vec![]);
+    super::append(&mut t.vm, &it, s("a")).unwrap();
+    super::append(&mut t.vm, &it, s("b")).unwrap();
+    m(&mut t, &it, "next", vec![]);
+    assert!(super::iterator_key(&it).identical(&int(1)));
+    assert!(super::is_spl_array(&it));
+    let std = std_object(&mut t, &[]);
+    assert!(!super::is_spl_array(&std));
+    let wrapped = new(&mut t, "ArrayIterator", vec![obj(&std)]);
+    let r = super::append(&mut t.vm, &wrapped, int(1)).map(|_| Value::Null);
+    assert_eq!(
+        thrown(r).1,
+        "Cannot append properties to objects, use ArrayIterator::offsetSet() instead"
+    );
+}
