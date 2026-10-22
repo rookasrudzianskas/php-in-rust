@@ -73,8 +73,118 @@ impl Host for MiniHost {
     }
 
     fn call_callable(&self, vm: &mut Vm, callable: &Value, args: Vec<Value>) -> PResult<Value> {
+        if let Value::Object(o) = &*callable.deref() {
+            let data = o.native::<Rc<ClosureData>>().map(|d| d.clone());
+            if let Some(data) = data {
+                return call_closure(vm, &self.shared, &data, args);
+            }
+        }
         default_call_callable(vm, callable, args)
     }
+}
+
+/// A closure or arrow function (native state of the `Closure` objects).
+struct ClosureData {
+    func: Rc<Function>,
+    params: Vec<AstParam>,
+    body: ClosureBody,
+    /// `use ($x, &$y)` / the arrow function's captured scope.
+    captured: Vec<(Vec<u8>, PhpRef, bool)>,
+    this: Option<ObjRef>,
+    self_class: Option<ClassRef>,
+    static_class: Option<ClassRef>,
+}
+
+enum ClosureBody {
+    Block(Block),
+    Expr(Expr),
+}
+
+fn closure_class(vm: &mut Vm) -> ClassRef {
+    if let Some(c) = vm.find_class(b"Closure") {
+        return c;
+    }
+    let mut ce = ClassEntry::new(
+        "Closure",
+        class_flags::FINAL | class_flags::NOT_SERIALIZABLE | class_flags::INTERNAL,
+    );
+    ce.handlers.get_closure = Some(|_, _| Ok(None));
+    let ce = Rc::new(ce);
+    vm.register_class(ce.clone());
+    ce
+}
+
+fn make_closure(
+    vm: &mut Vm,
+    scope: &Scope,
+    params: &[AstParam],
+    body: ClosureBody,
+    captured: Vec<(Vec<u8>, PhpRef, bool)>,
+    is_static: bool,
+) -> Value {
+    let ce = closure_class(vm);
+    let func = Rc::new(Function::user(
+        PhpStr::from("{closure}"),
+        Rc::new(()),
+        signature("{closure}", params),
+        member_flags::PUBLIC,
+    ));
+    let obj = ObjRef::new(ce);
+    obj.set_native(Rc::new(ClosureData {
+        func,
+        params: params.to_vec(),
+        body,
+        captured,
+        this: if is_static { None } else { scope.this.clone() },
+        self_class: scope.self_class.clone(),
+        static_class: scope.static_class.clone(),
+    }));
+    Value::Object(obj)
+}
+
+fn call_closure(
+    vm: &mut Vm,
+    shared: &Rc<Shared>,
+    data: &Rc<ClosureData>,
+    args: Vec<Value>,
+) -> PResult<Value> {
+    let scope = Scope {
+        vars: Rc::new(RefCell::new(HashMap::new())),
+        this: data.this.clone(),
+        self_class: data.self_class.clone(),
+        static_class: data.static_class.clone(),
+        func_name: Some("{closure}".to_string()),
+        fn_id: Rc::as_ptr(data) as *const u8 as usize,
+    };
+    for (name, r, by_ref) in &data.captured {
+        let r = if *by_ref {
+            r.clone()
+        } else {
+            PhpRef::new(r.get())
+        };
+        scope.vars.borrow_mut().insert(name.clone(), r);
+    }
+    bind_params(
+        vm,
+        shared,
+        &scope,
+        &data.func,
+        &data.params,
+        args,
+        Vec::new(),
+    )?;
+    let frame = Frame::user(vm, data.func.clone(), scope.this.clone(), Vec::new());
+    vm.push_frame(frame);
+    let r = match &data.body {
+        ClosureBody::Block(b) => match exec_block(vm, shared, &scope, b) {
+            Ok(()) => Ok(Value::Null),
+            Err(Flow::Return(v)) => Ok(v),
+            Err(e) => Err(e),
+        },
+        ClosureBody::Expr(e) => eval(vm, shared, &scope, e),
+    };
+    vm.pop_frame();
+    r
 }
 
 fn unsupported(vm: &mut Vm, what: &str) -> Flow {
@@ -100,6 +210,19 @@ pub fn run_phpt(name: &str) -> P {
     p
 }
 
+/// The output of the phpt's `--SKIPIF--` section, if any.
+pub fn run_skipif(name: &str) -> Option<String> {
+    let file = read_phpt(name);
+    let code = section(&file, "SKIPIF")?;
+    let mut p = P::phpt(name);
+    let shared = Rc::new(Shared::default());
+    p.t.vm.set_host(Rc::new(MiniHost {
+        shared: shared.clone(),
+    }));
+    run_code(&mut p.t.vm, &shared, code.as_bytes());
+    Some(p.out())
+}
+
 /// Parses and runs a script at the top level.
 pub fn run_code(vm: &mut Vm, shared: &Rc<Shared>, code: &[u8]) {
     let prog = match php_syntax::parse(code, "t.php") {
@@ -117,8 +240,8 @@ pub fn run_code(vm: &mut Vm, shared: &Rc<Shared>, code: &[u8]) {
         func_name: None,
         fn_id: 0,
     };
-    hoist(vm, shared, &prog.stmts);
-    let r = exec_block(vm, shared, &scope, &prog.stmts);
+    let r =
+        hoist(vm, shared, &prog.stmts).and_then(|()| exec_block(vm, shared, &scope, &prog.stmts));
     match r {
         Ok(()) | Err(Flow::Exit(_)) | Err(Flow::Return(_)) => {}
         Err(Flow::Exception(e)) => {
@@ -134,7 +257,7 @@ pub fn run_code(vm: &mut Vm, shared: &Rc<Shared>, code: &[u8]) {
 
 /// Declares top-level functions (and classes whose parents exist) before
 /// execution, like php-src's early binding.
-fn hoist(vm: &mut Vm, shared: &Rc<Shared>, stmts: &[Stmt]) {
+fn hoist(vm: &mut Vm, shared: &Rc<Shared>, stmts: &[Stmt]) -> PResult<()> {
     for s in stmts {
         if let StmtKind::Function(f) = &s.kind {
             declare_function(vm, &f.name, &f.common.params, &f.body);
@@ -142,6 +265,24 @@ fn hoist(vm: &mut Vm, shared: &Rc<Shared>, stmts: &[Stmt]) {
     }
     for s in stmts {
         if let StmtKind::Class(c) = &s.kind {
+            // Compile-time checks.
+            for m in &c.members {
+                if let ClassMemberKind::Method(md) = &m.kind
+                    && md.name.eq_ignore_case(b"__set_state")
+                    && md.common.params.len() != 1
+                {
+                    let cname = c.name.as_ref().map(|n| n.to_string_lossy());
+                    vm.current_line = m.line;
+                    vm.zend_error(
+                        php_runtime::errors::level::E_COMPILE_ERROR,
+                        format!(
+                            "Method {}::__set_state() must take exactly 1 argument",
+                            cname.unwrap_or_default()
+                        ),
+                    )?;
+                    return Err(Flow::Fatal);
+                }
+            }
             let parent_ok = c
                 .extends
                 .as_ref()
@@ -154,6 +295,7 @@ fn hoist(vm: &mut Vm, shared: &Rc<Shared>, stmts: &[Stmt]) {
             }
         }
     }
+    Ok(())
 }
 
 fn user_fn(params: &[AstParam], body: &Block, class: Option<Vec<u8>>) -> Rc<dyn std::any::Any> {
@@ -233,7 +375,14 @@ fn declare_class(vm: &mut Vm, shared: &Rc<Shared>, c: &ClassDecl) -> PResult<Cla
         .name
         .as_ref()
         .map(|n| n.to_string_lossy())
-        .unwrap_or_else(|| "class@anonymous".into());
+        .unwrap_or_else(|| {
+            let base = c
+                .extends
+                .as_ref()
+                .or(c.implements.first())
+                .map_or("class".to_string(), |n| n.resolved.to_string_lossy());
+            format!("{base}@anonymous")
+        });
     let mut flags = 0;
     if c.modifiers.is_abstract {
         flags |= class_flags::ABSTRACT;
@@ -322,6 +471,20 @@ fn declare_class(vm: &mut Vm, shared: &Rc<Shared>, c: &ClassDecl) -> PResult<Cla
             }
             ClassMemberKind::Method(md) => {
                 let mname = md.name.to_string_lossy();
+                for p in md.common.params.iter().filter(|p| p.modifiers.0 != 0) {
+                    let mut info = PropertyInfo::new(
+                        PhpStr::from_bytes(&p.name),
+                        name.as_str(),
+                        member_flags_of(p.modifiers),
+                    );
+                    info.ty = p.ty.as_ref().and_then(type_decl);
+                    info.default = if info.ty.is_some() {
+                        Value::Undef
+                    } else {
+                        Value::Null
+                    };
+                    ce.declare_property(info);
+                }
                 let mut f = Function::user(
                     PhpStr::from_bytes(&md.name),
                     user_fn(
@@ -386,9 +549,50 @@ fn call_user(
         func_name: Some(func.name.to_string()),
         fn_id: Rc::as_ptr(func) as *const u8 as usize,
     };
-    let mut positional = call.positional.into_iter();
-    let mut named = call.named;
-    for p in &uf.params {
+    let trace_args: Vec<Value> = call.positional.iter().map(Value::unref).collect();
+    bind_params(
+        vm,
+        shared,
+        &scope,
+        func,
+        &uf.params,
+        call.positional,
+        call.named,
+    )?;
+    // Constructor promotion.
+    if let Some(this) = &scope.this {
+        for p in uf.params.iter().filter(|p| p.modifiers.0 != 0) {
+            let v = read_var(vm, &scope, p.name.as_bytes(), true)?;
+            write_prop(vm, this, &PhpStr::from_bytes(&p.name), v)?;
+        }
+    }
+    let frame = Frame::user(vm, func.clone(), scope.this.clone(), trace_args);
+    vm.push_frame(frame);
+    let r = exec_block(vm, shared, &scope, &uf.body);
+    vm.pop_frame();
+    match r {
+        Ok(()) => Ok(Value::Null),
+        Err(Flow::Return(v)) => Ok(v),
+        Err(e) => Err(e),
+    }
+}
+
+/// Binds arguments to parameters in `scope` (defaults, variadics, named
+/// arguments, by-reference parameters and weak type coercion).
+fn bind_params(
+    vm: &mut Vm,
+    shared: &Rc<Shared>,
+    scope: &Scope,
+    func: &Rc<Function>,
+    params: &[AstParam],
+    positional: Vec<Value>,
+    named: Vec<(PhpStr, Value)>,
+) -> PResult<()> {
+    let scope = scope.clone();
+    let passed = positional.len();
+    let mut positional = positional.into_iter();
+    let mut named = named;
+    for p in params {
         let pname = p.name.as_bytes().to_vec();
         if p.variadic {
             let rest: Vec<Value> = positional.by_ref().collect();
@@ -411,11 +615,20 @@ fn call_user(
             None => match &p.default {
                 Some(d) => eval(vm, shared, &scope, d)?,
                 None => {
+                    let required = params
+                        .iter()
+                        .filter(|q| q.default.is_none() && !q.variadic)
+                        .count();
                     return Err(vm.throw_error(
                         "ArgumentCountError",
                         format!(
-                            "Too few arguments to function {}(), 0 passed and at least 1 expected",
-                            func.display_name()
+                            "Too few arguments to function {}(), {passed} passed and {} {required} expected",
+                            func.display_name(),
+                            if required == params.len() {
+                                "exactly"
+                            } else {
+                                "at least"
+                            }
                         ),
                     ));
                 }
@@ -438,7 +651,7 @@ fn call_user(
                             return Err(vm.throw_type_error(format!(
                                 "{}(): Argument #{} (${}) must be of type {}, {} given",
                                 func.display_name(),
-                                uf.params.iter().position(|q| q.name == p.name).unwrap_or(0) + 1,
+                                params.iter().position(|q| q.name == p.name).unwrap_or(0) + 1,
                                 p.name.to_string_lossy(),
                                 ty.to_type_string(),
                                 v.value_name()
@@ -451,16 +664,11 @@ fn call_user(
             set_var(&scope, &pname, v);
         }
     }
-    let frame = Frame::user(vm, func.clone(), scope.this.clone(), Vec::new());
-    vm.push_frame(frame);
-    let r = exec_block(vm, shared, &scope, &uf.body);
-    vm.pop_frame();
-    match r {
-        Ok(()) => Ok(Value::Null),
-        Err(Flow::Return(v)) => Ok(v),
-        Err(e) => Err(e),
-    }
+    Ok(())
 }
+
+/// Positional and named call arguments.
+type EvaluatedArgs = (Vec<Value>, Vec<(PhpStr, Value)>);
 
 /// Evaluates an argument list for `func` (by-reference parameters get the
 /// variable's reference).
@@ -470,7 +678,7 @@ fn eval_args(
     scope: &Scope,
     func: Option<&Rc<Function>>,
     args: &ArgList,
-) -> PResult<(Vec<Value>, Vec<(PhpStr, Value)>)> {
+) -> PResult<EvaluatedArgs> {
     let sig = func.map(|f| f.signature().clone());
     let mut positional = Vec::new();
     let mut named = Vec::new();
@@ -598,12 +806,7 @@ fn member_name(vm: &mut Vm, shared: &Rc<Shared>, scope: &Scope, m: &MemberName) 
 }
 
 /// `new $class(...$args)`.
-fn instantiate(
-    vm: &mut Vm,
-    ce: &ClassRef,
-    positional: Vec<Value>,
-    named: Vec<(PhpStr, Value)>,
-) -> PResult<Value> {
+fn instantiate(vm: &mut Vm, ce: &ClassRef) -> PResult<ObjRef> {
     let what = if ce.is_interface() {
         Some("interface")
     } else if ce.is_trait() {
@@ -618,27 +821,7 @@ fn instantiate(
     if let Some(w) = what {
         return Err(vm.throw_error("Error", format!("Cannot instantiate {w} {}", ce.name)));
     }
-    let obj = vm.instantiate(ce)?;
-    if let Some(ctor) = ce.magic.constructor.clone() {
-        if ctor.visibility() != member_flags::PUBLIC {
-            return Err(vm.throw_error(
-                "Error",
-                format!(
-                    "Call to private {}::__construct() from global scope",
-                    ce.name
-                ),
-            ));
-        }
-        call_function_value(
-            vm,
-            &ctor,
-            positional,
-            named,
-            Some(obj.clone()),
-            Some(ce.clone()),
-        )?;
-    }
-    Ok(Value::Object(obj))
+    vm.instantiate(ce)
 }
 
 // ---------------------------------------------------------------------------
@@ -890,10 +1073,20 @@ fn exec_foreach(
     scope: &Scope,
     f: &php_syntax::ast::ForeachStmt,
 ) -> PResult<()> {
+    let subject = eval(vm, shared, scope, &f.expr)?;
     if f.value.by_ref {
+        if let Value::Object(o) = &subject
+            && let Some(m) = o.class().find_method(b"getIterator")
+            && m.is_native()
+        {
+            // The get_iterator handler of internal aggregates.
+            return Err(vm.throw_error(
+                "Error",
+                "An iterator cannot be used with foreach by reference",
+            ));
+        }
         return Err(unsupported(vm, "foreach by reference"));
     }
-    let subject = eval(vm, shared, scope, &f.expr)?;
     let run = |vm: &mut Vm, k: Value, v: Value| -> Result<bool, Flow> {
         if let Some(key) = &f.key {
             assign_to(vm, shared, scope, &key.expr, k)?;
@@ -1120,6 +1313,7 @@ fn assign_to(
                     res
                 }
                 Root::Prop(obj, name) => {
+                    check_indirect_modification(vm, &obj, &name)?;
                     let mut cur = read_prop(vm, &obj, &name, true)?;
                     set_path(vm, &mut cur, &path, v)?;
                     write_prop(vm, &obj, &name, cur)
@@ -1275,7 +1469,7 @@ fn unset(vm: &mut Vm, shared: &Rc<Shared>, scope: &Scope, e: &Expr) -> PResult<(
             let o = eval(vm, shared, scope, object)?;
             let name = member_name(vm, shared, scope, name)?;
             if let Value::Object(o) = o {
-                if o.class().lc_name.as_bytes() == b"dateperiod"
+                if o.class().instance_of_name(b"DatePeriod")
                     && matches!(
                         name.as_bytes(),
                         b"start"
@@ -1370,6 +1564,24 @@ fn read_prop(vm: &mut Vm, o: &ObjRef, name: &PhpStr, quiet: bool) -> PResult<Val
             Ok(Value::Null)
         }
     }
+}
+
+/// `get_property_ptr_ptr` on a readonly virtual property (`$o->p[] = ..`,
+/// `$x = &$o->p`): php-src's handlers refuse the indirect modification.
+fn check_indirect_modification(vm: &mut Vm, o: &ObjRef, name: &PhpStr) -> PResult<()> {
+    if let Some(info) = o.class().find_property(name)
+        && info.is_readonly()
+        && info.flags & member_flags::VIRTUAL != 0
+    {
+        return Err(vm.throw_error(
+            "Error",
+            format!(
+                "Cannot modify readonly property {}::${}",
+                info.declaring_class, info.name
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn write_prop(vm: &mut Vm, o: &ObjRef, name: &PhpStr, v: Value) -> PResult<()> {
@@ -1478,6 +1690,7 @@ fn eval_ex(
         ExprKind::MagicConst(m) => match m {
             MagicConst::Line => Value::Int(i64::from(e.line)),
             MagicConst::File => Value::String(vm.current_file.clone()),
+            MagicConst::Dir if !shared.dir.is_empty() => Value::from(shared.dir.clone()),
             MagicConst::Dir => {
                 let f = vm.current_file.to_string();
                 Value::from(
@@ -1672,9 +1885,22 @@ fn eval_ex(
                 }
                 NewClass::Anonymous(c) => declare_class(vm, shared, c)?,
             };
-            let ctor = ce.magic.constructor.clone();
-            let (pos, named) = eval_args(vm, shared, scope, ctor.as_ref(), args)?;
-            instantiate(vm, &ce, pos, named)?
+            // ZEND_NEW creates the object before evaluating the arguments.
+            let obj = instantiate(vm, &ce)?;
+            if let Some(ctor) = ce.magic.constructor.clone() {
+                if ctor.visibility() != member_flags::PUBLIC {
+                    return Err(vm.throw_error(
+                        "Error",
+                        format!(
+                            "Call to private {}::__construct() from global scope",
+                            ce.name
+                        ),
+                    ));
+                }
+                let (pos, named) = eval_args(vm, shared, scope, Some(&ctor), args)?;
+                call_function_value(vm, &ctor, pos, named, Some(obj.clone()), Some(ce.clone()))?;
+            }
+            Value::Object(obj)
         }
         ExprKind::Assign { target, value } => {
             let v = eval(vm, shared, scope, value)?;
@@ -1683,6 +1909,14 @@ fn eval_ex(
             v
         }
         ExprKind::AssignRef { target, value } => {
+            if let ExprKind::Prop { object, name, .. } = &value.kind {
+                let o = eval(vm, shared, scope, object)?;
+                let name = member_name(vm, shared, scope, name)?;
+                if let Value::Object(o) = o {
+                    check_indirect_modification(vm, &o, &name)?;
+                }
+                return Err(unsupported(vm, "reference to a property"));
+            }
             let (ExprKind::Var(t), ExprKind::Var(_)) = (&target.kind, &value.kind) else {
                 return Err(unsupported(vm, "reference assignment"));
             };
@@ -1809,7 +2043,7 @@ fn eval_ex(
                 Ok(p) => p,
                 Err(err) => return Err(unsupported(vm, &format!("include parse error {err}"))),
             };
-            hoist(vm, shared, &prog.stmts);
+            hoist(vm, shared, &prog.stmts)?;
             match exec_block(vm, shared, scope, &prog.stmts) {
                 Ok(()) => Value::Int(1),
                 Err(Flow::Return(v)) => v,
@@ -1872,6 +2106,67 @@ fn eval_ex(
             match v {
                 Value::Object(o) => return Err(Flow::Exception(o)),
                 _ => return Err(vm.throw_error("Error", "Can only throw objects")),
+            }
+        }
+        ExprKind::Closure(c) => {
+            let mut captured = Vec::new();
+            for u in &c.uses {
+                let name = u.name.as_bytes().to_vec();
+                let r = if u.by_ref {
+                    scope
+                        .vars
+                        .borrow_mut()
+                        .entry(name.clone())
+                        .or_insert_with(|| PhpRef::new(Value::Null))
+                        .clone()
+                } else {
+                    let v = read_var(vm, scope, &name, false)?;
+                    PhpRef::new(v)
+                };
+                captured.push((name, r, u.by_ref));
+            }
+            make_closure(
+                vm,
+                scope,
+                &c.common.params,
+                ClosureBody::Block(c.body.clone()),
+                captured,
+                c.is_static,
+            )
+        }
+        ExprKind::ArrowFn(a) => {
+            // Arrow functions capture the enclosing scope by value.
+            let captured = scope
+                .vars
+                .borrow()
+                .iter()
+                .map(|(k, r)| (k.clone(), PhpRef::new(r.get()), false))
+                .collect();
+            make_closure(
+                vm,
+                scope,
+                &a.common.params,
+                ClosureBody::Expr((*a.body).clone()),
+                captured,
+                a.is_static,
+            )
+        }
+        ExprKind::Eval(x) => {
+            let v = eval(vm, shared, scope, x)?;
+            let code = vm.to_php_string(&v)?;
+            let opts = php_syntax::ParseOptions {
+                start_in_scripting: true,
+                ..Default::default()
+            };
+            let prog = match php_syntax::parse_with(&code, "eval()'d code", &opts) {
+                Ok(p) => p,
+                Err(err) => return Err(vm.throw_error("ParseError", err.to_string())),
+            };
+            hoist(vm, shared, &prog.stmts)?;
+            match exec_block(vm, shared, scope, &prog.stmts) {
+                Ok(()) => Value::Null,
+                Err(Flow::Return(v)) => v,
+                Err(e) => return Err(e),
             }
         }
         _ => return Err(unsupported(vm, "expression")),
@@ -2173,14 +2468,23 @@ fn builtin(
         b"property_exists" => {
             let n = vm.to_php_string(&arg(&args, 1))?;
             match arg(&args, 0) {
-                Value::Object(o) => Value::Bool(
-                    o.class().find_property(&n).is_some()
-                        || o.obj()
-                            .dyn_props
-                            .borrow()
-                            .as_ref()
-                            .is_some_and(|d| d.get_str(&n).is_some()),
-                ),
+                Value::Object(o) => {
+                    // has_property(ZEND_PROPERTY_EXISTS): the read_property
+                    // handler stands in for the missing has_property hook.
+                    let virtual_prop = match o.class().handlers.read_property {
+                        Some(h) => h(vm, &o, &n)?.is_some(),
+                        None => false,
+                    };
+                    Value::Bool(
+                        virtual_prop
+                            || o.class().find_property(&n).is_some()
+                            || o.obj()
+                                .dyn_props
+                                .borrow()
+                                .as_ref()
+                                .is_some_and(|d| d.get_str(&n).is_some()),
+                    )
+                }
                 Value::String(c) => match vm.find_class(&c) {
                     Some(ce) => Value::Bool(ce.find_property(&n).is_some()),
                     None => Value::Bool(false),
@@ -2237,6 +2541,25 @@ fn builtin(
             Value::Int(old)
         }
         b"gc_collect_cycles" => Value::Int(0),
+        b"gc_enable" | b"gc_disable" => Value::Null,
+        b"gc_enabled" => Value::Bool(true),
+        b"call_user_func" => {
+            let f = arg(&args, 0);
+            let rest = args.into_iter().skip(1).collect();
+            vm.call(&f, rest)?
+        }
+        b"call_user_func_array" => {
+            let f = arg(&args, 0);
+            let rest = match arg(&args, 1) {
+                Value::Array(a) => a.values().map(Value::unref).collect(),
+                _ => Vec::new(),
+            };
+            vm.call(&f, rest)?
+        }
+        b"is_callable" => {
+            let host = vm.host.clone();
+            Value::Bool(host.check_callable(vm, &arg(&args, 0)).is_ok())
+        }
         b"func_get_args" => return Err(unsupported(vm, "func_get_args")),
         _ => {
             return Err(vm.throw_error(

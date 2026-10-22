@@ -82,7 +82,8 @@ fn date_period_iterator_aggregate() {
     }
     let out = p.out();
     assert_eq!(
-        out.matches("0: 2012-07-01\n1: 2012-07-08\n2: 2012-07-15\n").count(),
+        out.matches("0: 2012-07-01\n1: 2012-07-08\n2: 2012-07-15\n")
+            .count(),
         5,
         "{out}"
     );

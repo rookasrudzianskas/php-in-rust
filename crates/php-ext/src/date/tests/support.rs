@@ -501,6 +501,14 @@ fn object_props(vm: &mut Vm, o: &ObjRef, purpose: PropPurpose) -> PResult<PhpArr
     {
         return Ok(t);
     }
+    if purpose == PropPurpose::Debug && o.class().magic.debug_info.is_some() {
+        // zend_std_get_debug_info
+        return match vm.call_method(o, b"__debugInfo", Vec::new())?.into_unref() {
+            Value::Array(a) => Ok((*a).clone()),
+            Value::Null => Ok(PhpArray::new()),
+            _ => Err(vm.fatal_error("__debuginfo() must return an array")),
+        };
+    }
     Ok(object_property_table(o))
 }
 
@@ -729,8 +737,86 @@ pub fn print_r_into(vm: &mut Vm, out: &mut Vec<u8>, v: &Value, indent: usize) ->
 // --EXPECTF-- matching
 // ---------------------------------------------------------------------------
 
-/// run-tests' `--EXPECTF--` placeholders: `%s %S %a %A %w %i %d %x %f %c %e %%`.
+/// run-tests' `--EXPECTF--` → regex conversion (used for patterns with
+/// `%r...%r` sections).
+fn expectf_regex_match(pattern: &[u8], text: &[u8]) -> bool {
+    fn quote(out: &mut Vec<u8>, s: &[u8]) {
+        for &c in s {
+            if b".\\+*?[^]$(){}=!<>|:-#/".contains(&c) {
+                out.push(b'\\');
+                out.push(c);
+            } else if c == 0 {
+                out.extend_from_slice(b"\\000");
+            } else {
+                out.push(c);
+            }
+        }
+    }
+    let mut re = Vec::new();
+    let mut off = 0;
+    while off < pattern.len() {
+        let find = |from: usize| {
+            pattern[from.min(pattern.len())..]
+                .windows(2)
+                .position(|w| w == b"%r")
+                .map(|p| p + from)
+        };
+        let (start, end) = match find(off) {
+            Some(s) => match find(s + 2) {
+                Some(e) => (s, e),
+                None => (pattern.len(), pattern.len()),
+            },
+            None => (pattern.len(), pattern.len()),
+        };
+        quote(&mut re, &pattern[off..start]);
+        if end > start {
+            re.push(b'(');
+            re.extend_from_slice(&pattern[start + 2..end]);
+            re.push(b')');
+        }
+        off = end + 2;
+    }
+    let table: [(&[u8], &[u8]); 12] = [
+        (b"%e", b"\\/"),
+        (b"%s", b"[^\\r\\n]+"),
+        (b"%S", b"[^\\r\\n]*"),
+        (b"%a", b".+"),
+        (b"%A", b".*"),
+        (b"%w", b"\\s*"),
+        (b"%i", b"[+-]?\\d+"),
+        (b"%d", b"\\d+"),
+        (b"%x", b"[0-9a-fA-F]+"),
+        (
+            b"%f",
+            b"[+-]?(?:\\d+|(?=\\.\\d))(?:\\.\\d+)?(?:[Ee][+-]?\\d+)?",
+        ),
+        (b"%c", b"."),
+        (b"%0", b"\\x00"),
+    ];
+    let mut out = b"^".to_vec();
+    let mut i = 0;
+    while i < re.len() {
+        if let Some((k, v)) = table.iter().find(|(k, _)| re[i..].starts_with(k)) {
+            out.extend_from_slice(v);
+            i += k.len();
+        } else {
+            out.push(re[i]);
+            i += 1;
+        }
+    }
+    out.push(b'$');
+    match php_regex::Regex::new(&out, php_regex::CompileFlags::DOTALL) {
+        Ok(r) => r.is_match(text),
+        Err(_) => false,
+    }
+}
+
+/// run-tests' `--EXPECTF--` placeholders: `%s %S %a %A %w %i %d %x %f %c %e %%`
+/// (and `%r...%r` regex sections).
 pub fn expectf_match(pattern: &[u8], text: &[u8]) -> bool {
+    if pattern.windows(2).any(|w| w == b"%r") {
+        return expectf_regex_match(pattern, text);
+    }
     fn class_len(kind: u8, text: &[u8], start: usize) -> Vec<usize> {
         // All possible match lengths (longest first) for one placeholder.
         let rest = &text[start..];
