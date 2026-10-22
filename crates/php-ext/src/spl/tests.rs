@@ -936,3 +936,24 @@ fn method_flags_from_signatures() {
         member_flags::PROTECTED
     );
 }
+
+#[test]
+fn test_recursive_iterator_helper() {
+    let mut t = TestVm::new();
+    let inner = list(vec![Value::Int(2), Value::Int(3)]);
+    let arr = list(vec![Value::Int(1), inner]);
+    let (it, log) = super::testutil::test_recursive_iterator(&mut t.vm, &arr);
+    let mut iter = ObjIterator::new(&mut t.vm, &it).unwrap();
+    iter.rewind(&mut t.vm).unwrap();
+    iter.next(&mut t.vm).unwrap();
+    let has = t.vm.call_method(&it, b"hasChildren", vec![]).unwrap();
+    assert!(has.identical(&Value::Bool(true)));
+    let child = t.vm.call_method(&it, b"getChildren", vec![]).unwrap();
+    let r = t.call("iterator_to_array", vec![child]).unwrap();
+    assert_eq!(entries(&r).len(), 2);
+    assert_eq!(
+        log.borrow()[..4],
+        ["rewind", "next", "hasChildren", "getChildren"]
+    );
+    assert_eq!(log.borrow()[4], ">rewind");
+}

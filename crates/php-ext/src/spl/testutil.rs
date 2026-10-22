@@ -146,3 +146,191 @@ pub fn entries(v: &Value) -> Vec<(String, Value)> {
 pub fn s(v: &str) -> Value {
     Value::str(v)
 }
+
+// ---------------------------------------------------------------------------
+// Test iterators
+// ---------------------------------------------------------------------------
+
+/// Method-call log shared by a test iterator and its children.
+pub type CallLog = Rc<std::cell::RefCell<Vec<String>>>;
+
+/// State of `SplTestIterator` / `SplTestRecursiveIterator`.
+struct TestIterState {
+    items: Vec<(Value, Value)>,
+    pos: usize,
+    log: CallLog,
+    /// Log entries are prefixed with this (one `>` per nesting level).
+    tag: String,
+}
+
+fn ti_this(args: &Args) -> ObjRef {
+    args.this()
+        .cloned()
+        .expect("test iterator method without $this")
+}
+
+fn ti_log(o: &ObjRef, m: &str) {
+    let st = o.native::<TestIterState>().expect("test iterator state");
+    let entry = format!("{}{m}", st.tag);
+    st.log.borrow_mut().push(entry);
+}
+
+fn ti_rewind(_vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+    let o = ti_this(args);
+    ti_log(&o, "rewind");
+    o.native_mut::<TestIterState>().unwrap().pos = 0;
+    Ok(Value::Null)
+}
+
+fn ti_valid(_vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+    let o = ti_this(args);
+    ti_log(&o, "valid");
+    let st = o.native::<TestIterState>().unwrap();
+    Ok(Value::Bool(st.pos < st.items.len()))
+}
+
+fn ti_current(_vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+    let o = ti_this(args);
+    ti_log(&o, "current");
+    let st = o.native::<TestIterState>().unwrap();
+    Ok(st.items.get(st.pos).map_or(Value::Null, |(_, v)| v.clone()))
+}
+
+fn ti_key(_vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+    let o = ti_this(args);
+    ti_log(&o, "key");
+    let st = o.native::<TestIterState>().unwrap();
+    Ok(st.items.get(st.pos).map_or(Value::Null, |(k, _)| k.clone()))
+}
+
+fn ti_next(_vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+    let o = ti_this(args);
+    ti_log(&o, "next");
+    o.native_mut::<TestIterState>().unwrap().pos += 1;
+    Ok(Value::Null)
+}
+
+fn ti_has_children(_vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+    let o = ti_this(args);
+    ti_log(&o, "hasChildren");
+    let st = o.native::<TestIterState>().unwrap();
+    Ok(Value::Bool(matches!(
+        st.items.get(st.pos).map(|(_, v)| v.unref()),
+        Some(Value::Array(_))
+    )))
+}
+
+fn ti_get_children(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
+    let o = ti_this(args);
+    ti_log(&o, "getChildren");
+    let (child, log, tag) = {
+        let st = o.native::<TestIterState>().unwrap();
+        let child = st.items.get(st.pos).map_or(Value::Null, |(_, v)| v.unref());
+        (child, st.log.clone(), format!("{}>", st.tag))
+    };
+    let items = array_items(&child);
+    Ok(Value::Object(make_test_iterator(vm, items, log, tag, true)))
+}
+
+static TI_REWIND: NativeFunction = NativeFunction {
+    sig: "public function rewind(): void {}",
+    handler: ti_rewind,
+};
+static TI_VALID: NativeFunction = NativeFunction {
+    sig: "public function valid(): bool {}",
+    handler: ti_valid,
+};
+static TI_CURRENT: NativeFunction = NativeFunction {
+    sig: "public function current(): mixed {}",
+    handler: ti_current,
+};
+static TI_KEY: NativeFunction = NativeFunction {
+    sig: "public function key(): mixed {}",
+    handler: ti_key,
+};
+static TI_NEXT: NativeFunction = NativeFunction {
+    sig: "public function next(): void {}",
+    handler: ti_next,
+};
+static TI_HAS_CHILDREN: NativeFunction = NativeFunction {
+    sig: "public function hasChildren(): bool {}",
+    handler: ti_has_children,
+};
+static TI_GET_CHILDREN: NativeFunction = NativeFunction {
+    sig: "public function getChildren(): ?RecursiveIterator {}",
+    handler: ti_get_children,
+};
+
+fn test_iterator_class(vm: &mut Vm, recursive: bool) -> ClassRef {
+    let name = if recursive {
+        "SplTestRecursiveIterator"
+    } else {
+        "SplTestIterator"
+    };
+    if let Some(ce) = vm.find_class(name.as_bytes()) {
+        return ce;
+    }
+    let mut ce = ClassEntry::new(name, 0);
+    let iface = if recursive {
+        "RecursiveIterator"
+    } else {
+        "Iterator"
+    };
+    let iface = vm.find_class(iface.as_bytes()).expect("iterator interface");
+    super::engine::implement(&mut ce, &iface);
+    super::engine::add_methods(
+        &mut ce,
+        &[&TI_REWIND, &TI_VALID, &TI_CURRENT, &TI_KEY, &TI_NEXT],
+    );
+    if recursive {
+        super::engine::add_methods(&mut ce, &[&TI_HAS_CHILDREN, &TI_GET_CHILDREN]);
+    }
+    let ce = Rc::new(ce);
+    vm.register_class(ce.clone());
+    ce
+}
+
+fn make_test_iterator(
+    vm: &mut Vm,
+    items: Vec<(Value, Value)>,
+    log: CallLog,
+    tag: String,
+    recursive: bool,
+) -> ObjRef {
+    let ce = test_iterator_class(vm, recursive);
+    let o = ObjRef::new(ce);
+    o.set_native(TestIterState {
+        items,
+        pos: 0,
+        log,
+        tag,
+    });
+    o
+}
+
+/// `(key, value)` pairs of an array value.
+pub fn array_items(v: &Value) -> Vec<(Value, Value)> {
+    match v.unref() {
+        Value::Array(a) => a.iter().map(|(k, v)| (k.to_value(), v.clone())).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A plain `Iterator` (class `SplTestIterator`, not internal) over `items`
+/// that logs every method call (`"rewind"`, `"valid"`, `"current"`, `"key"`,
+/// `"next"`) — a stand-in for userland iterators and `ArrayIterator`.
+pub fn test_iterator(vm: &mut Vm, items: Vec<(Value, Value)>) -> (ObjRef, CallLog) {
+    let log = CallLog::default();
+    let o = make_test_iterator(vm, items, log.clone(), String::new(), false);
+    (o, log)
+}
+
+/// A `RecursiveIterator` (class `SplTestRecursiveIterator`) over an array
+/// value: elements that are arrays have children (like
+/// `RecursiveArrayIterator`). Children log with one `">"` prefix per level
+/// (`">rewind"`, `">>valid"`, ...) into the same log.
+pub fn test_recursive_iterator(vm: &mut Vm, array: &Value) -> (ObjRef, CallLog) {
+    let log = CallLog::default();
+    let o = make_test_iterator(vm, array_items(array), log.clone(), String::new(), true);
+    (o, log)
+}
