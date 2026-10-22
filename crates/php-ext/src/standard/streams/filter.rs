@@ -57,6 +57,19 @@ pub fn new_bucket(data: Vec<u8>) -> BucketRef {
     }))
 }
 
+/// `php_stream_bucket_make_writeable` for a bucket already unlinked from its
+/// brigade: the bucket itself when nothing else holds it, else a copy.
+pub fn bucket_make_writeable(b: BucketRef) -> BucketRef {
+    if Rc::strong_count(&b) == 1 {
+        return b;
+    }
+    let (buf, is_persistent) = {
+        let bk = b.borrow();
+        (bk.buf.clone(), bk.is_persistent)
+    };
+    Rc::new(RefCell::new(Bucket { buf, is_persistent }))
+}
+
 /// `php_stream_bucket_brigade`.
 #[derive(Default, Debug)]
 pub struct Brigade {
@@ -133,6 +146,22 @@ pub trait FilterOps {
     fn seek(&mut self, vm: &mut Vm, offset: i64, whence: i32) -> PResult<bool> {
         let _ = (vm, offset, whence);
         Ok(true)
+    }
+
+    /// `fops->seek` with what php-src passes alongside: the stream and the
+    /// chain the filter sits on (`php_stream_filter_get_chain_type`:
+    /// [`FILTER_READ`] or [`FILTER_WRITE`]). Userspace filters need both;
+    /// the default ignores them and calls [`FilterOps::seek`].
+    fn seek_in_chain(
+        &mut self,
+        vm: &mut Vm,
+        ctx: &FilterCtx<'_>,
+        chain: i64,
+        offset: i64,
+        whence: i32,
+    ) -> PResult<bool> {
+        let _ = (ctx, chain);
+        self.seek(vm, offset, whence)
     }
 
     /// `fops->dtor`.
