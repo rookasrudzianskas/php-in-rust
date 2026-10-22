@@ -106,6 +106,32 @@ unsafe extern "C" {
     fn getpwnam(name: *const c_char) -> *mut PasswdPrefix;
     fn getgrnam(name: *const c_char) -> *mut GroupPrefix;
     fn getdtablesize() -> c_int;
+    fn recv(fd: c_int, buf: *mut std::ffi::c_void, len: usize, flags: c_int) -> isize;
+}
+
+#[cfg(target_os = "linux")]
+const MSG_DONTWAIT: c_int = 0x40;
+#[cfg(not(target_os = "linux"))]
+const MSG_DONTWAIT: c_int = 0x80;
+const MSG_PEEK: c_int = 0x2;
+
+/// `recv(fd, buf, len, MSG_PEEK | MSG_DONTWAIT)`: the liveness probe of
+/// `php_sockop_set_option(PHP_STREAM_OPTION_CHECK_LIVENESS)`.
+pub fn sys_peek_nonblocking(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
+    // SAFETY: `buf` is a valid writable buffer of `buf.len()` bytes.
+    let r = unsafe {
+        recv(
+            fd,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            MSG_PEEK | MSG_DONTWAIT,
+        )
+    };
+    if r < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(r as usize)
+    }
 }
 
 fn cstr(path: &[u8]) -> io::Result<CString> {

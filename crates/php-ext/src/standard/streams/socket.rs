@@ -52,11 +52,7 @@ impl Sock {
     }
 
     fn peek(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Sock::Tcp(s) => s.peek(buf),
-            Sock::Udp(s) => s.peek(buf),
-            _ => Err(io::Error::from(io::ErrorKind::WouldBlock)),
-        }
+        sys::sys_peek_nonblocking(self.fd(), buf)
     }
 
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {

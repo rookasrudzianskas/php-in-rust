@@ -783,3 +783,32 @@ fn copy_into_append_mode_and_from_spilled_temp() {
         "B".repeat(2000).as_bytes()
     );
 }
+
+#[test]
+fn feof_detects_closed_peer() {
+    let mut t = TestVm::new();
+    let p = t
+        .call(
+            "stream_socket_pair",
+            vec![Value::Int(1), Value::Int(1), Value::Int(0)],
+        )
+        .unwrap();
+    let a = p.as_array().unwrap().get_int(0).unwrap().clone();
+    let b = p.as_array().unwrap().get_int(1).unwrap().clone();
+    assert_eq!(
+        t.call("feof", vec![b.clone()]).unwrap().as_bool(),
+        Some(false)
+    );
+    t.call("fwrite", vec![a.clone(), s("x")]).unwrap();
+    t.call("fclose", vec![a]).unwrap();
+    // pending data keeps the stream alive until it is read
+    assert_eq!(
+        t.call("feof", vec![b.clone()]).unwrap().as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        bytes(&t.call("fread", vec![b.clone(), Value::Int(10)]).unwrap()),
+        b"x"
+    );
+    assert_eq!(t.call("feof", vec![b]).unwrap().as_bool(), Some(true));
+}
