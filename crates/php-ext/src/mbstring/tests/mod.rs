@@ -4,6 +4,7 @@
 pub mod encoding_tests;
 mod case_width;
 mod functions;
+mod info;
 mod strings;
 
 use php_runtime::{PhpArray, Value};

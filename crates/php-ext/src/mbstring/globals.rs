@@ -6,6 +6,8 @@
 //! since the last call (in registration order). Values php-src's handlers
 //! reject are refused up front by the validators.
 
+use std::cell::Cell;
+
 use php_runtime::ini::{IniDef, modifiable};
 use php_runtime::{PResult, PhpArray, PhpArrayRef, PhpStr, Value, Vm};
 
@@ -54,6 +56,8 @@ pub struct MbGlobals {
     initialized: bool,
     /// Ini values the state below was derived from (`None` = NULL).
     seen: [Option<Option<PhpStr>>; 10],
+    /// [`INI_EVENTS`] counters already handled.
+    seen_events: [u64; 6],
     pub language: NoLanguage,
     pub internal_encoding: &'static Encoding,
     pub current_internal_encoding: &'static Encoding,
@@ -92,6 +96,7 @@ impl Default for MbGlobals {
         MbGlobals {
             initialized: false,
             seen: Default::default(),
+            seen_events: [0; 6],
             language: NoLanguage::Uni,
             internal_encoding: utf8,
             current_internal_encoding: utf8,
@@ -489,16 +494,27 @@ pub fn globals(vm: &mut Vm) -> PResult<&mut MbGlobals> {
         for (i, name) in WATCHED.iter().enumerate() {
             g.seen[i] = Some(ini_value(vm, name));
         }
+        g.seen_events = INI_EVENTS.with(|e| e.get().map(|(n, _)| n));
     } else {
         let mut core_changed = false;
+        let events = INI_EVENTS.with(Cell::get);
         for (i, name) in WATCHED.iter().enumerate() {
             let v = ini_value(vm, name);
-            if g.seen[i].as_ref() == Some(&v) {
-                continue;
-            }
+            let changed = g.seen[i].as_ref() != Some(&v);
             if i < 6 {
-                g.apply(vm, i, v.as_deref(), true);
-            } else {
+                // php-src runs the handler on every ini_set, even when the
+                // value does not change.
+                let (count, ok) = events[i];
+                if changed || count != g.seen_events[i] {
+                    if ok || changed {
+                        g.apply(vm, i, v.as_deref(), true);
+                    } else if i == 0 {
+                        // OnUpdate_mbstring_language resets before failing.
+                        g.language = NoLanguage::Neutral;
+                    }
+                }
+                g.seen_events[i] = count;
+            } else if changed {
                 core_changed = true;
             }
             g.seen[i] = Some(v);
@@ -570,21 +586,50 @@ pub fn illegal_settings(vm: &mut Vm) -> PResult<(u32, u32)> {
 
 // ----- ini entries ------------------------------------------------------
 
-fn validate_language(v: &[u8]) -> bool {
-    name2language(v).is_some()
+thread_local! {
+    /// Per watched mbstring directive: how often runtime changes were
+    /// attempted (validators run on every `ini_set`) and whether the last
+    /// attempt was accepted. Lets [`globals`] replay handlers for `ini_set`
+    /// calls that do not change the value.
+    static INI_EVENTS: Cell<[(u64, bool); 6]> = const { Cell::new([(0, true); 6]) };
 }
 
-fn validate_detect_order(v: &[u8]) -> bool {
+fn record(i: usize, ok: bool) -> bool {
+    INI_EVENTS.with(|e| {
+        let mut v = e.get();
+        v[i] = (v[i].0 + 1, ok);
+        e.set(v);
+    });
+    ok
+}
+
+fn validate_language(v: &[u8]) -> bool {
+    record(0, name2language(v).is_some())
+}
+
+fn detect_order_valid(v: &[u8]) -> bool {
     // The default list does not matter for validity.
     matches!(parse_encoding_list_raw(v, &[NoEncoding::Ascii]), Ok(l) if !l.is_empty())
 }
 
+fn validate_detect_order(v: &[u8]) -> bool {
+    record(1, detect_order_valid(v))
+}
+
 fn validate_http_input(v: &[u8]) -> bool {
-    v.is_empty() || v == b"pass" || validate_detect_order(v)
+    record(2, v.is_empty() || v == b"pass" || detect_order_valid(v))
 }
 
 fn validate_http_output(v: &[u8]) -> bool {
-    v.is_empty() || get_encoding_or_pass(v).is_some()
+    record(3, v.is_empty() || get_encoding_or_pass(v).is_some())
+}
+
+fn validate_internal_encoding(_v: &[u8]) -> bool {
+    record(4, true)
+}
+
+fn validate_substitute_character(_v: &[u8]) -> bool {
+    record(5, true)
 }
 
 /// `PHP_INI_BEGIN()` of mbstring.c (without the mbregex entries).
@@ -593,8 +638,10 @@ pub static INI_ENTRIES: [IniDef; 9] = [
     IniDef::new("mbstring.detect_order", None, modifiable::ALL).validated(validate_detect_order),
     IniDef::new("mbstring.http_input", None, modifiable::ALL).validated(validate_http_input),
     IniDef::new("mbstring.http_output", None, modifiable::ALL).validated(validate_http_output),
-    IniDef::new("mbstring.internal_encoding", None, modifiable::ALL),
-    IniDef::new("mbstring.substitute_character", None, modifiable::ALL),
+    IniDef::new("mbstring.internal_encoding", None, modifiable::ALL)
+        .validated(validate_internal_encoding),
+    IniDef::new("mbstring.substitute_character", None, modifiable::ALL)
+        .validated(validate_substitute_character),
     IniDef::new(
         "mbstring.encoding_translation",
         Some("0"),
