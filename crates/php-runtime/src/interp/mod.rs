@@ -29,6 +29,7 @@ pub mod include;
 pub mod objects;
 pub mod place;
 pub mod var;
+pub mod variance;
 pub mod weak;
 
 use std::any::Any;
