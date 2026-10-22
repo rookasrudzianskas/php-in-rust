@@ -41,6 +41,9 @@ fn after_stmt(vm: &mut Vm) -> PResult<()> {
     if object::has_pending_destructors() {
         vm.run_pending_destructors()?;
     }
+    if !vm.hooks.statement_boundary.is_empty() {
+        vm.run_statement_hooks()?;
+    }
     Ok(())
 }
 

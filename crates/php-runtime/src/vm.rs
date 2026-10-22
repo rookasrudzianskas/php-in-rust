@@ -391,18 +391,39 @@ pub struct Vm {
     pub interp: crate::interp::State,
     /// Engine → extension callbacks.
     pub hooks: Hooks,
+    output_hooks_ran: bool,
 }
 
 /// `interface_gets_implemented`: called with (interface, class) when a class
 /// implementing the interface is linked.
 pub type InterfaceHook = fn(&mut Vm, &ClassRef, &ClassRef) -> PResult<()>;
+/// A hook with no arguments (statement boundaries, shutdown, first output).
+pub type VmHook = fn(&mut Vm) -> PResult<()>;
+/// Autoloader: tries to declare `class_name` (no leading `\`).
+pub type AutoloadHook = fn(&mut Vm, &[u8]) -> PResult<()>;
+/// Opens a file for `include`/`require`: `(path, use_include_path)` gives
+/// `Some((resolved path, contents))`, or `None` after emitting php-src's
+/// "include(x): Failed to open stream: ..." warning.
+pub type IncludeOpenerHook = fn(&mut Vm, &[u8], bool) -> PResult<Option<(PhpStr, Vec<u8>)>>;
 
-/// Callbacks extensions register to react to engine events (php-runtime
-/// cannot depend on php-ext).
+/// Callbacks extensions register (during `register()`) to react to engine
+/// events; php-runtime cannot depend on php-ext.
 #[derive(Default, Clone)]
 pub struct Hooks {
     /// `(lowercase interface name, hook)`, e.g. `("serializable", ...)`.
     pub interface_implemented: Vec<(PhpStr, InterfaceHook)>,
+    /// Class lookup misses (`spl_autoload_call`). When unset, the engine
+    /// calls the callables in `vm.interp.autoload_functions`.
+    pub autoload: Option<AutoloadHook>,
+    /// Run between statements, next to the destructor queue drain.
+    pub statement_boundary: Vec<VmHook>,
+    /// Run at request shutdown after shutdown functions, destructors and the
+    /// output flush, in registration order.
+    pub request_shutdown: Vec<VmHook>,
+    /// File loading for `include`/`require` through the stream layer.
+    pub include_opener: Option<IncludeOpenerHook>,
+    /// Run once, before the first byte of output reaches the SAPI.
+    pub output_started: Vec<VmHook>,
 }
 
 impl Hooks {
@@ -410,6 +431,43 @@ impl Hooks {
     pub fn on_interface_implemented(&mut self, interface: &str, hook: InterfaceHook) {
         self.interface_implemented
             .push((PhpStr::from(interface.to_ascii_lowercase()), hook));
+    }
+
+    pub fn on_statement_boundary(&mut self, hook: VmHook) {
+        self.statement_boundary.push(hook);
+    }
+
+    pub fn on_request_shutdown(&mut self, hook: VmHook) {
+        self.request_shutdown.push(hook);
+    }
+
+    pub fn on_output_started(&mut self, hook: VmHook) {
+        self.output_started.push(hook);
+    }
+}
+
+impl Vm {
+    /// Runs the statement-boundary hooks.
+    #[inline]
+    pub fn run_statement_hooks(&mut self) -> PResult<()> {
+        let n = self.hooks.statement_boundary.len();
+        for i in 0..n {
+            let h = self.hooks.statement_boundary[i];
+            h(self)?;
+        }
+        Ok(())
+    }
+
+    /// Runs the first-output hooks (once).
+    pub(crate) fn output_starting(&mut self) {
+        if self.output_hooks_ran {
+            return;
+        }
+        self.output_hooks_ran = true;
+        let hooks = self.hooks.output_started.clone();
+        for h in hooks {
+            let _ = h(self);
+        }
     }
 }
 
@@ -448,6 +506,7 @@ impl Vm {
             ext_data: HashMap::new(),
             interp: crate::interp::State::default(),
             hooks: Hooks::default(),
+            output_hooks_ran: false,
         };
         vm.register_module("Core", crate::builtins::register_core);
         // sapi/cli HARDCODED_INI and INI_DEFAULT values.

@@ -38,9 +38,9 @@ impl OutputSink for SharedOut {
     fn write(&mut self, data: &[u8]) {
         let _ = self.0.borrow_mut().write_all(data);
     }
-    fn flush(&mut self) {
-        let _ = self.0.borrow_mut().flush();
-    }
+    /// Implicit flushes (CLI `implicit_flush=1`) are deferred: the buffer
+    /// is flushed when full, before writes to stderr and at exit.
+    fn flush(&mut self) {}
 }
 
 /// stderr that flushes pending stdout first (keeps merged output ordered).

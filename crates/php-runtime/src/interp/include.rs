@@ -200,6 +200,39 @@ pub fn include(vm: &mut Vm, cx: &Ctx, op: IncludeOp, path: Value) -> PResult<Val
     if path.contains(&0) {
         return Err(vm.throw_value_error(format!("{fname}(): Argument #1 ($filename) must not contain any null bytes")));
     }
+    if let Some(opener) = vm.hooks.include_opener {
+        if !path.is_empty() {
+            if once {
+                if let Some(r) = resolve_include_path(vm, &path) {
+                    if vm.interp.is_included(&r) {
+                        return Ok(Value::Bool(true));
+                    }
+                }
+            }
+            return match opener(vm, &path, true)? {
+                Some((resolved, source)) => {
+                    if once && vm.interp.is_included(&resolved) {
+                        return Ok(Value::Bool(true));
+                    }
+                    run_included(vm, cx, fname, resolved, source)
+                }
+                None => {
+                    let ip = vm.ini_get("include_path").map(|v| v.to_string()).unwrap_or_default();
+                    if required {
+                        let mut m = b"Failed opening required '".to_vec();
+                        m.extend_from_slice(&path);
+                        m.extend_from_slice(format!("' (include_path='{ip}')").as_bytes());
+                        return Err(vm.throw_error("Error", PhpStr::from_vec(m)));
+                    }
+                    let mut m = format!("{fname}(): Failed opening '").into_bytes();
+                    m.extend_from_slice(&path);
+                    m.extend_from_slice(format!("' for inclusion (include_path='{ip}')").as_bytes());
+                    vm.engine_warning(PhpStr::from_vec(m))?;
+                    Ok(Value::Bool(false))
+                }
+            };
+        }
+    }
     let resolved = if path.is_empty() {
         None
     } else {
@@ -247,6 +280,10 @@ pub fn include(vm: &mut Vm, cx: &Ctx, op: IncludeOp, path: Value) -> PResult<Val
             return Ok(Value::Bool(false));
         }
     };
+    run_included(vm, cx, fname, resolved, source)
+}
+
+fn run_included(vm: &mut Vm, cx: &Ctx, fname: &str, resolved: PhpStr, source: Vec<u8>) -> PResult<Value> {
     vm.interp.mark_included(resolved.clone());
     let opts = ParseOptions {
         short_open_tag: vm.ini_bool("short_open_tag"),
@@ -432,6 +469,12 @@ pub fn shutdown(vm: &mut Vm) {
         }
     }
     // 3. Output buffers.
+    let _ = vm.ob_end_all();
+    // 4. Extension request shutdown (streams, environment, ...).
+    let hooks = vm.hooks.request_shutdown.clone();
+    for h in hooks {
+        let _ = h(vm);
+    }
     let _ = vm.ob_end_all();
     vm.output.sink.flush();
 }

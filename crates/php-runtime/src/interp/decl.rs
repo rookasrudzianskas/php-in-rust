@@ -530,6 +530,20 @@ pub fn update_class_constants(vm: &mut Vm, class: &ClassRef) -> PResult<()> {
 
 /// `spl_autoload_call`: runs the registered autoloaders.
 pub fn autoload(vm: &mut Vm, name: &[u8]) -> PResult<Option<ClassRef>> {
+    if let Some(h) = vm.hooks.autoload {
+        if !valid_class_name(name) {
+            return Ok(None);
+        }
+        let lc = PhpStr::from_bytes(name).to_ascii_lowercase();
+        if vm.interp.autoloading.contains(&lc) {
+            return Ok(None);
+        }
+        vm.interp.autoloading.push(lc.clone());
+        let r = h(vm, name);
+        vm.interp.autoloading.retain(|n| *n != lc);
+        r?;
+        return Ok(vm.find_class(name));
+    }
     if vm.interp.autoload_functions.is_empty() {
         return Ok(None);
     }
