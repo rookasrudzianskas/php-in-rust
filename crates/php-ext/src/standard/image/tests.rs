@@ -1270,3 +1270,43 @@ fn info_is_reset_even_on_failure() {
     t.output();
     assert!(matches!(info.get(), Value::Array(a) if a.is_empty()));
 }
+
+/// Robustness: truncated and corrupted copies of every sample must neither
+/// panic (debug builds trap integer overflow) nor hang.
+#[test]
+fn truncated_and_corrupted_samples_do_not_panic() {
+    let mut t = TestVm::new();
+    let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let samples = dir_listing(|f| !f.ends_with(".phpt") && !f.ends_with(".inc"));
+    assert!(samples.len() > 30);
+    for name in samples {
+        let data = read(&name);
+        if data.is_empty() {
+            continue;
+        }
+        let limit = data.len().min(700);
+        for len in 0..=limit {
+            from_string(&mut t, &data[..len]);
+        }
+        for _ in 0..300 {
+            let mut copy = data[..limit].to_vec();
+            for _ in 0..1 + next() % 3 {
+                let i = (next() % copy.len() as u64) as usize;
+                copy[i] = match next() % 4 {
+                    0 => 0,
+                    1 => 0xff,
+                    2 => 0x7f,
+                    _ => next() as u8,
+                };
+            }
+            from_string(&mut t, &copy);
+        }
+        t.output();
+    }
+}
