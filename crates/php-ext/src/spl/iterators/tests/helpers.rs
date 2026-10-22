@@ -33,8 +33,12 @@ pub struct Opts {
     pub verbose_valid: bool,
     /// Echo only `getChildren` and `valid = false` (iterator_014 style).
     pub echo_children: bool,
-    /// Method that throws `Exception("<method>")`; shared so tests can
-    /// change it between runs.
+    /// Methods echoed even without `echo`.
+    pub echo_only: &'static [&'static str],
+    /// Echo `method()` instead of `method` (iterator_034 style).
+    pub parens: bool,
+    /// Method that throws `Exception("Class::method()")`; shared so tests
+    /// can change it between runs.
     pub fail: Rc<RefCell<Option<String>>>,
     pub hook: Option<Hook>,
 }
@@ -65,14 +69,18 @@ fn enter(vm: &mut Vm, args: &Args, method: &str) -> PResult<ObjRef> {
         let st = o.native::<TestIter>().expect("test iterator state");
         (st.opts.clone(), st.depth, st.pos, st.items.len())
     };
-    if let Some(h) = &opts.hook {
-        h(vm, method, &o, depth, pos, len)?;
+    if method != "next" {
+        if let Some(h) = &opts.hook {
+            h(vm, method, &o, depth, pos, len)?;
+        }
     }
-    if opts.echo && !(method == "valid" && opts.verbose_valid) {
-        vm.echo_str(&format!("{}::{method}\n", scope(args)))?;
+    let p = if opts.parens { "()" } else { "" };
+    if (opts.echo && !(method == "valid" && opts.verbose_valid)) || opts.echo_only.contains(&method)
+    {
+        vm.echo_str(&format!("{}::{method}{p}\n", scope(args)))?;
     }
     if opts.fail.borrow().as_deref() == Some(method) {
-        return Err(vm.throw_error("Exception", method));
+        return Err(vm.throw_error("Exception", format!("{}::{method}()", scope(args))));
     }
     Ok(o)
 }
@@ -94,7 +102,8 @@ fn t_valid(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
         vm.echo_str(&format!("{}::valid({ok})\n", scope(args)))?;
     }
     if opts.echo_children && !ok {
-        vm.echo_str(&format!("{}::valid = false\n", scope(args)))?;
+        let p = if opts.parens { "()" } else { "" };
+        vm.echo_str(&format!("{}::valid{p} = false\n", scope(args)))?;
     }
     Ok(Value::Bool(ok))
 }
@@ -113,9 +122,16 @@ fn t_key(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     }))
 }
 
+/// `next()`; the hook runs after the position moved.
 fn t_next(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     let o = enter(vm, args, "next")?;
-    st(&o, |s| s.pos += 1);
+    let (hook, depth, pos, len) = st(&o, |s| {
+        s.pos += 1;
+        (s.opts.hook.clone(), s.depth, s.pos, s.items.len())
+    });
+    if let Some(h) = hook {
+        h(vm, "next", &o, depth, pos, len)?;
+    }
     Ok(Value::Null)
 }
 
@@ -156,7 +172,8 @@ fn t_get_children(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
         (child, s.depth + 1, s.opts.clone())
     });
     if opts.echo_children {
-        vm.echo_str(&format!("{}::getChildren\n", scope(args)))?;
+        let p = if opts.parens { "()" } else { "" };
+        vm.echo_str(&format!("{}::getChildren{p}\n", scope(args)))?;
     }
     let ce = o.class().clone();
     Ok(Value::Object(make(&ce, array_items(&child), depth, opts)))
@@ -384,5 +401,131 @@ pub fn int(v: &Value) -> i64 {
     match v.unref() {
         Value::Int(i) => i,
         other => panic!("expected int, got {other:?}"),
+    }
+}
+
+/// `echo "$s\n"`.
+pub fn echo(vm: &mut Vm, s: &str) -> PResult<()> {
+    vm.echo_str(s)?;
+    vm.echo_str("\n")
+}
+
+/// `var_dump()` of null, bools, ints, strings, arrays and objects without
+/// properties (enough for the iterator tests).
+pub fn dump(v: &Value) -> String {
+    fn go(v: &Value, indent: usize, out: &mut String) {
+        let pad = " ".repeat(indent);
+        match v.unref() {
+            Value::Null | Value::Undef => out.push_str(&format!("{pad}NULL\n")),
+            Value::Bool(b) => out.push_str(&format!("{pad}bool({b})\n")),
+            Value::Int(i) => out.push_str(&format!("{pad}int({i})\n")),
+            Value::String(s) => out.push_str(&format!("{pad}string({}) \"{s}\"\n", s.len())),
+            Value::Array(a) => {
+                out.push_str(&format!("{pad}array({}) {{\n", a.len()));
+                for (k, v) in a.iter() {
+                    match k {
+                        php_runtime::ArrayKey::Int(i) => {
+                            out.push_str(&format!("{pad}  [{i}]=>\n"));
+                        }
+                        php_runtime::ArrayKey::Str(s) => {
+                            out.push_str(&format!("{pad}  [\"{s}\"]=>\n"));
+                        }
+                    }
+                    go(v, indent + 2, out);
+                }
+                out.push_str(&format!("{pad}}}\n"));
+            }
+            Value::Object(o) => out.push_str(&format!(
+                "{pad}object({})#{} (0) {{\n{pad}}}\n",
+                o.class().name,
+                o.id()
+            )),
+            other => panic!("cannot dump {other:?}"),
+        }
+    }
+    let mut out = String::new();
+    go(v, 0, &mut out);
+    out
+}
+
+/// `var_dump($v)` to the output.
+pub fn var_dump(vm: &mut Vm, v: &Value) -> PResult<()> {
+    vm.echo_str(&dump(v))
+}
+
+// ---------------------------------------------------------------------------
+// phpt expectations
+// ---------------------------------------------------------------------------
+
+/// The `--EXPECT--` / `--EXPECTF--` section of a phpt file and whether it
+/// is an `EXPECTF` pattern.
+pub fn phpt_expect(src: &str) -> (&str, bool) {
+    for (marker, f) in [("--EXPECTF--\n", true), ("--EXPECT--\n", false)] {
+        if let Some(i) = src.find(marker) {
+            let rest = &src[i + marker.len()..];
+            let end = rest.find("\n--CLEAN--").unwrap_or(rest.len());
+            return (&rest[..end], f);
+        }
+    }
+    panic!("no EXPECT section");
+}
+
+/// `run-tests.php` matching of an `EXPECTF` pattern (`%s`, `%S`, `%a`,
+/// `%A`, `%d`, `%i`, `%e`, `%0`, `%%`).
+pub fn expectf_matches(pattern: &str, out: &str) -> bool {
+    fn go(p: &[u8], o: &[u8]) -> bool {
+        let Some(&c) = p.first() else {
+            return o.is_empty();
+        };
+        if c != b'%' || p.len() < 2 {
+            return o.first() == Some(&c) && go(&p[1..], &o[1..]);
+        }
+        let rest = &p[2..];
+        match p[1] {
+            b's' | b'S' | b'a' | b'A' => {
+                let min = usize::from(p[1] == b's' || p[1] == b'a');
+                let multiline = p[1] == b'a' || p[1] == b'A';
+                let mut n = 0;
+                loop {
+                    if n >= min && go(rest, &o[n..]) {
+                        return true;
+                    }
+                    if n >= o.len() || (!multiline && (o[n] == b'\n' || o[n] == b'\r')) {
+                        return false;
+                    }
+                    n += 1;
+                }
+            }
+            b'd' | b'i' => {
+                let mut n = usize::from(
+                    p[1] == b'i' && o.first().is_some_and(|c| *c == b'-' || *c == b'+'),
+                );
+                while n < o.len() && o[n].is_ascii_digit() {
+                    n += 1;
+                    if go(rest, &o[n..]) {
+                        return true;
+                    }
+                }
+                false
+            }
+            b'e' => o.first() == Some(&b'/') && go(rest, &o[1..]),
+            b'0' => o.first() == Some(&0) && go(rest, &o[1..]),
+            b'%' => o.first() == Some(&b'%') && go(rest, &o[1..]),
+            _ => o.first() == Some(&c) && go(&p[1..], &o[1..]),
+        }
+    }
+    go(pattern.trim_end().as_bytes(), out.trim_end().as_bytes())
+}
+
+/// Asserts that `out` is what the phpt file `src` expects.
+pub fn assert_phpt(out: &str, src: &str) {
+    let (expected, is_f) = phpt_expect(src);
+    if is_f {
+        assert!(
+            expectf_matches(expected, out),
+            "output does not match EXPECTF\n--- output ---\n{out}\n--- expected ---\n{expected}"
+        );
+    } else {
+        assert_eq!(out.trim_end(), expected.trim_end());
     }
 }
