@@ -799,8 +799,10 @@ fn check_redeclared_property(
     }
     let mut share = SlotShare::UseChild;
     if !child.is_static() && parent.flags & member_flags::VIRTUAL == 0 {
-        let use_child_prop = parent_hooks.is_none() && child_hooks.is_some();
-        share = if use_child_prop { SlotShare::UseChild } else { SlotShare::Parent };
+        // php-src gives a child that adds hooks its own slot (left UNDEF in
+        // the parent's), but lists it at the parent's slot position
+        // (properties_info_table); sharing the slot is equivalent.
+        share = SlotShare::Parent;
         child.flags &= !member_flags::VIRTUAL;
     }
     // Hooks.

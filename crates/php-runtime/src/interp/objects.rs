@@ -1533,6 +1533,7 @@ fn magic_unset(vm: &mut Vm, obj: &ObjRef, name: &PhpStr) -> PResult<()> {
 struct HookedIter {
     obj: ObjRef,
     by_ref: bool,
+    scope: Option<ClassRef>,
     /// Declared properties visible from the iterating scope: (unmangled name, info).
     declared: Vec<(PhpStr, PropertyInfo)>,
     pos: usize,
@@ -1663,7 +1664,7 @@ impl HookedIter {
     }
 
     /// `zho_dynamic_it_fetch_current`.
-    fn fetch_dynamic(&mut self) {
+    fn fetch_dynamic(&mut self, vm: &Vm) {
         let obj = self.obj.clone();
         let mut d = obj.obj().dyn_props.borrow_mut();
         let Some(t) = d.as_mut() else {
@@ -1674,6 +1675,19 @@ impl HookedIter {
             self.dynamic_done = true;
             return;
         };
+        // zend_check_property_access(zobj, key, is_dynamic = true)
+        if let ArrayKey::Str(k) = &key {
+            if k.first() != Some(&0) {
+                let ok = match lookup_prop(vm, obj.class(), k, self.scope.as_ref()) {
+                    Lookup::Dynamic => true,
+                    Lookup::Declared(info) => info.flags & member_flags::PUBLIC != 0,
+                    _ => false,
+                };
+                if !ok {
+                    return;
+                }
+            }
+        }
         let value = if self.by_ref {
             Value::Ref(crate::value::array::make_element_ref(t, key.clone()))
         } else {
@@ -1691,7 +1705,7 @@ impl HookedIter {
             if !self.declared_done {
                 self.fetch_declared(vm)?;
             } else if !self.dynamic_done {
-                self.fetch_dynamic();
+                self.fetch_dynamic(vm);
             } else {
                 break;
             }
@@ -1809,7 +1823,7 @@ fn hooked_property_values(vm: &mut Vm, obj: &ObjRef) -> PResult<Vec<(PhpStr, Val
 /// their get hooks; other purposes use the backing values.
 pub(crate) fn hooked_properties_for(vm: &mut Vm, obj: &ObjRef, purpose: PropPurpose) -> PResult<Option<PhpArray>> {
     match purpose {
-        PropPurpose::Json => {
+        PropPurpose::Json | PropPurpose::VarExport => {
             let mut t = PhpArray::new();
             for (k, v) in hooked_property_values(vm, obj)? {
                 t.insert(ArrayKey::Str(k), v);
@@ -1858,6 +1872,7 @@ pub(crate) fn hooked_get_iterator(vm: &mut Vm, obj: &ObjRef, by_ref: bool) -> PR
     let it = HookedIter {
         obj: obj.clone(),
         by_ref,
+        scope: scope.clone(),
         declared_done: declared.is_empty(),
         declared,
         pos: 0,
