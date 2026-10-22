@@ -54,9 +54,14 @@ pub fn dump_out(t: &TestVm, v: &Value) -> String {
 
 /// `var_dump($v)` (`php_var_dump`) with the VM's `serialize_precision`.
 pub fn dump(t: &TestVm, v: &Value) -> String {
+    dump_prec(t.vm.serialize_precision, v)
+}
+
+/// `var_dump($v)` with an explicit `serialize_precision`.
+pub fn dump_prec(prec: i64, v: &Value) -> String {
     let mut d = Dumper {
         out: Vec::new(),
-        prec: t.vm.serialize_precision,
+        prec,
         arrays: Vec::new(),
         objects: Vec::new(),
     };
