@@ -1172,11 +1172,16 @@ impl Stream {
         offset: i64,
         whence: i32,
     ) -> PResult<bool> {
+        let (res, persistent) = self.filter_ctx();
+        let ctx = FilterCtx {
+            stream_res: res.as_ref(),
+            is_persistent: persistent,
+        };
         for read_chain in [false, true] {
-            let chain = if read_chain {
-                &mut self.readfilters
+            let (chain, chain_type) = if read_chain {
+                (&mut self.readfilters, super::filter::FILTER_READ)
             } else {
-                &mut self.writefilters
+                (&mut self.writefilters, super::filter::FILTER_WRITE)
             };
             for f in chain.iter_mut() {
                 let s = if read_chain {
@@ -1185,7 +1190,7 @@ impl Stream {
                     f.write_seekable
                 };
                 if ((s == Seekable::Start && start) || s == Seekable::Check)
-                    && !f.ops.seek(vm, offset, whence)?
+                    && !f.ops.seek_in_chain(vm, &ctx, chain_type, offset, whence)?
                 {
                     let l = f.label();
                     vm.warning(format!("Stream filter seeking for {l} failed"))?;
