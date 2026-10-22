@@ -712,14 +712,18 @@ impl Lowerer<'_> {
                 }
                 true
             }
-            K::Call { callee, args } if args.is_callable_convert() => match callee {
-                ast::Callee::Name(_) => true,
-                ast::Callee::Expr(_) => {
-                    self.line = e.line;
-                    return self.error("Cannot use dynamic function name in constant expression");
+            K::Call { callee, args } if args.is_callable_convert() => {
+                self.check_const_expr_args(args, allow_new)?;
+                match callee {
+                    ast::Callee::Name(_) => true,
+                    ast::Callee::Expr(_) => {
+                        self.line = e.line;
+                        return self.error("Cannot use dynamic function name in constant expression");
+                    }
                 }
-            },
+            }
             K::StaticCall { class, name, args } if args.is_callable_convert() => {
+                self.check_const_expr_args(args, allow_new)?;
                 if let ast::ClassRef::Expr(_) = class {
                     self.line = e.line;
                     return self.error("Cannot use dynamic class name in constant expression");
@@ -735,6 +739,21 @@ impl Lowerer<'_> {
         if !ok {
             self.line = e.line;
             return self.error("Constant expression contains invalid operations");
+        }
+        Ok(())
+    }
+
+    /// Arguments of a partial application in a constant expression
+    /// (`zend_compile_const_expr_args`).
+    fn check_const_expr_args(&mut self, args: &ast::ArgList, allow_new: bool) -> CResult<()> {
+        for a in &args.args {
+            match a {
+                ast::Arg::Positional(x) | ast::Arg::Named { value: x, .. } => self.check_const_expr_ex(x, allow_new)?,
+                ast::Arg::Unpack(_) => {
+                    return self.error("Argument unpacking in constant expressions is not supported");
+                }
+                _ => {}
+            }
         }
         Ok(())
     }

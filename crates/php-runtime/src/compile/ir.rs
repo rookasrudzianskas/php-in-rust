@@ -579,6 +579,46 @@ pub enum CallableConvert {
     Static(ClassSpec, Member),
 }
 
+/// An argument of a partial application.
+pub enum PartialArg {
+    Pos(Expr),
+    Named(PhpStr, Expr),
+    /// `?`
+    Placeholder,
+    /// `name: ?`
+    NamedPlaceholder(PhpStr),
+}
+
+/// A partial function application (`f(?, 1)`, `$o->m(a: ?, ...)`):
+/// `ZEND_SEND_PLACEHOLDER` + `ZEND_CALLABLE_CONVERT_PARTIAL`.
+pub struct PartialExpr {
+    /// The callee (resolved like a first-class callable).
+    pub target: CallableConvert,
+    /// Arguments, without the variadic placeholder.
+    pub args: Vec<PartialArg>,
+    /// A `...` placeholder was used.
+    pub variadic: bool,
+    /// Names of named placeholders, in syntax order.
+    pub named_positions: Vec<PhpStr>,
+    /// `{closure:pfa:...}` (`zend_compile_partial_name`).
+    pub name: PhpStr,
+    pub line: u32,
+    /// Generated-code cache (`cache_slot`), owned by the interpreter.
+    pub cache: RefCell<Option<Rc<dyn std::any::Any>>>,
+}
+
+/// Partial application and pipe nodes.
+pub enum PfaExpr {
+    Create(PartialExpr),
+    /// Generated code: the default value of parameter `idx` of `code`.
+    ParamDefault(Rc<FuncCode>, u32),
+    /// `$x |> f(?)` compiled as a direct call: the operand is evaluated into
+    /// `slot` first, then `call` (which reads it through [`PfaExpr::PipeArg`]).
+    PipeCall(Expr, Slot, Expr),
+    /// The pipe operand stored in a hidden slot (taken on read).
+    PipeArg(Slot),
+}
+
 pub struct ClosureExpr {
     pub code: Rc<FuncCode>,
     pub is_static: bool,
@@ -639,6 +679,8 @@ pub enum Expr {
     Assert(Box<ArgList>, PhpStr, u32),
     /// `$x |> f(...)`
     Pipe(Box<Expr>, Box<Expr>, u32),
+    /// Partial application / optimized pipes.
+    Pfa(Box<PfaExpr>),
     /// `(void) expr`
     Void(Box<Expr>),
     /// The outermost node of a nullsafe chain (`$a?->b->c`): a short-circuit

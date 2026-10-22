@@ -793,6 +793,12 @@ impl Vm {
         })
     }
 
+    /// The default value of an internal function's parameter
+    /// (`zend_get_default_from_internal_arg_info`); `None` when unknown.
+    pub fn native_param_default(&mut self, p: &Param) -> PResult<Option<Value>> {
+        self.param_default(p)
+    }
+
     fn param_default(&mut self, p: &Param) -> PResult<Option<Value>> {
         if let Some(v) = p.cached_default.get() {
             return Ok(Some(v.clone()));

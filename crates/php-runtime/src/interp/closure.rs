@@ -27,7 +27,15 @@ pub struct ClosureData {
     pub magic_name: Option<PhpStr>,
     /// Created from a function or method (`fromCallable`, `f(...)`).
     pub from_callable: bool,
+    /// Partial application flags ([`PFA`], [`PFA_OF_CLOSURE`]).
+    pub pfa: u8,
 }
+
+/// The closure is a partial application (`ZEND_PARTIAL`).
+pub const PFA: u8 = 1;
+/// The closure is a partial application of a closure, which is its first
+/// bound variable (`ZEND_PARTIAL_OF_CLOSURE`).
+pub const PFA_OF_CLOSURE: u8 = 3;
 
 /// The closure payload of an object, if it is a `Closure`.
 pub fn closure_data(o: &ObjRef) -> Option<Rc<ClosureData>> {
@@ -36,6 +44,11 @@ pub fn closure_data(o: &ObjRef) -> Option<Rc<ClosureData>> {
 
 fn closure_class(vm: &Vm) -> ClassRef {
     vm.find_class(b"Closure").expect("Closure is registered")
+}
+
+/// Wraps closure data into a new `Closure` object.
+pub fn new_closure(vm: &mut Vm, data: ClosureData) -> Value {
+    new_closure_object(vm, data)
 }
 
 fn new_closure_object(vm: &mut Vm, data: ClosureData) -> Value {
@@ -93,6 +106,7 @@ pub fn create_closure(vm: &mut Vm, cx: &Ctx, c: &ClosureExpr) -> PResult<Value> 
             bound,
             magic_name: None,
             from_callable: false,
+            pfa: 0,
         },
     ))
 }
@@ -111,6 +125,7 @@ pub fn closure_from_target(vm: &mut Vm, t: Target) -> PResult<Value> {
                 bound: c.bound.clone(),
                 magic_name: c.magic_name.clone(),
                 from_callable: c.from_callable,
+                pfa: c.pfa,
             },
         ));
     }
@@ -125,6 +140,7 @@ pub fn closure_from_target(vm: &mut Vm, t: Target) -> PResult<Value> {
             bound: Vec::new(),
             magic_name: t.magic_name,
             from_callable: true,
+            pfa: 0,
         },
     ))
 }
@@ -152,109 +168,141 @@ fn uses_this(c: &ClosureData) -> bool {
     user_fn(&c.func).is_some_and(|u| u.code.has(code_flags::USES_THIS))
 }
 
-/// Rebinds a closure; `Ok(None)` after a warning.
-fn rebind(vm: &mut Vm, c: &Rc<ClosureData>, new_this: Option<ObjRef>, new_scope: Option<Option<ClassRef>>, is_call: bool) -> PResult<Option<ClosureData>> {
-    let is_static_fn = c.func.is_static();
-    if new_this.is_some() && is_static_fn {
-        vm.warning("Cannot bind an instance to a static closure")?;
-        return Ok(None);
+fn same_class(a: Option<&ClassRef>, b: Option<&ClassRef>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+        (None, None) => true,
+        _ => false,
     }
-    let scope = match new_scope {
-        Some(s) => s,
-        None => c.scope.clone(),
-    };
-    if c.from_callable {
-        let same_scope = match (&scope, &c.scope) {
-            (Some(a), Some(b)) => Rc::ptr_eq(a, b),
-            (None, None) => true,
-            _ => false,
-        };
-        if !same_scope {
-            vm.warning("Cannot rebind scope of closure created from method")?;
-            return Ok(None);
+}
+
+fn bind_warning(vm: &mut Vm, msg: impl std::fmt::Display) -> PResult<bool> {
+    vm.engine_warning(format!("{msg}, this will be an error in PHP 9"))?;
+    Ok(false)
+}
+
+/// `zend_valid_closure_binding`.
+fn valid_binding(vm: &mut Vm, c: &ClosureData, new_this: Option<&ObjRef>, scope: Option<&ClassRef>) -> PResult<bool> {
+    let func_scope = c.scope.as_ref();
+    let is_fake = c.from_callable || c.pfa != 0;
+    let is_static = c.func.is_static();
+    if let Some(nt) = new_this {
+        if is_static {
+            return bind_warning(vm, "Cannot bind an instance to a static closure");
         }
-        if c.func.scope.is_some() && !c.func.is_static() {
-            match (&new_this, &c.this) {
-                (None, Some(_)) => {
-                    vm.warning("Cannot unbind $this of method")?;
-                    return Ok(None);
+        if is_fake {
+            if let Some(fs) = func_scope {
+                if !nt.class().instance_of(fs) {
+                    let fname = c.magic_name.clone().unwrap_or_else(|| c.func.name.clone());
+                    return bind_warning(
+                        vm,
+                        format!(
+                            "Cannot bind method {}::{}() to object of class {}",
+                            fs.name,
+                            fname,
+                            nt.class().name
+                        ),
+                    );
                 }
-                (Some(nt), _) => {
-                    if let Some(sc) = &c.scope {
-                        if !nt.class().instance_of(sc) {
-                            vm.warning(format!(
-                                "Cannot bind method {}::{}() to object of class {}",
-                                sc.name,
-                                c.func.name,
-                                nt.class().name
-                            ))?;
-                            return Ok(None);
-                        }
-                    }
-                }
-                _ => {}
             }
         }
-        if matches!(c.func.kind, FunctionKind::Native(_)) && new_this.is_some() && c.this.is_none() && c.func.scope.is_none() {
-            vm.warning("Cannot bind an instance to a static closure")?;
-            return Ok(None);
-        }
-    } else if new_this.is_none() && c.this.is_some() && uses_this(c) && !is_static_fn {
-        vm.warning("Cannot unbind $this of closure using $this")?;
-        return Ok(None);
+    } else if is_fake && func_scope.is_some() && !is_static {
+        return bind_warning(vm, "Cannot unbind $this of method");
+    } else if !is_fake && c.this.is_some() && uses_this(c) {
+        return bind_warning(vm, "Cannot unbind $this of closure using $this");
     }
-    if let Some(s) = &scope {
-        if s.is_internal() && !c.scope.as_ref().is_some_and(|cs| Rc::ptr_eq(cs, s)) {
-            if !s.name.eq_ignore_ascii_case(b"Closure") || true {
-                vm.warning(format!("Cannot bind closure to scope of internal class {}", s.name))?;
-                return Ok(None);
+    if let Some(s) = scope {
+        if !same_class(Some(s), func_scope) && s.is_internal() {
+            return bind_warning(vm, format!("Cannot bind closure to scope of internal class {}", s.name));
+        }
+    }
+    if is_fake && !same_class(scope, func_scope) {
+        if func_scope.is_none() {
+            return bind_warning(vm, "Cannot rebind scope of closure created from function");
+        }
+        return bind_warning(vm, "Cannot rebind scope of closure created from method");
+    }
+    Ok(true)
+}
+
+/// A copy of a closure's function bound to `scope`; static variables are
+/// duplicated unless `share_statics` (fake closures, `Closure::call`).
+fn func_with_scope(c: &ClosureData, scope: Option<&ClassRef>, share_statics: bool) -> Rc<Function> {
+    let same = same_class(scope, c.scope.as_ref());
+    match (&c.func.kind, user_fn(&c.func)) {
+        (FunctionKind::User(body), Some(u)) => {
+            if share_statics {
+                if same {
+                    return c.func.clone();
+                }
+                let mut f = Function::user(c.func.name.clone(), body.clone(), c.func.signature().clone(), c.func.flags);
+                f.scope = scope.map(|s| s.name.clone());
+                f.doc_comment = c.func.doc_comment.clone();
+                f.location = c.func.location.clone();
+                f.attributes = c.func.attributes.clone();
+                return Rc::new(f);
             }
-        }
-    }
-    let _ = is_call;
-    let called = match &new_this {
-        Some(t) => Some(t.class().clone()),
-        None => scope.clone(),
-    };
-    // Statics are duplicated per closure object.
-    let func = match user_fn(&c.func) {
-        Some(u) => {
             let nu = u.fork();
-            let mut f = super::decl::make_function_from(nu, c.func.name.clone(), c.func.flags, scope.as_ref().map(|s| s.name.clone()));
+            let mut f = super::decl::make_function_from(nu, c.func.name.clone(), c.func.flags, scope.map(|s| s.name.clone()));
             f.location = c.func.location.clone();
-            if let (Some(s), Some(u)) = (&scope, user_fn(&f)) {
+            if let (Some(s), Some(u)) = (scope, user_fn(&f)) {
                 let _ = u.scope.set(Rc::downgrade(s));
             }
             Rc::new(f)
         }
-        None => c.func.clone(),
-    };
-    Ok(Some(ClosureData {
+        _ => c.func.clone(),
+    }
+}
+
+/// `zend_create_closure_ex` for a rebound closure.
+fn create_bound(vm: &mut Vm, c: &ClosureData, scope: Option<ClassRef>, called: Option<ClassRef>, new_this: Option<ObjRef>) -> ClosureData {
+    let mut scope = scope;
+    if scope.is_none() && new_this.is_some() {
+        // A dummy scope when binding an object without a scope.
+        scope = Some(closure_class(vm));
+    }
+    let mut new_this = new_this;
+    if c.func.is_native() && c.scope.is_none() {
+        // Free internal functions: scope and $this are meaningless.
+        new_this = None;
+        scope = None;
+    }
+    if scope.is_none() || c.func.is_static() {
+        new_this = None;
+    }
+    let func = func_with_scope(c, scope.as_ref(), c.from_callable);
+    ClosureData {
         func,
         this: new_this,
         scope,
         called,
-        bound: c.bound.iter().map(|(s, v)| (*s, v.clone())).collect(),
+        bound: c.bound.clone(),
         magic_name: c.magic_name.clone(),
         from_callable: c.from_callable,
-    }))
+        pfa: c.pfa,
+    }
 }
 
-fn scope_arg(vm: &mut Vm, v: &Value, current: &Option<ClassRef>) -> PResult<Option<Option<ClassRef>>> {
+enum ScopeArg {
+    Static,
+    Class(Option<ClassRef>),
+}
+
+fn scope_arg(vm: &mut Vm, v: &Value) -> PResult<Option<ScopeArg>> {
     match v {
-        Value::Undef => Ok(None),
-        Value::Object(o) => Ok(Some(Some(o.class().clone()))),
-        Value::Null => Ok(Some(None)),
+        Value::Undef => Ok(Some(ScopeArg::Static)),
+        Value::Object(o) => Ok(Some(ScopeArg::Class(Some(o.class().clone())))),
+        Value::Null => Ok(Some(ScopeArg::Class(None))),
         other => {
             let s = vm.to_php_string(other)?;
             if s.as_bytes() == b"static" {
-                return Ok(Some(current.clone()));
+                return Ok(Some(ScopeArg::Static));
             }
             match vm.lookup_class(&s)? {
-                Some(c) => Ok(Some(Some(c))),
+                Some(c) => Ok(Some(ScopeArg::Class(Some(c)))),
                 None => {
-                    vm.warning(format!("Class \"{s}\" not found"))?;
-                    Err(crate::vm::Flow::Return(Value::Null))
+                    vm.engine_warning(format!("Class \"{s}\" not found"))?;
+                    Ok(None)
                 }
             }
         }
@@ -268,20 +316,35 @@ fn this_closure(vm: &mut Vm, args: &Args) -> PResult<Rc<ClosureData>> {
     }
 }
 
-fn do_bind(vm: &mut Vm, c: &Rc<ClosureData>, this: Option<&Value>, scope: &Value) -> PResult<Value> {
+/// `do_closure_bind`.
+fn do_bind(vm: &mut Vm, c: &Rc<ClosureData>, this: &Value, scope: &Value) -> PResult<Value> {
     let new_this = match this {
-        Some(Value::Object(o)) => Some(o.clone()),
+        Value::Object(o) => Some(o.clone()),
         _ => None,
     };
-    let new_scope = match scope_arg(vm, scope, &c.scope) {
-        Ok(s) => s,
-        Err(crate::vm::Flow::Return(_)) => return Ok(Value::Null),
-        Err(e) => return Err(e),
+    let ce = match scope_arg(vm, scope)? {
+        None => return Ok(Value::Null),
+        Some(ScopeArg::Static) => c.scope.clone(),
+        Some(ScopeArg::Class(ce)) => ce,
     };
-    match rebind(vm, c, new_this, new_scope, false)? {
-        Some(d) => Ok(new_closure_object(vm, d)),
-        None => Ok(Value::Null),
+    if !valid_binding(vm, c, new_this.as_ref(), ce.as_ref())? {
+        return Ok(Value::Null);
     }
+    let called = match &new_this {
+        Some(t) => Some(t.class().clone()),
+        None => ce.clone(),
+    };
+    let mut d = create_bound(vm, c, ce, called, new_this.clone());
+    if c.pfa == PFA_OF_CLOSURE {
+        // Re-bind the inner closure (the first bound variable).
+        if let Some((slot, Value::Object(inner))) = d.bound.first().cloned() {
+            if let Some(ic) = closure_data(&inner) {
+                let nv = do_bind(vm, &ic, this, scope)?;
+                d.bound[0] = (slot, nv);
+            }
+        }
+    }
+    Ok(new_closure_object(vm, d))
 }
 
 fn closure_bind(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
@@ -290,32 +353,35 @@ fn closure_bind(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     };
     let this = args.get(1).clone();
     let scope = if args.is_passed(2) { args.get(2).clone() } else { Value::Undef };
-    do_bind(vm, &c, Some(&this), &scope)
+    do_bind(vm, &c, &this, &scope)
 }
 
 fn closure_bind_to(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     let c = this_closure(vm, args)?;
     let this = args.get(0).clone();
     let scope = if args.is_passed(1) { args.get(1).clone() } else { Value::Undef };
-    do_bind(vm, &c, Some(&this), &scope)
+    do_bind(vm, &c, &this, &scope)
 }
 
+/// `Closure::call`: calls the closure bound to `$newThis` and its class.
 fn closure_call(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     let c = this_closure(vm, args)?;
     let new_this = args.object(0).clone();
-    if c.func.is_static() {
-        vm.warning("Cannot bind an instance to a static closure")?;
+    let newclass = new_this.class().clone();
+    if !valid_binding(vm, &c, Some(&new_this), Some(&newclass))? {
         return Ok(Value::Null);
     }
-    let new_scope = Some(Some(new_this.class().clone()));
-    if new_this.class().is_internal() && !c.from_callable {
-        // Binding to internal classes is allowed for call() only when the
-        // scope is unchanged.
-    }
-    let d = match rebind(vm, &c, Some(new_this.clone()), new_scope, true)? {
-        Some(d) => Rc::new(d),
-        None => return Ok(Value::Null),
-    };
+    let share = !c.func.has_flag(fn_flags::GENERATOR);
+    let d = Rc::new(ClosureData {
+        func: func_with_scope(&c, Some(&newclass), share),
+        this: Some(new_this.clone()),
+        scope: Some(newclass.clone()),
+        called: Some(newclass),
+        bound: c.bound.clone(),
+        magic_name: c.magic_name.clone(),
+        from_callable: c.from_callable,
+        pfa: c.pfa,
+    });
     let rest: Vec<Value> = args.rest(1).to_vec();
     let named: Vec<(PhpStr, Value)> = args.named_rest().to_vec();
     let b = Bound {
@@ -382,6 +448,7 @@ fn closure_clone(vm: &mut Vm, o: &ObjRef) -> PResult<ObjRef> {
         bound: c.bound.clone(),
         magic_name: c.magic_name.clone(),
         from_callable: c.from_callable,
+        pfa: c.pfa,
     };
     let Value::Object(n) = new_closure_object(vm, d) else { unreachable!() };
     Ok(n)

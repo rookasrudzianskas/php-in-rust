@@ -56,7 +56,7 @@ fn param_index_by_name(func: &Function, name: &[u8]) -> Option<usize> {
     func.signature().param_index(name)
 }
 
-fn cannot_pass_by_ref(vm: &mut Vm, func: &Function, i: usize) -> Flow {
+pub(crate) fn cannot_pass_by_ref(vm: &mut Vm, func: &Function, i: usize) -> Flow {
     let sig = func.signature();
     let pname = sig
         .params
@@ -76,7 +76,7 @@ fn cannot_pass_by_ref(vm: &mut Vm, func: &Function, i: usize) -> Flow {
 }
 
 /// Evaluates one argument for parameter position `i`.
-fn eval_arg(vm: &mut Vm, cx: &Ctx, e: &Expr, func: Option<&Rc<Function>>, i: usize, named: Option<&[u8]>) -> PResult<Value> {
+pub(crate) fn eval_arg(vm: &mut Vm, cx: &Ctx, e: &Expr, func: Option<&Rc<Function>>, i: usize, named: Option<&[u8]>) -> PResult<Value> {
     let (by_ref, prefer) = match func {
         Some(f) => {
             let idx = match named {
@@ -228,7 +228,7 @@ fn spread_into(vm: &mut Vm, b: &mut Bound, v: Value) -> PResult<()> {
     }
 }
 
-fn caller_of(vm: &Vm, cx: &Ctx) -> Caller {
+pub(crate) fn caller_of(vm: &Vm, cx: &Ctx) -> Caller {
     Caller {
         strict: cx.strict(),
         site: Some((vm.current_file.clone(), vm.current_line)),
@@ -236,7 +236,7 @@ fn caller_of(vm: &Vm, cx: &Ctx) -> Caller {
 }
 
 /// Resolves a named function (`ZEND_INIT_FCALL_BY_NAME` / `_NS_`).
-fn resolve_function(vm: &mut Vm, nc: &NamedCallee) -> PResult<Rc<Function>> {
+pub(crate) fn resolve_function(vm: &mut Vm, nc: &NamedCallee) -> PResult<Rc<Function>> {
     if let Some(f) = nc.cache.get() {
         return Ok(f.clone());
     }
@@ -289,6 +289,26 @@ pub fn eval_call(vm: &mut Vm, cx: &Ctx, c: &CallExpr) -> PResult<Value> {
     }
 }
 
+/// `$x |> $callable` compiled as `($callable)($x)` (`zend_compile_pipe`).
+pub fn eval_pipe(vm: &mut Vm, cx: &Ctx, lhs: &Expr, rhs: &Expr, line: u32) -> PResult<Value> {
+    let arg = eval(vm, cx, lhs)?.into_unref();
+    let callee = eval(vm, cx, rhs)?;
+    vm.current_line = line;
+    let target = resolve_callable_for_call(vm, cx, &callee)?;
+    if target.magic_name.is_none() {
+        let (by_ref, prefer) = param_by_ref(&target.func, 0);
+        if by_ref && !prefer {
+            return Err(cannot_pass_by_ref(vm, &target.func, 0));
+        }
+    }
+    let b = Bound {
+        positional: vec![arg],
+        named: Vec::new(),
+    };
+    let caller = caller_of(vm, cx);
+    call_target(vm, target, b, &caller, true)
+}
+
 /// A resolved callable.
 pub struct Target {
     pub func: Rc<Function>,
@@ -300,7 +320,7 @@ pub struct Target {
 }
 
 /// `$f(...)` target resolution (`ZEND_INIT_DYNAMIC_CALL`).
-fn resolve_callable_for_call(vm: &mut Vm, cx: &Ctx, callee: &Value) -> PResult<Target> {
+pub(crate) fn resolve_callable_for_call(vm: &mut Vm, cx: &Ctx, callee: &Value) -> PResult<Target> {
     match &*callee.deref() {
         Value::String(s) => {
             if let Some(pos) = s.windows(2).position(|w| w == b"::") {

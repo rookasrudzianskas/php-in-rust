@@ -32,6 +32,11 @@ fn is_short_circuited(e: &ast::Expr) -> bool {
     }
 }
 
+/// A first-class callable (`f(...)`): a single variadic placeholder.
+pub(crate) fn is_fcc(args: &ast::ArgList) -> bool {
+    args.args.len() == 1 && matches!(args.args[0], ast::Arg::VariadicPlaceholder)
+}
+
 fn is_chain_kind(e: &ast::Expr) -> bool {
     matches!(
         e.kind,
@@ -193,10 +198,11 @@ impl Lowerer<'_> {
                     }
                     let obj = self.expr_chain_base(object)?;
                     let m = self.member(name)?;
-                    return Ok(Expr::CallableConvert(
-                        Box::new(CallableConvert::Method(obj, m, false)),
-                        line,
-                    ));
+                    let target = CallableConvert::Method(obj, m, false);
+                    if !is_fcc(args) {
+                        return self.partial(target, args, line);
+                    }
+                    return Ok(Expr::CallableConvert(Box::new(target), line));
                 }
                 let obj = self.expr_chain_base(object)?;
                 let m = self.member(name)?;
@@ -213,10 +219,11 @@ impl Lowerer<'_> {
                 let cs = self.class_spec(class)?;
                 let m = self.member(name)?;
                 if args.is_callable_convert() {
-                    return Ok(Expr::CallableConvert(
-                        Box::new(CallableConvert::Static(cs, m)),
-                        line,
-                    ));
+                    let target = CallableConvert::Static(cs, m);
+                    if !is_fcc(args) {
+                        return self.partial(target, args, line);
+                    }
+                    return Ok(Expr::CallableConvert(Box::new(target), line));
                 }
                 let a = self.args(args)?;
                 Expr::StaticCall(Box::new(StaticCallExpr {
@@ -321,6 +328,9 @@ impl Lowerer<'_> {
                                 "Arrow functions on the right hand side of |> must be parenthesized",
                             );
                         }
+                    }
+                    if let Some((slot, call)) = self.pipe_partial_apply(right, line)? {
+                        return Ok(Expr::Pfa(Box::new(PfaExpr::PipeCall(*l, slot, call))));
                     }
                     let r = self.boxed(right)?;
                     Expr::Pipe(l, r, self.line)
@@ -758,6 +768,12 @@ impl Lowerer<'_> {
     // ----- calls -----------------------------------------------------------------
 
     pub(crate) fn args(&mut self, a: &ast::ArgList) -> CResult<ArgList> {
+        self.args_ex(a, None)
+    }
+
+    /// Lowers an argument list; with `pipe`, the (single) placeholder is the
+    /// pipe operand stored in that slot (`zend_partial_apply`).
+    fn args_ex(&mut self, a: &ast::ArgList, pipe: Option<Slot>) -> CResult<ArgList> {
         let mut out = Vec::with_capacity(a.args.len());
         let mut has_spread = false;
         let mut has_named = false;
@@ -792,8 +808,22 @@ impl Lowerer<'_> {
                     has_named = true;
                     out.push(Arg::Named(pstr(name), self.arg_expr(value)?));
                 }
+                ast::Arg::Placeholder | ast::Arg::VariadicPlaceholder if pipe.is_some() => {
+                    if has_named {
+                        return self.error("Cannot use positional argument after named argument");
+                    }
+                    out.push(Arg::Pos(Expr::Pfa(Box::new(PfaExpr::PipeArg(pipe.unwrap())))));
+                }
+                ast::Arg::NamedPlaceholder(name) if pipe.is_some() => {
+                    if names.contains(&name.as_bytes()) {
+                        return self.error(format!("Duplicate named parameter ${name}"));
+                    }
+                    names.push(name.as_bytes());
+                    has_named = true;
+                    out.push(Arg::Named(pstr(name), Expr::Pfa(Box::new(PfaExpr::PipeArg(pipe.unwrap())))));
+                }
                 ast::Arg::Placeholder | ast::Arg::NamedPlaceholder(_) | ast::Arg::VariadicPlaceholder => {
-                    return self.error("Partial function application is not supported");
+                    return self.error("Cannot use placeholder here");
                 }
             }
         }
@@ -887,6 +917,9 @@ impl Lowerer<'_> {
             }
             if args.is_callable_convert() {
                 let c = self.named_callee(n);
+                if !is_fcc(args) {
+                    return self.partial(CallableConvert::Func(c), args, line);
+                }
                 return Ok(Expr::CallableConvert(Box::new(CallableConvert::Func(c)), line));
             }
             let c = self.named_callee(n);
@@ -902,10 +935,11 @@ impl Lowerer<'_> {
         };
         let f = self.expr(e)?;
         if args.is_callable_convert() {
-            return Ok(Expr::CallableConvert(
-                Box::new(CallableConvert::Func(Callee::Expr(Box::new(f)))),
-                line,
-            ));
+            let target = CallableConvert::Func(Callee::Expr(Box::new(f)));
+            if !is_fcc(args) {
+                return self.partial(target, args, line);
+            }
+            return Ok(Expr::CallableConvert(Box::new(target), line));
         }
         let a = self.args(args)?;
         Ok(Expr::Call(Box::new(CallExpr {
@@ -931,6 +965,187 @@ impl Lowerer<'_> {
             fallback,
             cache: OnceCell::new(),
         }))
+    }
+
+    /// `zend_compile_partial_name`.
+    pub(crate) fn pfa_name(&self, line: u32) -> PhpStr {
+        let function = if self.fs.kind == FuncKind::Main || self.fs.name.is_empty() {
+            self.file.to_string()
+        } else if self.in_closure() {
+            self.fs.name.to_string()
+        } else {
+            match (&self.class, self.fs.kind) {
+                (Some(c), FuncKind::Method) | (Some(c), FuncKind::Hook) => format!("{}::{}()", c.name, self.fs.name),
+                _ => format!("{}()", self.fs.name),
+            }
+        };
+        PhpStr::from(format!("{{closure:pfa:{function}:{line}}}"))
+    }
+
+    /// A partial application (`zend_compile_args_ex` with `is_call_partial`).
+    pub(crate) fn partial(&mut self, target: CallableConvert, a: &ast::ArgList, line: u32) -> CResult<Expr> {
+        let mut args = Vec::with_capacity(a.args.len());
+        let mut named_positions = Vec::new();
+        let mut uses_named = false;
+        let mut variadic = false;
+        let mut names: Vec<&[u8]> = Vec::new();
+        for arg in &a.args {
+            match arg {
+                ast::Arg::Unpack(e) => {
+                    self.line = e.line;
+                    if uses_named {
+                        return self.error("Cannot use argument unpacking after named arguments");
+                    }
+                    return self.error("Cannot combine partial application and unpacking");
+                }
+                ast::Arg::Named { name, value } => {
+                    if names.contains(&name.as_bytes()) {
+                        self.line = value.line;
+                        return self.error(format!("Duplicate named parameter ${name}"));
+                    }
+                    names.push(name.as_bytes());
+                    uses_named = true;
+                    if variadic {
+                        return self.error("Variadic placeholder must be last");
+                    }
+                    args.push(PartialArg::Named(pstr(name), self.arg_expr(value)?));
+                }
+                ast::Arg::NamedPlaceholder(name) => {
+                    if names.contains(&name.as_bytes()) {
+                        return self.error(format!("Duplicate named parameter ${name}"));
+                    }
+                    names.push(name.as_bytes());
+                    uses_named = true;
+                    if variadic {
+                        return self.error("Variadic placeholder must be last");
+                    }
+                    named_positions.push(pstr(name));
+                    args.push(PartialArg::NamedPlaceholder(pstr(name)));
+                }
+                ast::Arg::Positional(e) => {
+                    if uses_named {
+                        self.line = e.line;
+                        return self.error("Cannot use positional argument after named argument");
+                    }
+                    if variadic {
+                        return self.error("Variadic placeholder must be last");
+                    }
+                    args.push(PartialArg::Pos(self.arg_expr(e)?));
+                }
+                ast::Arg::Placeholder => {
+                    if uses_named {
+                        return self.error("Cannot use positional argument after named argument");
+                    }
+                    if variadic {
+                        return self.error("Variadic placeholder must be last");
+                    }
+                    args.push(PartialArg::Placeholder);
+                }
+                ast::Arg::VariadicPlaceholder => {
+                    if variadic {
+                        return self.error("Variadic placeholder may only appear once");
+                    }
+                    variadic = true;
+                }
+            }
+        }
+        self.line = line;
+        Ok(Expr::Pfa(Box::new(PfaExpr::Create(PartialExpr {
+            target,
+            args,
+            variadic,
+            named_positions,
+            name: self.pfa_name(line),
+            line,
+            cache: std::cell::RefCell::new(None),
+        }))))
+    }
+
+    /// `zend_partial_apply`: `$x |> f(?)` becomes the direct call `f($x)`.
+    /// Returns the hidden operand slot and the call.
+    fn pipe_partial_apply(&mut self, callable: &ast::Expr, line: u32) -> CResult<Option<(Slot, Expr)>> {
+        use ast::ExprKind as K;
+        let args = match &callable.kind {
+            K::Call { callee, args } => {
+                if let ast::Callee::Name(n) = callee {
+                    if n.name.eq_ignore_ascii_case(b"assert") {
+                        return Ok(None);
+                    }
+                }
+                args
+            }
+            K::StaticCall { args, .. } => args,
+            K::MethodCall {
+                args, nullsafe: false, ..
+            } => args,
+            _ => return Ok(None),
+        };
+        if !args.is_callable_convert() {
+            return Ok(None);
+        }
+        let mut placeholders = 0;
+        let mut uses_named = false;
+        for a in &args.args {
+            match a {
+                ast::Arg::Named { .. } => uses_named = true,
+                ast::Arg::NamedPlaceholder(_) => {
+                    uses_named = true;
+                    placeholders += 1;
+                }
+                ast::Arg::Placeholder => placeholders += 1,
+                ast::Arg::VariadicPlaceholder => {
+                    placeholders += 1;
+                    if uses_named {
+                        return Ok(None);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if placeholders != 1 {
+            return Ok(None);
+        }
+        let n = self.fs.cvs.names.len();
+        let slot = self.cv(format!("\0pipe{n}").as_bytes());
+        let call = match &callable.kind {
+            K::Call { callee, args } => {
+                let callee = match callee {
+                    ast::Callee::Name(n) => self.named_callee(n),
+                    ast::Callee::Expr(e) => Callee::Expr(self.boxed(e)?),
+                };
+                let a = self.args_ex(args, Some(slot))?;
+                Expr::Call(Box::new(CallExpr {
+                    callee,
+                    args: a,
+                    line,
+                }))
+            }
+            K::StaticCall { class, name, args } => {
+                let cs = self.class_spec(class)?;
+                let m = self.member(name)?;
+                let a = self.args_ex(args, Some(slot))?;
+                Expr::StaticCall(Box::new(StaticCallExpr {
+                    class: cs,
+                    name: m,
+                    args: a,
+                    line,
+                }))
+            }
+            K::MethodCall { object, name, args, .. } => {
+                let obj = self.expr_chain_base(object)?;
+                let m = self.member(name)?;
+                let a = self.args_ex(args, Some(slot))?;
+                Expr::MethodCall(Box::new(MethodCallExpr {
+                    object: obj,
+                    name: m,
+                    args: a,
+                    nullsafe: false,
+                    line,
+                }))
+            }
+            _ => unreachable!(),
+        };
+        Ok(Some((slot, call)))
     }
 
     // ----- assignment ------------------------------------------------------------

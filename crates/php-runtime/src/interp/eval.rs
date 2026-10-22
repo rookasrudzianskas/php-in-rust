@@ -206,12 +206,8 @@ pub fn eval(vm: &mut Vm, cx: &Ctx, e: &Expr) -> PResult<Value> {
             }
         }
         Expr::Assert(args, text, line) => super::builtins::eval_assert(vm, cx, args, text, *line),
-        Expr::Pipe(lhs, rhs, line) => {
-            let arg = eval(vm, cx, lhs)?;
-            let f = eval(vm, cx, rhs)?;
-            vm.current_line = *line;
-            call::call_value(vm, &f, vec![arg], Vec::new(), false)
-        }
+        Expr::Pipe(lhs, rhs, line) => call::eval_pipe(vm, cx, lhs, rhs, *line),
+        Expr::Pfa(p) => super::pfa::eval_pfa(vm, cx, p),
         Expr::Void(inner) => {
             eval(vm, cx, inner)?;
             Ok(Value::Null)
