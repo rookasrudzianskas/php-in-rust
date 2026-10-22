@@ -5,6 +5,7 @@ pub mod encoding_tests;
 mod case_width;
 mod functions;
 mod info;
+mod mime;
 mod numericentity;
 mod strings;
 
@@ -61,6 +62,28 @@ pub fn vd(t: &mut TestVm, name: &str, args: Vec<Value>) -> String {
     let v = call(t, name, args);
     let before = t.output();
     format!("{before}{}", dump(t, v))
+}
+
+/// A section (`EXPECT`, `FILE`, ...) of a php-src mbstring `.phpt` test.
+pub fn phpt_section(test: &str, section: &str) -> String {
+    let path = format!(
+        "{}/../../tests/phpt/ext/mbstring/tests/{test}.phpt",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let text = String::from_utf8_lossy(&std::fs::read(&path).expect("phpt file")).into_owned();
+    let marker = format!("--{section}--\n");
+    let start = text.find(&marker).expect("section") + marker.len();
+    let rest = &text[start..];
+    let end = rest
+        .find("\n--")
+        .filter(|&i| rest[i + 3..].starts_with(|c: char| c.is_ascii_uppercase()))
+        .unwrap_or(rest.len());
+    rest[..end].to_string()
+}
+
+/// run-tests.php's comparison: CRLF as LF, surrounding whitespace trimmed.
+pub fn normalize(s: &str) -> String {
+    s.replace("\r\n", "\n").trim().to_string()
 }
 
 /// `var_dump()` of a call's result (without diagnostics).
