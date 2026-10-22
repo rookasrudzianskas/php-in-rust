@@ -250,6 +250,7 @@ pub fn exec_stmt(vm: &mut Vm, cx: &Ctx, s: &Stmt) -> PResult<()> {
                 }
             }
         }
+        StmtKind::Ticks(n, body) if body.is_empty() => super::builtins::tick(vm, *n)?,
         StmtKind::Ticks(n, body) => {
             let _ = n;
             for st in body {
