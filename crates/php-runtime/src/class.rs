@@ -430,6 +430,39 @@ pub type GetClosureFn = fn(&mut Vm, &ObjRef) -> PResult<Option<Value>>;
 pub type HasPropertyFn = fn(&mut Vm, &ObjRef, &PhpStr, bool) -> PResult<Option<bool>>;
 /// `unset_property`: returns `true` when handled.
 pub type UnsetPropertyFn = fn(&mut Vm, &ObjRef, &PhpStr) -> PResult<bool>;
+
+/// What `has_property` checks (`ZEND_PROPERTY_ISSET`, `ZEND_PROPERTY_NOT_EMPTY`,
+/// `ZEND_PROPERTY_EXISTS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropertyCheck {
+    /// `isset()`: exists and is not `null`.
+    Isset,
+    /// `!empty()`: exists and is truthy.
+    NotEmpty,
+    /// `property_exists()`: exists (even when `null`).
+    Exists,
+}
+
+/// `has_property` with the check mode: `Ok(None)` selects the standard behaviour.
+pub type HasPropertyModeFn = fn(&mut Vm, &ObjRef, &PhpStr, PropertyCheck) -> PResult<Option<bool>>;
+
+/// Result of a `get_property_ptr_ptr` handler.
+#[derive(Clone)]
+pub enum PropertyPtr {
+    /// Use the standard behaviour (`zend_std_get_property_ptr_ptr`).
+    Std,
+    /// No direct pointer (php-src's `NULL`): the engine falls back to
+    /// `read_property` (writes into the result are temporaries) and, for
+    /// compound assignments, `write_property`.
+    Null,
+    /// A direct reference to the property value.
+    Ref(PhpRef),
+}
+
+/// `get_property_ptr_ptr`: called for write fetches (`$o->p[] = ..`,
+/// `$o->p->q = ..`, `&$o->p`, `$o->p =& $r`). An `Err` (for example
+/// "Cannot modify readonly property") aborts the operation.
+pub type GetPropertyPtrFn = fn(&mut Vm, &ObjRef, &PhpStr) -> PResult<PropertyPtr>;
 /// `get_method` + call: `Ok(None)` selects the standard method lookup.
 pub type CallMethodFn = fn(&mut Vm, &ObjRef, &PhpStr, &[Value]) -> PResult<Option<Value>>;
 
@@ -478,6 +511,9 @@ pub struct ObjectHandlers {
     pub get_closure: Option<GetClosureFn>,
     pub has_property: Option<HasPropertyFn>,
     pub unset_property: Option<UnsetPropertyFn>,
+    /// `has_property` with the check mode; takes precedence over `has_property`.
+    pub has_property_mode: Option<HasPropertyModeFn>,
+    pub get_property_ptr_ptr: Option<GetPropertyPtrFn>,
     /// Intercepts `$obj->method(...)` calls (e.g. `__PHP_Incomplete_Class`).
     pub call_method: Option<CallMethodFn>,
 }

@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::class::{ClassRef, Function, PropPurpose, PropertyInfo, class_flags, member_flags};
+use crate::class::{ClassRef, Function, PropPurpose, PropertyCheck, PropertyInfo, PropertyPtr, class_flags, member_flags};
 use crate::errors::level;
 use crate::object::{ObjRef, obj_flags};
 use crate::types::CoerceMode;
@@ -476,6 +476,16 @@ pub fn read_prop(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &Php
     }
     let v = read_property(vm, scope, obj, name, if is { Fetch::Is } else { Fetch::R })?;
     Ok(v.into_unref())
+}
+
+/// `zobj->handlers->read_property`: the class's handler, then the standard one.
+fn read_property_handler(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &PhpStr, ty: Fetch) -> PResult<Value> {
+    if let Some(h) = obj.class().handlers.read_property {
+        if let Some(v) = h(vm, obj, name)? {
+            return Ok(v);
+        }
+    }
+    read_property(vm, scope, obj, name, ty)
 }
 
 pub(crate) fn read_property(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &PhpStr, ty: Fetch) -> PResult<Value> {
@@ -947,12 +957,21 @@ enum Ptr {
     /// A declared slot (with its typed info) or a dynamic property.
     Slot(usize, Option<PropertyInfo>),
     Dyn,
+    /// A reference provided by a `get_property_ptr_ptr` handler.
+    Ext(PhpRef),
     /// No direct pointer: use `read_property`.
     Null,
 }
 
 /// `zend_std_get_property_ptr_ptr`.
 fn get_property_ptr(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &PhpStr, ty: Fetch) -> PResult<Ptr> {
+    if let Some(h) = obj.class().handlers.get_property_ptr_ptr {
+        match h(vm, obj, name)? {
+            PropertyPtr::Std => {}
+            PropertyPtr::Null => return Ok(Ptr::Null),
+            PropertyPtr::Ref(r) => return Ok(Ptr::Ext(r)),
+        }
+    }
     let class = obj.class().clone();
     let lookup = lookup_prop(vm, &class, name, scope);
     let (s, ti) = match &lookup {
@@ -1039,12 +1058,13 @@ fn get_property_ptr(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &
 fn fetch_property_address(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &PhpStr, ty: Fetch, flags: ObjFlags) -> PResult<PropTarget> {
     match get_property_ptr(vm, scope, obj, name, ty)? {
         Ptr::Null => {
-            let v = read_property(vm, scope, obj, name, ty)?;
+            let v = read_property_handler(vm, scope, obj, name, ty)?;
             Ok(match v {
                 Value::Ref(r) => PropTarget::Ref(r),
                 v => PropTarget::Value(v),
             })
         }
+        Ptr::Ext(r) => Ok(PropTarget::Ref(r)),
         Ptr::Dyn => {
             let mut d = obj.obj().dyn_props.borrow_mut();
             let t = d.get_or_insert_with(PhpArray::new);
@@ -1114,9 +1134,10 @@ pub fn assign_prop_ref(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name
     match get_property_ptr(vm, scope, obj, name, Fetch::W)? {
         Ptr::Null => {
             // Errors of the fallback read (readonly, hooks) take precedence.
-            let _ = read_property(vm, scope, obj, name, Fetch::W)?;
+            let _ = read_property_handler(vm, scope, obj, name, Fetch::W)?;
             Err(vm.throw_error("Error", "Cannot assign by reference to overloaded object"))
         }
+        Ptr::Ext(_) => Err(vm.throw_error("Error", "Cannot assign by reference to overloaded object")),
         Ptr::Dyn => {
             let mut d = obj.obj().dyn_props.borrow_mut();
             let t = d.get_or_insert_with(PhpArray::new);
@@ -1268,50 +1289,85 @@ pub(crate) fn parent_hook_call(vm: &mut Vm, cx: &Ctx, s: &crate::compile::ir::St
 // isset / unset
 // ---------------------------------------------------------------------------
 
-/// `isset($obj->name)` / `empty($obj->name)` (`zend_std_has_property`).
+/// `isset($obj->name)` / `empty($obj->name)` (`has_property` with
+/// `ZEND_PROPERTY_ISSET` / `ZEND_PROPERTY_NOT_EMPTY`).
 pub fn isset_prop(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &PhpStr, empty: bool) -> PResult<bool> {
-    if let Some(h) = obj.class().handlers.has_property {
-        if let Some(b) = h(vm, obj, name, empty)? {
+    let check = if empty { PropertyCheck::NotEmpty } else { PropertyCheck::Isset };
+    has_property(vm, scope, obj, name, check)
+}
+
+/// The object's `has_property` handler (custom handlers first, then
+/// `zend_std_has_property`).
+pub fn has_property(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &PhpStr, check: PropertyCheck) -> PResult<bool> {
+    let handlers = obj.class().handlers;
+    if let Some(h) = handlers.has_property_mode {
+        if let Some(b) = h(vm, obj, name, check)? {
             return Ok(b);
         }
+    } else if let Some(h) = handlers.has_property {
+        if check != PropertyCheck::Exists {
+            if let Some(b) = h(vm, obj, name, check == PropertyCheck::NotEmpty)? {
+                return Ok(b);
+            }
+        }
+    } else if let Some(h) = handlers.read_property {
+        // Handler-provided (virtual) properties of internal classes that
+        // only customise reads.
+        if let Some(v) = h(vm, obj, name)? {
+            return match check {
+                PropertyCheck::Exists => Ok(true),
+                PropertyCheck::Isset => Ok(!v.unref().is_null()),
+                PropertyCheck::NotEmpty => super::eval::to_bool(vm, &v.unref()),
+            };
+        }
     }
+    std_has_property(vm, scope, obj, name, check)
+}
+
+/// `zend_std_has_property`.
+fn std_has_property(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &PhpStr, check: PropertyCheck) -> PResult<bool> {
     let class = obj.class().clone();
     let lookup = lookup_prop(vm, &class, name, scope);
-    let check = |vm: &mut Vm, v: &Value| -> PResult<bool> {
-        if empty {
-            super::eval::to_bool(vm, &v.unref())
-        } else {
-            Ok(!v.unref().is_null())
+    let found = |vm: &mut Vm, v: &Value| -> PResult<bool> {
+        match check {
+            PropertyCheck::NotEmpty => super::eval::to_bool(vm, &v.unref()),
+            PropertyCheck::Isset => Ok(!v.unref().is_null()),
+            PropertyCheck::Exists => Ok(true),
         }
     };
     let mut slot: Option<usize> = None;
     match &lookup {
         Lookup::Declared(info) => {
-            let mut s = info.slot;
+            let s = info.slot;
             if let Some(hooks) = prop_hooks(info) {
-                match &hooks.get {
-                    None => {
-                        if is_virtual(info) {
-                            return Err(set_only_error(vm, &class, name));
-                        }
+                if check == PropertyCheck::Exists {
+                    if is_virtual(info) {
+                        return Ok(true);
                     }
-                    Some(get) => {
-                        if should_call_hook(vm, info, obj) {
-                            let get = get.clone();
-                            let strict = caller_strict(vm);
-                            let rv = call_on(vm, obj, &get, Vec::new(), strict)?;
-                            return check(vm, &rv);
+                } else {
+                    match &hooks.get {
+                        None => {
+                            if is_virtual(info) {
+                                return Err(set_only_error(vm, &class, name));
+                            }
                         }
-                        if is_virtual(info) {
-                            return Err(no_backing_error(vm, &class, name, true));
+                        Some(get) => {
+                            if should_call_hook(vm, info, obj) {
+                                let get = get.clone();
+                                let strict = caller_strict(vm);
+                                let rv = call_on(vm, obj, &get, Vec::new(), strict)?;
+                                return found(vm, &rv);
+                            }
+                            if is_virtual(info) {
+                                return Err(no_backing_error(vm, &class, name, true));
+                            }
                         }
                     }
                 }
-                s = info.slot;
             }
             let v = slot_value(obj, s);
             if !v.is_undef() {
-                return check(vm, &v);
+                return found(vm, &v);
             }
             if info.ty.is_some() && slot_uninit(obj, s) {
                 // Skip __isset() for uninitialized typed properties.
@@ -1322,14 +1378,15 @@ pub fn isset_prop(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &Ph
         Lookup::Dynamic => {
             let v = obj.obj().dyn_props.borrow().as_ref().and_then(|d| d.get_str(name).cloned());
             if let Some(v) = v {
-                return check(vm, &v);
+                return found(vm, &v);
             }
         }
         Lookup::Denied(_) | Lookup::BadName => {}
     }
-    if class.magic.isset.is_none() || guard_get(obj, name, IN_ISSET) {
+    if check == PropertyCheck::Exists || class.magic.isset.is_none() || guard_get(obj, name, IN_ISSET) {
         return Ok(false);
     }
+    let empty = check == PropertyCheck::NotEmpty;
     guard_set(obj, name, IN_ISSET, true);
     let r = (|| -> PResult<bool> {
         let rv = call_magic(vm, obj, b"__isset", vec![Value::String(name.clone())])?;
@@ -1873,6 +1930,12 @@ impl Vm {
     /// `__get`, visibility, uninitialised typed property errors).
     pub fn read_property(&mut self, obj: &ObjRef, name: &[u8], scope: Option<&ClassRef>) -> PResult<Value> {
         read_prop(self, scope, obj, &PhpStr::from_bytes(name), false)
+    }
+
+    /// `has_property` (`isset()`, `empty()`, `property_exists()` semantics
+    /// per `check`) from `scope`, through the class's handlers.
+    pub fn has_property(&mut self, obj: &ObjRef, name: &[u8], check: PropertyCheck, scope: Option<&ClassRef>) -> PResult<bool> {
+        has_property(self, scope, obj, &PhpStr::from_bytes(name), check)
     }
 
     /// Writes `$obj->name = $value` with php-src semantics from `scope`.
