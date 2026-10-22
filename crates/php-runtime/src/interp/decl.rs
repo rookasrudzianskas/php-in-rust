@@ -927,6 +927,9 @@ fn abstract_hooks(ce: &ClassEntry) -> Vec<String> {
 
 /// `#[\Override]` on properties and hooks without a parent.
 fn check_property_overrides(vm: &mut Vm, ce: &ClassEntry, def: &ClassDef) -> PResult<()> {
+    if def.kind == ClassKindIr::Trait {
+        return Ok(());
+    }
     let cname = display_class_name(&def.name);
     for p in &def.props {
         let Some(info) = ce.properties.get(&p.name) else { continue };
