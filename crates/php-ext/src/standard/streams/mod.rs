@@ -25,6 +25,7 @@ pub mod context;
 pub mod filter;
 pub mod glob;
 pub mod glob_wrapper;
+pub mod ini;
 pub mod memory;
 pub mod php_wrapper;
 pub mod plain;
@@ -234,6 +235,7 @@ pub fn read_all(vm: &mut Vm, path: &[u8]) -> PResult<Option<Vec<u8>>> {
 
 pub fn register(r: &mut Registry) {
     user_wrapper::register(r);
+    ini::register(r);
 
     // main/streams/userspace.stub.php
     for (n, v) in [
