@@ -2,6 +2,7 @@
 //! php-src's `ext/mbstring/tests/*.phpt`.
 
 pub mod encoding_tests;
+mod case_width;
 mod functions;
 mod strings;
 
