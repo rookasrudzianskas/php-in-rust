@@ -617,6 +617,18 @@ pub enum PfaExpr {
     PipeCall(Expr, Slot, Expr),
     /// The pipe operand stored in a hidden slot (taken on read).
     PipeArg(Slot),
+    /// `call_user_func()` / `call_user_func_array()` compiled to
+    /// `ZEND_INIT_USER_CALL` + `ZEND_SEND_USER` / `ZEND_SEND_ARRAY`.
+    UserCall(Box<UserCallExpr>),
+}
+
+pub struct UserCallExpr {
+    /// `call_user_func` or `call_user_func_array`.
+    pub name: PhpStr,
+    pub array: bool,
+    pub callable: Expr,
+    pub args: Vec<Expr>,
+    pub line: u32,
 }
 
 pub struct ClosureExpr {

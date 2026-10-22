@@ -398,8 +398,18 @@ fn closure_from_callable(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
             return Ok(v);
         }
     }
-    match super::call::check_callable(vm, &v, false) {
-        Ok(info) => closure_from_target(vm, info.target),
+    // zend_create_closure_from_callable (ZPP takes any zval).
+    match super::callable::is_callable_or_throw(vm, &v, false)? {
+        Ok(info) => {
+            let t = info.target;
+            // `[$closure, "__invoke"]` is the closure itself.
+            if let Some(this) = &t.this {
+                if closure_data(this).is_some() && t.func.name.eq_ignore_ascii_case(b"__invoke") && t.func.is_native() {
+                    return Ok(Value::Object(this.clone()));
+                }
+            }
+            closure_from_target(vm, t)
+        }
         Err(msg) => Err(vm.throw_type_error(format!("Failed to create closure from callable: {msg}"))),
     }
 }
@@ -426,7 +436,7 @@ static CALL: NativeFunction = NativeFunction {
     handler: closure_call,
 };
 static FROM_CALLABLE: NativeFunction = NativeFunction {
-    sig: "public static function fromCallable(callable $callback): Closure {}",
+    sig: "public static function fromCallable(mixed $callback): Closure {}",
     handler: closure_from_callable,
 };
 static INVOKE: NativeFunction = NativeFunction {

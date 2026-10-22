@@ -18,6 +18,7 @@
 
 pub mod builtins;
 pub mod call;
+pub mod callable;
 pub mod closure;
 pub mod decl;
 pub mod env;
@@ -218,7 +219,13 @@ impl Host for Interp {
     }
 
     fn check_callable(&self, vm: &mut Vm, callable: &Value) -> Result<PhpStr, String> {
-        call::check_callable(vm, callable, false).map(|c| c.name)
+        // ZPP (`zend_fcall_info_init`): deprecations are emitted.
+        let r = callable::is_callable_ex(vm, callable, false);
+        let _ = callable::take_pending();
+        match r {
+            Ok(r) => r.map(|c| c.name),
+            Err(_) => call::check_callable(vm, callable, false).map(|c| c.name),
+        }
     }
 
     fn run_destructor(&self, vm: &mut Vm, obj: &ObjRef) -> PResult<()> {

@@ -53,6 +53,7 @@ pub fn eval_pfa(vm: &mut Vm, cx: &Ctx, p: &PfaExpr) -> PResult<Value> {
             cx.env.vars.borrow_mut()[s as usize] = Value::Undef;
             r
         }
+        PfaExpr::UserCall(u) => call::eval_user_call(vm, cx, u),
         PfaExpr::PipeArg(slot) => {
             let s = cx.slot(*slot);
             let v = std::mem::take(&mut cx.env.vars.borrow_mut()[s as usize]);

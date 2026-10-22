@@ -828,18 +828,9 @@ fn is_callable(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
     let v = a.get(0).clone();
     let syntax_only = a.bool(1);
     let ok = if syntax_only {
-        match &v {
-            Value::String(_) => true,
-            Value::Array(arr) => {
-                arr.len() == 2
-                    && matches!(arr.get_int(0).map(Value::unref), Some(Value::String(_)) | Some(Value::Object(_)))
-                    && matches!(arr.get_int(1).map(Value::unref), Some(Value::String(_)))
-            }
-            Value::Object(o) => super::closure::closure_data(o).is_some() || o.class().find_method(b"__invoke").is_some(),
-            _ => false,
-        }
+        super::callable::is_callable_syntax(&v)
     } else {
-        call::check_callable(vm, &v, false).is_ok()
+        super::callable::is_callable_or_throw(vm, &v, false)?.is_ok()
     };
     if a.is_passed(2) {
         let name = callable_name(vm, &v);
@@ -849,25 +840,8 @@ fn is_callable(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
 }
 
 /// `zend_get_callable_name`.
-pub fn callable_name(_vm: &mut Vm, v: &Value) -> PhpStr {
-    match &*v.deref() {
-        Value::String(s) => s.clone(),
-        Value::Array(a) => {
-            let t = a.get_int(0).map(Value::unref);
-            let m = a.get_int(1).map(Value::unref);
-            let cls = match &t {
-                Some(Value::Object(o)) => o.class().name.to_string(),
-                Some(Value::String(s)) => s.to_string(),
-                _ => return PhpStr::from("Array"),
-            };
-            match m {
-                Some(Value::String(m)) => PhpStr::from(format!("{cls}::{m}")),
-                _ => PhpStr::from("Array"),
-            }
-        }
-        Value::Object(o) => PhpStr::from(format!("{}::__invoke", o.class().name)),
-        other => PhpStr::from(format!("{}", other.type_name())),
-    }
+pub fn callable_name(vm: &mut Vm, v: &Value) -> PhpStr {
+    super::callable::callable_name(vm, v)
 }
 
 // ----- compact / extract -------------------------------------------------------------------

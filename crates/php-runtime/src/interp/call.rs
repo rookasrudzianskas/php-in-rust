@@ -289,6 +289,110 @@ pub fn eval_call(vm: &mut Vm, cx: &Ctx, c: &CallExpr) -> PResult<Value> {
     }
 }
 
+/// `zend_param_must_be_ref`.
+fn param_must_be_ref_warning(vm: &mut Vm, func: &Function, i: usize) -> PResult<()> {
+    let sig = func.signature();
+    let mut msg = format!("{}(): Argument #{}", func.display_name(), i + 1);
+    if i < sig.num_args() {
+        msg.push_str(&format!(" (${})", sig.params[i].name));
+    }
+    msg.push_str(" must be passed by reference, value given");
+    vm.engine_warning(msg)
+}
+
+/// `ZEND_INIT_USER_CALL` + `ZEND_SEND_USER`/`ZEND_SEND_ARRAY` + `ZEND_DO_FCALL`:
+/// `call_user_func()` / `call_user_func_array()` called directly.
+pub fn eval_user_call(vm: &mut Vm, cx: &Ctx, u: &UserCallExpr) -> PResult<Value> {
+    let cb = eval(vm, cx, &u.callable)?;
+    vm.current_line = u.line;
+    let r = super::callable::is_callable_ex(vm, &cb, false)?;
+    let pending = super::callable::take_pending();
+    let info = match r {
+        Ok(info) => {
+            if let Some(e) = pending {
+                return Err(e);
+            }
+            info
+        }
+        Err(msg) => {
+            let e = vm.throw_type_error(format!(
+                "{}(): Argument #1 ($callback) must be a valid callback, {msg}",
+                u.name
+            ));
+            if let (Flow::Exception(new), Some(Flow::Exception(old))) = (&e, pending) {
+                super::exec::chain_previous(new, old);
+            }
+            return Err(e);
+        }
+    };
+    let t = info.target;
+    let magic = t.magic_name.is_some();
+    let mut b = Bound::default();
+    if !u.array {
+        for (i, e) in u.args.iter().enumerate() {
+            let v = eval(vm, cx, e)?.into_unref();
+            vm.current_line = u.line;
+            let (by_ref, prefer) = if magic { (false, false) } else { param_by_ref(&t.func, i) };
+            if by_ref && !prefer {
+                param_must_be_ref_warning(vm, &t.func, i)?;
+                b.positional.push(Value::Ref(PhpRef::new(v)));
+            } else {
+                b.positional.push(v);
+            }
+        }
+    } else {
+        let args = eval(vm, cx, &u.args[0])?.into_unref();
+        vm.current_line = u.line;
+        let Value::Array(arr) = args else {
+            return Err(vm.throw_type_error(format!(
+                "call_user_func_array(): Argument #2 ($args) must be of type array, {} given",
+                args.value_name()
+            )));
+        };
+        for (k, v) in arr.iter() {
+            let idx = match &k {
+                ArrayKey::Str(name) => param_index_by_name(&t.func, name).unwrap_or(usize::MAX),
+                ArrayKey::Int(_) => {
+                    if !b.named.is_empty() {
+                        return Err(vm.throw_error("Error", "Cannot use positional argument after named argument"));
+                    }
+                    b.positional.len()
+                }
+            };
+            let (by_ref, prefer) = if magic {
+                (false, false)
+            } else if idx == usize::MAX {
+                match t.func.signature().variadic() {
+                    Some(p) => (p.by_ref, p.prefer_ref),
+                    None => (false, false),
+                }
+            } else {
+                param_by_ref(&t.func, idx)
+            };
+            let v = if by_ref {
+                if v.is_ref() {
+                    v.clone()
+                } else if !prefer {
+                    param_must_be_ref_warning(vm, &t.func, idx.min(t.func.signature().num_args()))?;
+                    Value::Ref(PhpRef::new(v.clone()))
+                } else {
+                    v.clone()
+                }
+            } else if magic {
+                v.clone()
+            } else {
+                v.unref()
+            };
+            match k {
+                ArrayKey::Str(name) => b.named.push((name, v)),
+                ArrayKey::Int(_) => b.positional.push(v),
+            }
+        }
+    }
+    let caller = caller_of(vm, cx);
+    call_target(vm, t, b, &caller, true)
+}
+
 /// `$x |> $callable` compiled as `($callable)($x)` (`zend_compile_pipe`).
 pub fn eval_pipe(vm: &mut Vm, cx: &Ctx, lhs: &Expr, rhs: &Expr, line: u32) -> PResult<Value> {
     let arg = eval(vm, cx, lhs)?.into_unref();
@@ -884,7 +988,7 @@ pub fn type_matches_in(vm: &mut Vm, ty: &TypeDecl, v: &Value, scope: Option<&Cla
                     return Ok(true);
                 }
             }
-            if m & mask::CALLABLE != 0 && check_callable(vm, v, false).is_ok() {
+            if m & mask::CALLABLE != 0 && super::callable::is_callable_or_throw(vm, v, false)?.is_ok() {
                 return Ok(true);
             }
             Ok(false)
@@ -894,7 +998,7 @@ pub fn type_matches_in(vm: &mut Vm, ty: &TypeDecl, v: &Value, scope: Option<&Cla
                 return Ok(true);
             }
             if m & mask::CALLABLE != 0 && matches!(other, Value::String(_) | Value::Array(_)) {
-                return Ok(check_callable(vm, other, false).is_ok());
+                return Ok(super::callable::is_callable_or_throw(vm, other, false)?.is_ok());
             }
             Ok(false)
         }
@@ -940,7 +1044,7 @@ fn visibility_word(flags: u32) -> &'static str {
 }
 
 /// Root class of a method for protected checks (`zend_get_function_root_class`).
-fn method_root_class(m: &Function, vm: &Vm) -> PhpStr {
+pub(crate) fn method_root_class(m: &Function, vm: &Vm) -> PhpStr {
     let decl = m.scope.clone().unwrap_or_default();
     let mut root = decl.clone();
     let mut c = vm.find_class(&decl).and_then(|c| c.parent.clone());
@@ -1427,220 +1531,11 @@ pub fn calling_env(vm: &mut Vm) -> Rc<Env> {
 /// `zend_is_callable_ex`: resolves a callable value or returns the error text
 /// used in "must be a valid callback, ..." messages.
 pub fn check_callable(vm: &mut Vm, v: &Value, _syntax_only: bool) -> Result<CallableInfo, String> {
-    let scope = calling_scope(vm);
-    let env = calling_env(vm);
-    match &*v.deref() {
-        Value::String(s) => {
-            if let Some(pos) = s.windows(2).position(|w| w == b"::") {
-                let cls = &s[..pos];
-                let m = PhpStr::from_bytes(&s[pos + 2..]);
-                let class = match vm.lookup_class(cls) {
-                    Ok(Some(c)) => c,
-                    _ => return Err(format!("class \"{}\" not found", String::from_utf8_lossy(cls))),
-                };
-                return static_callable(vm, &env, scope.as_ref(), &class, &m, s.clone());
-            }
-            let name = s.strip_prefix(b"\\").unwrap_or(s);
-            match vm.find_function(name) {
-                Some(f) => Ok(CallableInfo {
-                    name: f.name.clone(),
-                    target: Target {
-                        func: f,
-                        this: None,
-                        called: None,
-                        closure: None,
-                        magic_name: None,
-                    },
-                }),
-                None => Err(format!("function \"{s}\" not found or invalid function name")),
-            }
-        }
-        Value::Array(a) => {
-            if a.len() != 2 {
-                return Err("array callback must have exactly two members".into());
-            }
-            let (Some(t), Some(m)) = (a.get_int(0).map(Value::unref), a.get_int(1).map(Value::unref)) else {
-                return Err("array callback must have exactly two members".into());
-            };
-            let Value::String(m) = m else {
-                return Err("second array member is not a valid method".into());
-            };
-            match t {
-                Value::Object(o) => {
-                    let class = o.class().clone();
-                    let (m2, cls_override) = split_parent_method(&m);
-                    let lookup_class = match &cls_override {
-                        Some(c) if c.eq_ignore_ascii_case(b"parent") => class.parent.clone().unwrap_or(class.clone()),
-                        _ => class.clone(),
-                    };
-                    let lc = m2.to_ascii_lowercase();
-                    match lookup_class.methods.get(&lc).cloned() {
-                        Some(f) => {
-                            if !method_visible(vm, &f, scope.as_ref()) {
-                                if class.magic.call.is_some() {
-                                    return Ok(CallableInfo {
-                                        name: PhpStr::from(format!("{}::{}", class.name, m2)),
-                                        target: magic_call_target(&class, &o, &m2),
-                                    });
-                                }
-                                return Err(format!(
-                                    "cannot access {} method {}::{}()",
-                                    visibility_word(f.flags),
-                                    class.name,
-                                    f.name
-                                ));
-                            }
-                            let this = if f.is_static() { None } else { Some(o.clone()) };
-                            Ok(CallableInfo {
-                                name: PhpStr::from(format!("{}::{}", class.name, f.name)),
-                                target: Target {
-                                    func: f,
-                                    this,
-                                    called: Some(class.clone()),
-                                    closure: None,
-                                    magic_name: None,
-                                },
-                            })
-                        }
-                        None => {
-                            if class.magic.call.is_some() {
-                                return Ok(CallableInfo {
-                                    name: PhpStr::from(format!("{}::{}", class.name, m2)),
-                                    target: magic_call_target(&class, &o, &m2),
-                                });
-                            }
-                            Err(format!("class {} does not have a method \"{}\"", class.name, m2))
-                        }
-                    }
-                }
-                Value::String(c) => {
-                    let class = match vm.lookup_class(&c) {
-                        Ok(Some(c)) => c,
-                        _ => return Err(format!("class \"{c}\" not found")),
-                    };
-                    let full = PhpStr::from(format!("{}::{}", class.name, m));
-                    static_callable(vm, &env, scope.as_ref(), &class, &m, full)
-                }
-                _ => Err("first array member is not a valid class name or object".into()),
-            }
-        }
-        Value::Object(o) => {
-            if let Some(c) = super::closure::closure_data(o) {
-                return Ok(CallableInfo {
-                    name: PhpStr::from("Closure::__invoke"),
-                    target: Target {
-                        func: c.func.clone(),
-                        this: c.this.clone(),
-                        called: c.called.clone(),
-                        closure: Some(c),
-                        magic_name: None,
-                    },
-                });
-            }
-            match o.class().find_method(b"__invoke").cloned() {
-                Some(m) => Ok(CallableInfo {
-                    name: PhpStr::from(format!("{}::__invoke", o.class().name)),
-                    target: Target {
-                        func: m,
-                        this: Some(o.clone()),
-                        called: Some(o.class().clone()),
-                        closure: None,
-                        magic_name: None,
-                    },
-                }),
-                None => Err("no array or string given".into()),
-            }
-        }
-        _ => Err("no array or string given".into()),
-    }
-}
-
-fn split_parent_method(m: &PhpStr) -> (PhpStr, Option<PhpStr>) {
-    if let Some(pos) = m.windows(2).position(|w| w == b"::") {
-        return (PhpStr::from_bytes(&m[pos + 2..]), Some(PhpStr::from_bytes(&m[..pos])));
-    }
-    (m.clone(), None)
-}
-
-fn method_visible(vm: &Vm, f: &Function, scope: Option<&ClassRef>) -> bool {
-    if f.flags & member_flags::PRIVATE != 0 {
-        return scope.is_some_and(|s| f.scope.as_ref().is_some_and(|c| c.eq_ignore_ascii_case(&s.name)));
-    }
-    if f.flags & member_flags::PROTECTED != 0 {
-        let root = method_root_class(f, vm);
-        return super::objects::protected_ok(&root, scope, vm);
-    }
-    true
-}
-
-fn static_callable(vm: &mut Vm, env: &Env, scope: Option<&ClassRef>, class: &ClassRef, m: &PhpStr, name: PhpStr) -> Result<CallableInfo, String> {
-    let lc = m.to_ascii_lowercase();
-    let this_compat = env.this.as_ref().filter(|t| t.class().instance_of(class)).cloned();
-    match class.methods.get(&lc).cloned() {
-        Some(f) => {
-            if !method_visible(vm, &f, scope) {
-                if class.magic.call_static.is_some() {
-                    return Ok(CallableInfo {
-                        name,
-                        target: magic_static_target(class, m),
-                    });
-                }
-                return Err(format!(
-                    "cannot access {} method {}::{}()",
-                    visibility_word(f.flags),
-                    class.name,
-                    f.name
-                ));
-            }
-            if !f.is_static() {
-                match this_compat {
-                    Some(t) => {
-                        let called = Some(t.class().clone());
-                        return Ok(CallableInfo {
-                            name,
-                            target: Target {
-                                func: f,
-                                this: Some(t),
-                                called,
-                                closure: None,
-                                magic_name: None,
-                            },
-                        });
-                    }
-                    None => {
-                        return Err(format!(
-                            "non-static method {}::{}() cannot be called statically",
-                            class.name, f.name
-                        ));
-                    }
-                }
-            }
-            Ok(CallableInfo {
-                name,
-                target: Target {
-                    func: f,
-                    this: None,
-                    called: Some(class.clone()),
-                    closure: None,
-                    magic_name: None,
-                },
-            })
-        }
-        None => {
-            if let (Some(t), true) = (&this_compat, class.magic.call.is_some()) {
-                return Ok(CallableInfo {
-                    name,
-                    target: magic_call_target(class, t, m),
-                });
-            }
-            if class.magic.call_static.is_some() {
-                return Ok(CallableInfo {
-                    name,
-                    target: magic_static_target(class, m),
-                });
-            }
-            Err(format!("class {} does not have a method \"{}\"", class.name, m))
-        }
+    let r = super::callable::is_callable_ex(vm, v, true);
+    let _ = super::callable::take_pending();
+    match r {
+        Ok(r) => r,
+        Err(_) => Err(format!("class \"{}\" not found", super::callable::callable_name(vm, v))),
     }
 }
 

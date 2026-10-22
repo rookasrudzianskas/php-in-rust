@@ -915,6 +915,30 @@ impl Lowerer<'_> {
             ) {
                 self.fs.flags |= code_flags::DYNAMIC_VARS;
             }
+            if is_fq_builtin
+                && matches!(lc.as_bytes(), b"call_user_func" | b"call_user_func_array")
+                && !args.is_callable_convert()
+                && args.args.iter().all(|a| matches!(a, ast::Arg::Positional(_)))
+            {
+                // zend_compile_func_cuf / zend_compile_func_cufa.
+                let array = lc.as_bytes() == b"call_user_func_array";
+                let n_args = args.args.len();
+                if (!array && n_args >= 1) || (array && n_args == 2) {
+                    let mut exprs = Vec::with_capacity(n_args);
+                    for a in &args.args {
+                        let ast::Arg::Positional(e) = a else { unreachable!() };
+                        exprs.push(self.expr(e)?);
+                    }
+                    let callable = exprs.remove(0);
+                    return Ok(Expr::Pfa(Box::new(PfaExpr::UserCall(Box::new(UserCallExpr {
+                        name: PhpStr::from_bytes(lc.as_bytes()),
+                        array,
+                        callable,
+                        args: exprs,
+                        line,
+                    })))));
+                }
+            }
             if args.is_callable_convert() {
                 let c = self.named_callee(n);
                 if !is_fcc(args) {
