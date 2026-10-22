@@ -313,9 +313,12 @@ enum Visibility {
     Fail,
 }
 
+/// An unmangled property name: the class part (if mangled) and the name.
+type Unmangled<'k> = (Option<&'k [u8]>, &'k [u8]);
+
 /// `zend_unmangle_property_name_ex`: `Ok(None)` for malformed names (after
-/// the notice), else the class part (if mangled) and the property name.
-fn unmangle<'k>(vm: &mut Vm, key: &'k [u8]) -> PResult<Option<(Option<&'k [u8]>, &'k [u8])>> {
+/// the notice).
+fn unmangle<'k>(vm: &mut Vm, key: &'k [u8]) -> PResult<Option<Unmangled<'k>>> {
     if key.is_empty() || key[0] != 0 {
         return Ok(Some((None, key)));
     }
@@ -689,8 +692,7 @@ impl Parser<'_> {
         if !hash {
             return Ok(false);
         }
-        if elements < 0
-            || elements >= HT_MAX_SIZE
+        if !(0..HT_MAX_SIZE).contains(&elements)
             || elements as u64 > (self.max() - cursor) as u64 / 2
         {
             return Ok(false);

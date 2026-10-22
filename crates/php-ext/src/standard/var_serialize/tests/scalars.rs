@@ -155,6 +155,7 @@ fn floats_and_precision() {
     );
     let s1 = ser(&mut t, Value::Float(85.29e-23));
     assert!(s1.starts_with("d:8.52") && s1.ends_with("E-22;"), "{s1}");
+    #[allow(clippy::excessive_precision)]
     let f = 1.428571428571428647642857142;
     let back = round_trip(&mut t, Value::Float(f));
     assert!(back.identical(&Value::Float(f)));
