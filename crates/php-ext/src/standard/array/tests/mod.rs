@@ -20,6 +20,7 @@ mod iter;
 mod merge;
 mod setops;
 mod sort;
+mod unique;
 
 // ---------------------------------------------------------------------------
 // PHP literal parser
