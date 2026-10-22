@@ -31,6 +31,9 @@ pub struct BasicState {
     /// The parsed php.ini / `-d` configuration (`cfg_get_entry()`), as
     /// `get_cfg_var()` reports it. Filled with [`set_cfg_entry`].
     pub cfg: Vec<(PhpStr, Value)>,
+    /// `$_SERVER['HTTP_USER_AGENT']` for `get_browser()`; the interpreter
+    /// records it with [`set_http_user_agent`] when the superglobal exists.
+    pub http_user_agent: Option<PhpStr>,
     /// `PG(connection_status)`.
     pub connection_status: i64,
     /// `PG(in_error_log)`: guards `php_log_err()` against recursion.
@@ -45,6 +48,11 @@ pub fn set_main_script(vm: &mut Vm, path: impl Into<PhpStr>) {
 /// Records `$_SERVER['argv']` for `getopt()`.
 pub fn set_argv(vm: &mut Vm, argv: Vec<PhpStr>) {
     vm.ext_data::<BasicState>().argv = Some(argv);
+}
+
+/// Records `$_SERVER['HTTP_USER_AGENT']` for `get_browser()`.
+pub fn set_http_user_agent(vm: &mut Vm, ua: impl Into<PhpStr>) {
+    vm.ext_data::<BasicState>().http_user_agent = Some(ua.into());
 }
 
 /// Records a php.ini / `-d` entry for `get_cfg_var()`. `value` is a string,
