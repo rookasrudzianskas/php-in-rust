@@ -10,3 +10,4 @@
 /.claude/
 /tests/phpt/**/*.sh
 /tests/phpt/**/*.stdin
+/.toolchain/
