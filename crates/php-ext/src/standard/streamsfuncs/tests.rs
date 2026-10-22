@@ -921,3 +921,48 @@ fn implicitly_dropped_filtered_stream_flushes_its_filters() {
     let r = t.call("file_get_contents", vec![s(&f)]).unwrap();
     assert_eq!(bytes(&r), b"YWJjZA==");
 }
+
+#[test]
+fn filter_params_reach_the_factory() {
+    let mut t = TestVm::new();
+    let fp = t.call("fopen", vec![s("php://memory"), s("w+")]).unwrap();
+    let mut p = PhpArray::new();
+    p.insert_str("line-length", 8i64);
+    p.insert_str("line-break-chars", "\n");
+    t.call(
+        "stream_filter_append",
+        vec![
+            fp.clone(),
+            s("convert.base64-encode"),
+            Value::Int(2),
+            Value::from(p),
+        ],
+    )
+    .unwrap();
+    t.call("fwrite", vec![fp.clone(), s("abcdefghijkl")])
+        .unwrap();
+    t.call("fclose", vec![fp.clone()]).unwrap();
+    let (cls, _) = thrown(t.call("rewind", vec![fp]));
+    assert_eq!(cls, "TypeError");
+    // round trip through a temp file to see the encoded data
+    let d = scratch("b64");
+    let f = format!("{d}/b");
+    let fp = t.call("fopen", vec![s(&f), s("w")]).unwrap();
+    let mut p = PhpArray::new();
+    p.insert_str("line-length", 8i64);
+    p.insert_str("line-break-chars", "\n");
+    t.call(
+        "stream_filter_append",
+        vec![
+            fp.clone(),
+            s("convert.base64-encode"),
+            Value::Int(2),
+            Value::from(p),
+        ],
+    )
+    .unwrap();
+    t.call("fwrite", vec![fp.clone(), s("abcdefghijkl")])
+        .unwrap();
+    t.call("fclose", vec![fp]).unwrap();
+    assert_eq!(std::fs::read(&f).unwrap(), b"YWJjZGVm\nZ2hpamts");
+}
