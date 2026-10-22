@@ -916,3 +916,57 @@ fn mac_line_endings_with_auto_detect() {
     let r = t.call("file", vec![s(&f)]).unwrap();
     assert_eq!(r.as_array().unwrap().len(), 3);
 }
+
+#[test]
+fn fputcsv_and_fgetcsv_on_files() {
+    let mut t = TestVm::new();
+    let d = scratch("csv");
+    let f = format!("{d}/c.csv");
+    let fp = t.call("fopen", vec![s(&f), s("w+")]).unwrap();
+    let row = Value::from(php_runtime::PhpArray::from_values(vec![
+        s("a"),
+        s("b c"),
+        s("q\"uote"),
+        Value::Int(5),
+    ]));
+    let n = t
+        .call("fputcsv", vec![fp.clone(), row, s(","), s("\""), s("")])
+        .unwrap();
+    assert_eq!(n.as_int(), Some(20));
+    t.call("fwrite", vec![fp.clone(), s("x,\"multi\nline\",y\n")])
+        .unwrap();
+    t.call("rewind", vec![fp.clone()]).unwrap();
+    let get = |t: &mut TestVm| -> Vec<Vec<u8>> {
+        match t
+            .call(
+                "fgetcsv",
+                vec![fp.clone(), Value::Null, s(","), s("\""), s("")],
+            )
+            .unwrap()
+        {
+            Value::Array(a) => a.values().map(as_bytes).collect(),
+            o => panic!("{o:?}"),
+        }
+    };
+    assert_eq!(
+        get(&mut t),
+        vec![
+            b"a".to_vec(),
+            b"b c".to_vec(),
+            b"q\"uote".to_vec(),
+            b"5".to_vec()
+        ]
+    );
+    assert_eq!(
+        get(&mut t),
+        vec![b"x".to_vec(), b"multi\nline".to_vec(), b"y".to_vec()]
+    );
+    let r = t
+        .call("fgetcsv", vec![fp, Value::Null, s(","), s("\""), s("")])
+        .unwrap();
+    assert_eq!(r.as_bool(), Some(false));
+    assert_eq!(
+        std::fs::read(&f).unwrap()[..20].to_vec(),
+        b"a,\"b c\",\"q\"\"uote\",5\n"
+    );
+}
