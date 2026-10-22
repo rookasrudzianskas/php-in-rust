@@ -24,9 +24,7 @@ fn default_identify_list(lang: NoLanguage) -> &'static [NoEncoding] {
         NoLanguage::Japanese => &[E::Ascii, E::Jis, E::Utf8, E::EucJp, E::Sjis],
         NoLanguage::Korean => &[E::Ascii, E::Utf8, E::EucKr, E::Uhc],
         NoLanguage::TraditionalChinese => &[E::Ascii, E::Utf8, E::EucTw, E::Big5],
-        NoLanguage::SimplifiedChinese => {
-            &[E::Ascii, E::Utf8, E::EucCn, E::Cp936, E::Gb18030_2022]
-        }
+        NoLanguage::SimplifiedChinese => &[E::Ascii, E::Utf8, E::EucCn, E::Cp936, E::Gb18030_2022],
         NoLanguage::Russian => &[E::Ascii, E::Utf8, E::Koi8r, E::Cp1251, E::Cp866],
         NoLanguage::Armenian => &[E::Ascii, E::Utf8, E::Armscii8],
         NoLanguage::Turkish => &[E::Ascii, E::Utf8, E::Cp1254, E::Iso8859_9],
@@ -186,19 +184,30 @@ pub fn parse_encoding_list_raw(
 }
 
 /// `php_mb_parse_encoding_list` in function context (ValueError on failure).
-pub fn parse_encoding_list(vm: &mut Vm, value: &[u8], arg_num: usize) -> PResult<Vec<&'static Encoding>> {
+pub fn parse_encoding_list(
+    vm: &mut Vm,
+    value: &[u8],
+    arg_num: usize,
+) -> PResult<Vec<&'static Encoding>> {
     let default_list = globals(vm)?.default_detect_order_list;
     match parse_encoding_list_raw(value, default_list) {
         Ok(l) => Ok(l),
         Err(name) => Err(vm.argument_value_error(
             arg_num,
-            &format!("contains invalid encoding \"{}\"", String::from_utf8_lossy(&name)),
+            &format!(
+                "contains invalid encoding \"{}\"",
+                String::from_utf8_lossy(&name)
+            ),
         )),
     }
 }
 
 /// `php_mb_parse_encoding_array`.
-pub fn parse_encoding_array(vm: &mut Vm, arr: &PhpArray, arg_num: usize) -> PResult<Vec<&'static Encoding>> {
+pub fn parse_encoding_array(
+    vm: &mut Vm,
+    arr: &PhpArray,
+    arg_num: usize,
+) -> PResult<Vec<&'static Encoding>> {
     let default_list = globals(vm)?.default_detect_order_list;
     let mut list = Vec::new();
     let mut included_auto = false;
@@ -426,7 +435,11 @@ impl MbGlobals {
     pub fn populate_current_detect_order_list(&mut self) {
         self.current_detect_order_list = match &self.detect_order_list {
             Some(l) if !l.is_empty() => l.clone(),
-            _ => self.default_detect_order_list.iter().map(|&n| enc(n)).collect(),
+            _ => self
+                .default_detect_order_list
+                .iter()
+                .map(|&n| enc(n))
+                .collect(),
         };
     }
 
@@ -539,16 +552,20 @@ pub fn encoding_translation(vm: &Vm) -> bool {
 
 /// `php_mb_get_encoding`: the named encoding (ValueError for unknown names,
 /// deprecations for the non-text encodings) or the current internal one.
-pub fn get_encoding(vm: &mut Vm, name: Option<&PhpStr>, arg_num: usize) -> PResult<&'static Encoding> {
+pub fn get_encoding(
+    vm: &mut Vm,
+    name: Option<&PhpStr>,
+    arg_num: usize,
+) -> PResult<&'static Encoding> {
     let Some(name) = name else {
         return Ok(globals(vm)?.current_internal_encoding);
     };
     {
         let g = globals(vm)?;
-        if let (Some(last), Some(e)) = (&g.last_used_encoding_name, g.last_used_encoding) {
-            if last.eq_ignore_ascii_case(name) {
-                return Ok(e);
-            }
+        if let (Some(last), Some(e)) = (&g.last_used_encoding_name, g.last_used_encoding)
+            && last.eq_ignore_ascii_case(name)
+        {
+            return Ok(e);
         }
     }
     let Some(e) = name2encoding_cstr(name) else {
@@ -581,7 +598,10 @@ pub fn get_encoding(vm: &mut Vm, name: Option<&PhpStr>, arg_num: usize) -> PResu
 /// The current substitution settings (`MBSTRG(current_filter_illegal_*)`).
 pub fn illegal_settings(vm: &mut Vm) -> PResult<(u32, u32)> {
     let g = globals(vm)?;
-    Ok((g.current_filter_illegal_substchar, g.current_filter_illegal_mode))
+    Ok((
+        g.current_filter_illegal_substchar,
+        g.current_filter_illegal_mode,
+    ))
 }
 
 // ----- ini entries ------------------------------------------------------

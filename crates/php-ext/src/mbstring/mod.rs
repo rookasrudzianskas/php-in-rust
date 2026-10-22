@@ -37,55 +37,251 @@ macro_rules! native {
     };
 }
 
-native!(MB_LANGUAGE, "mb_language(?string $language = null): string|bool", info::mb_language);
-native!(MB_INTERNAL_ENCODING, "mb_internal_encoding(?string $encoding = null): string|bool", info::mb_internal_encoding);
-native!(MB_HTTP_INPUT, "mb_http_input(?string $type = null): array|string|false", info::mb_http_input);
-native!(MB_HTTP_OUTPUT, "mb_http_output(?string $encoding = null): string|bool", info::mb_http_output);
-native!(MB_DETECT_ORDER, "mb_detect_order(array|string|null $encoding = null): array|bool", info::mb_detect_order);
-native!(MB_SUBSTITUTE_CHARACTER, "mb_substitute_character(string|int|null $substitute_character = null): string|int|bool", info::mb_substitute_character);
-native!(MB_PREFERRED_MIME_NAME, "mb_preferred_mime_name(string $encoding): string|false", info::mb_preferred_mime_name);
-native!(MB_PARSE_STR, "/** @param array $result */ mb_parse_str(string $string, &$result): bool", gpc::mb_parse_str);
-native!(MB_OUTPUT_HANDLER, "mb_output_handler(string $string, int $status): string", output::mb_output_handler);
-native!(MB_STR_SPLIT, "mb_str_split(string $string, int $length = 1, ?string $encoding = null): array", strings::mb_str_split);
-native!(MB_STRLEN, "mb_strlen(string $string, ?string $encoding = null): int", strings::mb_strlen);
-native!(MB_STRPOS, "mb_strpos(string $haystack, string $needle, int $offset = 0, ?string $encoding = null): int|false", strings::mb_strpos);
-native!(MB_STRRPOS, "mb_strrpos(string $haystack, string $needle, int $offset = 0, ?string $encoding = null): int|false", strings::mb_strrpos);
-native!(MB_STRIPOS, "mb_stripos(string $haystack, string $needle, int $offset = 0, ?string $encoding = null): int|false", strings::mb_stripos);
-native!(MB_STRRIPOS, "mb_strripos(string $haystack, string $needle, int $offset = 0, ?string $encoding = null): int|false", strings::mb_strripos);
-native!(MB_STRSTR, "mb_strstr(string $haystack, string $needle, bool $before_needle = false, ?string $encoding = null): string|false", strings::mb_strstr);
-native!(MB_STRRCHR, "mb_strrchr(string $haystack, string $needle, bool $before_needle = false, ?string $encoding = null): string|false", strings::mb_strrchr);
-native!(MB_STRISTR, "mb_stristr(string $haystack, string $needle, bool $before_needle = false, ?string $encoding = null): string|false", strings::mb_stristr);
-native!(MB_STRRICHR, "mb_strrichr(string $haystack, string $needle, bool $before_needle = false, ?string $encoding = null): string|false", strings::mb_strrichr);
-native!(MB_SUBSTR_COUNT, "mb_substr_count(string $haystack, string $needle, ?string $encoding = null): int", strings::mb_substr_count);
-native!(MB_SUBSTR, "mb_substr(string $string, int $start, ?int $length = null, ?string $encoding = null): string", strings::mb_substr);
-native!(MB_STRCUT, "mb_strcut(string $string, int $start, ?int $length = null, ?string $encoding = null): string", strings::mb_strcut);
-native!(MB_STRWIDTH, "mb_strwidth(string $string, ?string $encoding = null): int", strings::mb_strwidth);
-native!(MB_STRIMWIDTH, "mb_strimwidth(string $string, int $start, int $width, string $trim_marker = \"\", ?string $encoding = null): string", strings::mb_strimwidth);
-native!(MB_CONVERT_ENCODING, "mb_convert_encoding(array|string $string, string $to_encoding, array|string|null $from_encoding = null): array|string|false", conversion::mb_convert_encoding);
-native!(MB_CONVERT_CASE, "mb_convert_case(string $string, int $mode, ?string $encoding = null): string", strings::mb_convert_case);
-native!(MB_STRTOUPPER, "mb_strtoupper(string $string, ?string $encoding = null): string", strings::mb_strtoupper);
-native!(MB_STRTOLOWER, "mb_strtolower(string $string, ?string $encoding = null): string", strings::mb_strtolower);
-native!(MB_UCFIRST, "mb_ucfirst(string $string, ?string $encoding = null): string", strings::mb_ucfirst);
-native!(MB_LCFIRST, "mb_lcfirst(string $string, ?string $encoding = null): string", strings::mb_lcfirst);
-native!(MB_TRIM, "mb_trim(string $string, ?string $characters = null, ?string $encoding = null): string", strings::mb_trim);
-native!(MB_LTRIM, "mb_ltrim(string $string, ?string $characters = null, ?string $encoding = null): string", strings::mb_ltrim);
-native!(MB_RTRIM, "mb_rtrim(string $string, ?string $characters = null, ?string $encoding = null): string", strings::mb_rtrim);
-native!(MB_DETECT_ENCODING, "mb_detect_encoding(string $string, array|string|null $encodings = null, bool $strict = false): string|false", conversion::mb_detect_encoding);
-native!(MB_LIST_ENCODINGS, "mb_list_encodings(): array", info::mb_list_encodings);
-native!(MB_ENCODING_ALIASES, "mb_encoding_aliases(string $encoding): array", info::mb_encoding_aliases);
-native!(MB_ENCODE_MIMEHEADER, "mb_encode_mimeheader(string $string, ?string $charset = null, ?string $transfer_encoding = null, string $newline = \"\\r\\n\", int $indent = 0): string", mime::mb_encode_mimeheader);
-native!(MB_DECODE_MIMEHEADER, "mb_decode_mimeheader(string $string): string", mime::mb_decode_mimeheader);
-native!(MB_CONVERT_KANA, "mb_convert_kana(string $string, string $mode = \"KV\", ?string $encoding = null): string", conversion::mb_convert_kana);
-native!(MB_CONVERT_VARIABLES, "mb_convert_variables(string $to_encoding, array|string $from_encoding, mixed &$var, mixed &...$vars): string|false", conversion::mb_convert_variables);
-native!(MB_ENCODE_NUMERICENTITY, "mb_encode_numericentity(string $string, array $map, ?string $encoding = null, bool $hex = false): string", conversion::mb_encode_numericentity);
-native!(MB_DECODE_NUMERICENTITY, "mb_decode_numericentity(string $string, array $map, ?string $encoding = null): string", conversion::mb_decode_numericentity);
-native!(MB_SEND_MAIL, "mb_send_mail(string $to, string $subject, string $message, array|string $additional_headers = [], ?string $additional_params = null): bool", mail::mb_send_mail);
-native!(MB_GET_INFO, "mb_get_info(string $type = \"all\"): array|string|int|false|null", info::mb_get_info);
-native!(MB_CHECK_ENCODING, "mb_check_encoding(array|string|null $value = null, ?string $encoding = null): bool", strings::mb_check_encoding);
-native!(MB_SCRUB, "mb_scrub(string $string, ?string $encoding = null): string", strings::mb_scrub);
-native!(MB_ORD, "mb_ord(string $string, ?string $encoding = null): int|false", strings::mb_ord);
-native!(MB_CHR, "mb_chr(int $codepoint, ?string $encoding = null): string|false", strings::mb_chr);
-native!(MB_STR_PAD, "mb_str_pad(string $string, int $length, string $pad_string = \" \", int $pad_type = STR_PAD_RIGHT, ?string $encoding = null): string", strings::mb_str_pad);
+native!(
+    MB_LANGUAGE,
+    "mb_language(?string $language = null): string|bool",
+    info::mb_language
+);
+native!(
+    MB_INTERNAL_ENCODING,
+    "mb_internal_encoding(?string $encoding = null): string|bool",
+    info::mb_internal_encoding
+);
+native!(
+    MB_HTTP_INPUT,
+    "mb_http_input(?string $type = null): array|string|false",
+    info::mb_http_input
+);
+native!(
+    MB_HTTP_OUTPUT,
+    "mb_http_output(?string $encoding = null): string|bool",
+    info::mb_http_output
+);
+native!(
+    MB_DETECT_ORDER,
+    "mb_detect_order(array|string|null $encoding = null): array|bool",
+    info::mb_detect_order
+);
+native!(
+    MB_SUBSTITUTE_CHARACTER,
+    "mb_substitute_character(string|int|null $substitute_character = null): string|int|bool",
+    info::mb_substitute_character
+);
+native!(
+    MB_PREFERRED_MIME_NAME,
+    "mb_preferred_mime_name(string $encoding): string|false",
+    info::mb_preferred_mime_name
+);
+native!(
+    MB_PARSE_STR,
+    "/** @param array $result */ mb_parse_str(string $string, &$result): bool",
+    gpc::mb_parse_str
+);
+native!(
+    MB_OUTPUT_HANDLER,
+    "mb_output_handler(string $string, int $status): string",
+    output::mb_output_handler
+);
+native!(
+    MB_STR_SPLIT,
+    "mb_str_split(string $string, int $length = 1, ?string $encoding = null): array",
+    strings::mb_str_split
+);
+native!(
+    MB_STRLEN,
+    "mb_strlen(string $string, ?string $encoding = null): int",
+    strings::mb_strlen
+);
+native!(
+    MB_STRPOS,
+    "mb_strpos(string $haystack, string $needle, int $offset = 0, ?string $encoding = null): int|false",
+    strings::mb_strpos
+);
+native!(
+    MB_STRRPOS,
+    "mb_strrpos(string $haystack, string $needle, int $offset = 0, ?string $encoding = null): int|false",
+    strings::mb_strrpos
+);
+native!(
+    MB_STRIPOS,
+    "mb_stripos(string $haystack, string $needle, int $offset = 0, ?string $encoding = null): int|false",
+    strings::mb_stripos
+);
+native!(
+    MB_STRRIPOS,
+    "mb_strripos(string $haystack, string $needle, int $offset = 0, ?string $encoding = null): int|false",
+    strings::mb_strripos
+);
+native!(
+    MB_STRSTR,
+    "mb_strstr(string $haystack, string $needle, bool $before_needle = false, ?string $encoding = null): string|false",
+    strings::mb_strstr
+);
+native!(
+    MB_STRRCHR,
+    "mb_strrchr(string $haystack, string $needle, bool $before_needle = false, ?string $encoding = null): string|false",
+    strings::mb_strrchr
+);
+native!(
+    MB_STRISTR,
+    "mb_stristr(string $haystack, string $needle, bool $before_needle = false, ?string $encoding = null): string|false",
+    strings::mb_stristr
+);
+native!(
+    MB_STRRICHR,
+    "mb_strrichr(string $haystack, string $needle, bool $before_needle = false, ?string $encoding = null): string|false",
+    strings::mb_strrichr
+);
+native!(
+    MB_SUBSTR_COUNT,
+    "mb_substr_count(string $haystack, string $needle, ?string $encoding = null): int",
+    strings::mb_substr_count
+);
+native!(
+    MB_SUBSTR,
+    "mb_substr(string $string, int $start, ?int $length = null, ?string $encoding = null): string",
+    strings::mb_substr
+);
+native!(
+    MB_STRCUT,
+    "mb_strcut(string $string, int $start, ?int $length = null, ?string $encoding = null): string",
+    strings::mb_strcut
+);
+native!(
+    MB_STRWIDTH,
+    "mb_strwidth(string $string, ?string $encoding = null): int",
+    strings::mb_strwidth
+);
+native!(
+    MB_STRIMWIDTH,
+    "mb_strimwidth(string $string, int $start, int $width, string $trim_marker = \"\", ?string $encoding = null): string",
+    strings::mb_strimwidth
+);
+native!(
+    MB_CONVERT_ENCODING,
+    "mb_convert_encoding(array|string $string, string $to_encoding, array|string|null $from_encoding = null): array|string|false",
+    conversion::mb_convert_encoding
+);
+native!(
+    MB_CONVERT_CASE,
+    "mb_convert_case(string $string, int $mode, ?string $encoding = null): string",
+    strings::mb_convert_case
+);
+native!(
+    MB_STRTOUPPER,
+    "mb_strtoupper(string $string, ?string $encoding = null): string",
+    strings::mb_strtoupper
+);
+native!(
+    MB_STRTOLOWER,
+    "mb_strtolower(string $string, ?string $encoding = null): string",
+    strings::mb_strtolower
+);
+native!(
+    MB_UCFIRST,
+    "mb_ucfirst(string $string, ?string $encoding = null): string",
+    strings::mb_ucfirst
+);
+native!(
+    MB_LCFIRST,
+    "mb_lcfirst(string $string, ?string $encoding = null): string",
+    strings::mb_lcfirst
+);
+native!(
+    MB_TRIM,
+    "mb_trim(string $string, ?string $characters = null, ?string $encoding = null): string",
+    strings::mb_trim
+);
+native!(
+    MB_LTRIM,
+    "mb_ltrim(string $string, ?string $characters = null, ?string $encoding = null): string",
+    strings::mb_ltrim
+);
+native!(
+    MB_RTRIM,
+    "mb_rtrim(string $string, ?string $characters = null, ?string $encoding = null): string",
+    strings::mb_rtrim
+);
+native!(
+    MB_DETECT_ENCODING,
+    "mb_detect_encoding(string $string, array|string|null $encodings = null, bool $strict = false): string|false",
+    conversion::mb_detect_encoding
+);
+native!(
+    MB_LIST_ENCODINGS,
+    "mb_list_encodings(): array",
+    info::mb_list_encodings
+);
+native!(
+    MB_ENCODING_ALIASES,
+    "mb_encoding_aliases(string $encoding): array",
+    info::mb_encoding_aliases
+);
+native!(
+    MB_ENCODE_MIMEHEADER,
+    "mb_encode_mimeheader(string $string, ?string $charset = null, ?string $transfer_encoding = null, string $newline = \"\\r\\n\", int $indent = 0): string",
+    mime::mb_encode_mimeheader
+);
+native!(
+    MB_DECODE_MIMEHEADER,
+    "mb_decode_mimeheader(string $string): string",
+    mime::mb_decode_mimeheader
+);
+native!(
+    MB_CONVERT_KANA,
+    "mb_convert_kana(string $string, string $mode = \"KV\", ?string $encoding = null): string",
+    conversion::mb_convert_kana
+);
+native!(
+    MB_CONVERT_VARIABLES,
+    "mb_convert_variables(string $to_encoding, array|string $from_encoding, mixed &$var, mixed &...$vars): string|false",
+    conversion::mb_convert_variables
+);
+native!(
+    MB_ENCODE_NUMERICENTITY,
+    "mb_encode_numericentity(string $string, array $map, ?string $encoding = null, bool $hex = false): string",
+    conversion::mb_encode_numericentity
+);
+native!(
+    MB_DECODE_NUMERICENTITY,
+    "mb_decode_numericentity(string $string, array $map, ?string $encoding = null): string",
+    conversion::mb_decode_numericentity
+);
+native!(
+    MB_SEND_MAIL,
+    "mb_send_mail(string $to, string $subject, string $message, array|string $additional_headers = [], ?string $additional_params = null): bool",
+    mail::mb_send_mail
+);
+native!(
+    MB_GET_INFO,
+    "mb_get_info(string $type = \"all\"): array|string|int|false|null",
+    info::mb_get_info
+);
+native!(
+    MB_CHECK_ENCODING,
+    "mb_check_encoding(array|string|null $value = null, ?string $encoding = null): bool",
+    strings::mb_check_encoding
+);
+native!(
+    MB_SCRUB,
+    "mb_scrub(string $string, ?string $encoding = null): string",
+    strings::mb_scrub
+);
+native!(
+    MB_ORD,
+    "mb_ord(string $string, ?string $encoding = null): int|false",
+    strings::mb_ord
+);
+native!(
+    MB_CHR,
+    "mb_chr(int $codepoint, ?string $encoding = null): string|false",
+    strings::mb_chr
+);
+native!(
+    MB_STR_PAD,
+    "mb_str_pad(string $string, int $length, string $pad_string = \" \", int $pad_type = STR_PAD_RIGHT, ?string $encoding = null): string",
+    strings::mb_str_pad
+);
 
 pub static FUNCTIONS: [&NativeFunction; 49] = [
     &MB_LANGUAGE,

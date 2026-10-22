@@ -64,7 +64,11 @@ pub fn mb_http_input(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
             b'C' => g.http_input_identify_cookie,
             b'S' => g.http_input_identify_string,
             b'I' => {
-                let arr: PhpArray = g.http_input_list.iter().map(|e| Value::from(e.name)).collect();
+                let arr: PhpArray = g
+                    .http_input_list
+                    .iter()
+                    .map(|e| Value::from(e.name))
+                    .collect();
                 return Ok(Value::array(arr));
             }
             b'L' => {
@@ -85,7 +89,10 @@ pub fn mb_http_input(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
 }
 
 fn http_input_type_error(vm: &mut Vm) -> php_runtime::Flow {
-    vm.argument_value_error(1, "must be one of \"G\", \"P\", \"C\", \"S\", \"I\", or \"L\"")
+    vm.argument_value_error(
+        1,
+        "must be one of \"G\", \"P\", \"C\", \"S\", \"I\", or \"L\"",
+    )
 }
 
 pub fn mb_http_output(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
@@ -219,7 +226,10 @@ pub fn mb_get_info(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
             .map(|e| Value::from(e.name))
             .collect()
     };
-    let subst = substitute_character_value(g.current_filter_illegal_mode, g.current_filter_illegal_substchar);
+    let subst = substitute_character_value(
+        g.current_filter_illegal_mode,
+        g.current_filter_illegal_substchar,
+    );
 
     if ty.eq_ignore_ascii_case(b"all") {
         let mut a = PhpArray::new();
@@ -230,8 +240,14 @@ pub fn mb_get_info(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
         a.insert_str("http_output", g.current_http_output_encoding.name);
         a.insert_str("http_output_conv_mimetypes", conv_mimetypes);
         a.insert_str("mail_charset", no_encoding2name(lang.mail_charset));
-        a.insert_str("mail_header_encoding", no_encoding2name(lang.mail_header_encoding));
-        a.insert_str("mail_body_encoding", no_encoding2name(lang.mail_body_encoding));
+        a.insert_str(
+            "mail_header_encoding",
+            no_encoding2name(lang.mail_header_encoding),
+        );
+        a.insert_str(
+            "mail_body_encoding",
+            no_encoding2name(lang.mail_body_encoding),
+        );
         a.insert_str("illegal_chars", g.illegalchars);
         a.insert_str("encoding_translation", on_off(translation));
         a.insert_str("language", lang.name);

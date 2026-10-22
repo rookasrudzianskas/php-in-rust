@@ -7,7 +7,10 @@
 //! emits output units through [`FilterOutput`]; `flush` emits pending state
 //! and then flushes the downstream sink (php-src's `flush_function`).
 
-use super::encoding::{BAD_INPUT, Encoding, ILLEGAL_MODE_CHAR, ILLEGAL_MODE_ENTITY, ILLEGAL_MODE_LONG, ILLEGAL_MODE_NONE, NoEncoding, enc};
+use super::encoding::{
+    BAD_INPUT, Encoding, ILLEGAL_MODE_CHAR, ILLEGAL_MODE_ENTITY, ILLEGAL_MODE_LONG,
+    ILLEGAL_MODE_NONE, NoEncoding, enc,
+};
 
 /// Downstream of a filter: `output_function` and `flush_function`.
 pub trait FilterOutput {
@@ -52,7 +55,11 @@ pub struct ConvertFilter {
 
 impl ConvertFilter {
     /// `mbfl_convert_filter_init`.
-    pub fn new(from: &'static Encoding, to: &'static Encoding, vtbl: &'static Vtbl) -> ConvertFilter {
+    pub fn new(
+        from: &'static Encoding,
+        to: &'static Encoding,
+        vtbl: &'static Vtbl,
+    ) -> ConvertFilter {
         let mut f = ConvertFilter {
             status: 0,
             cache: 0,
@@ -193,7 +200,10 @@ pub fn get_vtbl(from: &'static Encoding, to: &'static Encoding) -> Option<&'stat
     let (mut from, mut to) = (from, to);
     if to.is(NoEncoding::Base64) || to.is(NoEncoding::Qprint) {
         from = enc(NoEncoding::EightBit);
-    } else if from.is(NoEncoding::Base64) || from.is(NoEncoding::Qprint) || from.is(NoEncoding::Uuencode) {
+    } else if from.is(NoEncoding::Base64)
+        || from.is(NoEncoding::Qprint)
+        || from.is(NoEncoding::Uuencode)
+    {
         to = enc(NoEncoding::EightBit);
     }
 

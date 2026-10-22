@@ -100,7 +100,12 @@ impl State {
 }
 
 /// `mbfl_strcut`: `None` when the encoding has no legacy filters.
-pub fn mbfl_strcut(s: &[u8], encoding: &'static Encoding, from: usize, length: usize) -> Option<Vec<u8>> {
+pub fn mbfl_strcut(
+    s: &[u8],
+    encoding: &'static Encoding,
+    from: usize,
+    length: usize,
+) -> Option<Vec<u8>> {
     let from = from.min(s.len());
     let wchar = enc(NoEncoding::Wchar);
     let decoder = convert_filter_new(wchar, encoding)?;

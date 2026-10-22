@@ -64,9 +64,8 @@ pub fn fast_strlen_utf8(s: &[u8]) -> usize {
 
 /// `mb_get_strlen`.
 pub fn get_strlen(s: &[u8], encoding: &'static Encoding) -> usize {
-    let char_len = encoding.char_len();
-    if char_len != 0 {
-        return s.len() / char_len;
+    if let Some(len) = s.len().checked_div(encoding.char_len()) {
+        return len;
     }
     if encoding.is_utf8_family() && is_valid_utf8(s) {
         return fast_strlen_utf8(s);
@@ -260,8 +259,22 @@ pub fn stripos(
     offset: i64,
     encoding: &'static Encoding,
 ) -> Result<usize, StrposError> {
-    let h = convert_case(CaseMode::FoldSimple, haystack, encoding, utf8(), ILLEGAL_MODE_BADUTF8, 0);
-    let n = convert_case(CaseMode::FoldSimple, needle, encoding, utf8(), ILLEGAL_MODE_BADUTF8, 0);
+    let h = convert_case(
+        CaseMode::FoldSimple,
+        haystack,
+        encoding,
+        utf8(),
+        ILLEGAL_MODE_BADUTF8,
+        0,
+    );
+    let n = convert_case(
+        CaseMode::FoldSimple,
+        needle,
+        encoding,
+        utf8(),
+        ILLEGAL_MODE_BADUTF8,
+        0,
+    );
     find_strpos(&h.out, &n.out, utf8(), offset, reverse)
 }
 
@@ -365,7 +378,12 @@ pub fn mb_strlen(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     Ok(Value::Int(get_strlen(args.str(0), encoding) as i64))
 }
 
-fn strpos_common(vm: &mut Vm, args: &mut Args, reverse: bool, case_insensitive: bool) -> PResult<Value> {
+fn strpos_common(
+    vm: &mut Vm,
+    args: &mut Args,
+    reverse: bool,
+    case_insensitive: bool,
+) -> PResult<Value> {
     let offset = args.int(2);
     let encoding = get_encoding(vm, args.str_opt(3), 4)?;
     let (h, n) = (args.str(0), args.str(1));
@@ -397,7 +415,12 @@ pub fn mb_strripos(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
 }
 
 /// `php_mb_strstr_variants`.
-fn strstr_variants(vm: &mut Vm, args: &mut Args, reverse: bool, case_insensitive: bool) -> PResult<Value> {
+fn strstr_variants(
+    vm: &mut Vm,
+    args: &mut Args,
+    reverse: bool,
+    case_insensitive: bool,
+) -> PResult<Value> {
     let part = args.bool(2);
     let encoding = get_encoding(vm, args.str_opt(3), 4)?;
     let (h, n) = (args.str(0).clone(), args.str(1).clone());
@@ -509,7 +532,9 @@ pub fn mb_substr(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
         }
     };
     let illegal = illegal_settings(vm)?;
-    Ok(str_value(get_substr(&s, real_from, real_len, encoding, illegal)))
+    Ok(str_value(get_substr(
+        &s, real_from, real_len, encoding, illegal,
+    )))
 }
 
 pub fn mb_strcut(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
@@ -613,7 +638,10 @@ pub fn get_strwidth(s: &[u8], encoding: &'static Encoding) -> usize {
     let mut inp = s;
     while !inp.is_empty() {
         let n = (encoding.to_wchar)(&mut inp, &mut wchar_buf, &mut state);
-        width += wchar_buf[..n].iter().map(|&w| character_width(w)).sum::<usize>();
+        width += wchar_buf[..n]
+            .iter()
+            .map(|&w| character_width(w))
+            .sum::<usize>();
     }
     width
 }
@@ -753,7 +781,12 @@ pub fn mb_strimwidth(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
 }
 
 /// `mbstring_convert_case` with the current substitution settings.
-pub fn mbstring_convert_case(vm: &mut Vm, mode: CaseMode, s: &[u8], encoding: &'static Encoding) -> PResult<Vec<u8>> {
+pub fn mbstring_convert_case(
+    vm: &mut Vm,
+    mode: CaseMode,
+    s: &[u8],
+    encoding: &'static Encoding,
+) -> PResult<Vec<u8>> {
     let (substchar, mode_illegal) = illegal_settings(vm)?;
     Ok(convert_case(mode, s, encoding, encoding, mode_illegal, substchar).into_bytes())
 }
@@ -772,13 +805,23 @@ pub fn mb_convert_case(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
 pub fn mb_strtoupper(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     let encoding = get_encoding(vm, args.str_opt(1), 2)?;
     let s = args.str(0).clone();
-    Ok(str_value(mbstring_convert_case(vm, CaseMode::Upper, &s, encoding)?))
+    Ok(str_value(mbstring_convert_case(
+        vm,
+        CaseMode::Upper,
+        &s,
+        encoding,
+    )?))
 }
 
 pub fn mb_strtolower(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     let encoding = get_encoding(vm, args.str_opt(1), 2)?;
     let s = args.str(0).clone();
-    Ok(str_value(mbstring_convert_case(vm, CaseMode::Lower, &s, encoding)?))
+    Ok(str_value(mbstring_convert_case(
+        vm,
+        CaseMode::Lower,
+        &s,
+        encoding,
+    )?))
 }
 
 /// `php_mb_ulcfirst`.
@@ -843,7 +886,13 @@ fn trim_each_wchar(
         return None;
     }
     // Everything trimmed: the length wraps around (size_t), selecting nothing.
-    Some(get_substr(s, left, total_len.wrapping_sub(right + left), encoding, illegal))
+    Some(get_substr(
+        s,
+        left,
+        total_len.wrapping_sub(right + left),
+        encoding,
+        illegal,
+    ))
 }
 
 const TRIM_DEFAULT_CHARS: [u32; 27] = [
@@ -915,11 +964,11 @@ fn check_encoding_recursive(
     stack.push(ptr);
     let mut valid = true;
     for (key, v) in arr.iter() {
-        if let php_runtime::ArrayKey::Str(k) = &key {
-            if !check_str_encoding(k, encoding) {
-                valid = false;
-                break;
-            }
+        if let php_runtime::ArrayKey::Str(k) = &key
+            && !check_str_encoding(k, encoding)
+        {
+            valid = false;
+            break;
         }
         let v = v.deref();
         let ok = match &*v {
@@ -940,7 +989,12 @@ fn check_encoding_recursive(
 pub fn mb_check_encoding(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     let encoding = get_encoding(vm, args.str_opt(1), 2)?;
     match args.get(0).clone() {
-        Value::Array(a) => Ok(Value::Bool(check_encoding_recursive(vm, &a, encoding, &mut Vec::new())?)),
+        Value::Array(a) => Ok(Value::Bool(check_encoding_recursive(
+            vm,
+            &a,
+            encoding,
+            &mut Vec::new(),
+        )?)),
         Value::String(s) => Ok(Value::Bool(check_str_encoding(&s, encoding))),
         _ => {
             vm.deprecated("Calling mb_check_encoding() without argument is deprecated")?;
@@ -1029,7 +1083,11 @@ pub fn mb_chr(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     let g = globals(vm)?;
     let failed = g.illegalchars != 0;
     g.illegalchars = orig;
-    Ok(if failed { Value::Bool(false) } else { str_value(out) })
+    Ok(if failed {
+        Value::Bool(false)
+    } else {
+        str_value(out)
+    })
 }
 
 /// `php_mb_str_pad_fill`.
@@ -1056,7 +1114,9 @@ pub fn mb_str_pad(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     }
     // STR_PAD_LEFT = 0, STR_PAD_RIGHT = 1, STR_PAD_BOTH = 2
     if !(0..=2).contains(&pad_type) {
-        return Err(vm.argument_value_error(4, "must be STR_PAD_LEFT, STR_PAD_RIGHT, or STR_PAD_BOTH"));
+        return Err(
+            vm.argument_value_error(4, "must be STR_PAD_LEFT, STR_PAD_RIGHT, or STR_PAD_BOTH")
+        );
     }
     let pad_length = get_strlen(&pad, encoding);
     if pad_length == 0 {
@@ -1071,9 +1131,10 @@ pub fn mb_str_pad(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     };
     let full_left = left_pad / pad_length;
     let full_right = right_pad / pad_length;
-    let (Some(left_bytes), Some(right_bytes)) =
-        (full_left.checked_mul(pad.len()), full_right.checked_mul(pad.len()))
-    else {
+    let (Some(left_bytes), Some(right_bytes)) = (
+        full_left.checked_mul(pad.len()),
+        full_right.checked_mul(pad.len()),
+    ) else {
         return Err(vm.throw_error("Error", "String size overflow"));
     };
     let illegal = illegal_settings(vm)?;

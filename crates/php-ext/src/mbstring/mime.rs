@@ -21,7 +21,10 @@ fn transfer_encoded_size(tmp: &ConvertBuf, base64: bool) -> usize {
     if base64 {
         tmp.len().div_ceil(3) * 4
     } else {
-        tmp.out.iter().map(|&c| if needs_qencode(c) { 3 } else { 1 }).sum()
+        tmp.out
+            .iter()
+            .map(|&c| if needs_qencode(c) { 3 } else { 1 })
+            .sum()
     }
 }
 
@@ -30,8 +33,8 @@ fn transfer_encoded_size(tmp: &ConvertBuf, base64: bool) -> usize {
 fn transfer_encode_mime_bytes(tmp: &mut ConvertBuf, out: &mut ConvertBuf, base64: bool) {
     let p = &tmp.out;
     if base64 {
-        let mut chunks = p.chunks_exact(3);
-        for c in &mut chunks {
+        let (chunks, remainder) = p.as_chunks::<3>();
+        for c in chunks {
             let bits = ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32;
             out.add4(
                 BASE64_TABLE[((bits >> 18) & 0x3F) as usize],
@@ -40,7 +43,7 @@ fn transfer_encode_mime_bytes(tmp: &mut ConvertBuf, out: &mut ConvertBuf, base64
                 BASE64_TABLE[(bits & 0x3F) as usize],
             );
         }
-        match chunks.remainder() {
+        match remainder {
             [a] => {
                 let bits = *a as u32;
                 out.add4(
@@ -88,7 +91,11 @@ pub fn mime_header_encode(
     if input.is_empty() {
         return Vec::new();
     }
-    let mut indent = if !(0..74).contains(&indent) { 0 } else { indent as usize };
+    let mut indent = if !(0..74).contains(&indent) {
+        0
+    } else {
+        indent as usize
+    };
     let mut linefeed = &linefeed[..linefeed.len().min(8)];
     // Legacy behaviour: the line feed ends at an embedded NUL.
     if let Some(i) = linefeed.iter().position(|&c| c == 0) {
@@ -112,7 +119,11 @@ pub fn mime_header_encode(
                 }
                 checking_leading_spaces = false;
             }
-            if !(0x21..=0x7E).contains(&w) || w == b'=' as u32 || w == b'?' as u32 || w == b'_' as u32 {
+            if !(0x21..=0x7E).contains(&w)
+                || w == b'=' as u32
+                || w == b'?' as u32
+                || w == b'_' as u32
+            {
                 passthrough = false;
                 break 'check;
             }
@@ -154,7 +165,10 @@ pub fn mime_header_encode(
         while p < e {
             let w = wchar_buf[p];
             p += 1;
-            if w < 0x20 || w > 0x7E || w == b'?' as u32 || w == b'=' as u32 || w == b'_' as u32
+            if !(0x20..=0x7E).contains(&w)
+                || w == b'?' as u32
+                || w == b'=' as u32
+                || w == b'_' as u32
                 || (w == b' ' as u32 && (p - word_start) > 74)
             {
                 need_mime = true;
@@ -165,7 +179,7 @@ pub fn mime_header_encode(
                     push_linefeed(&mut buf);
                     indent = 0;
                     line_start = buf.len();
-                } else if buf.len() > 0 {
+                } else if !buf.is_empty() {
                     buf.add(b' ');
                 }
                 // Output one space-delimited word as plain ASCII.
@@ -192,7 +206,7 @@ pub fn mime_header_encode(
             } else {
                 // End of input in ASCII mode: trailing chars not followed by
                 // a space.
-                if word_start < e && buf.len() > 0 {
+                if word_start < e && !buf.is_empty() {
                     if buf.len() - line_start + (p - word_start) + indent > 74 {
                         push_linefeed(&mut buf);
                     } else {
@@ -212,7 +226,7 @@ pub fn mime_header_encode(
             push_linefeed(&mut buf);
             indent = 0;
             line_start = buf.len();
-        } else if buf.len() > 0 {
+        } else if !buf.is_empty() {
             buf.add(b' ');
         }
         p = word_start;
@@ -259,7 +273,8 @@ pub fn mime_header_encode(
             let tmpstate2 = tmpbuf.state;
             (outcode.from_wchar)(&[], &mut tmpbuf, true);
 
-            if transfer_encoded_size(&tmpbuf, base64) <= space_available || (n == 1 && tmppos == 0) {
+            if transfer_encoded_size(&tmpbuf, base64) <= space_available || (n == 1 && tmppos == 0)
+            {
                 p += n;
                 if p == e {
                     transfer_encode_mime_bytes(&mut tmpbuf, &mut buf, base64);
@@ -282,7 +297,8 @@ pub fn mime_header_encode(
                         push_linefeed(&mut buf);
                         line_start = buf.len();
                         offset = e - p;
-                        if !inp.is_empty() && HEADER_ENC_WCHAR_BUFSIZE - offset >= MIN_WCHAR_BUFSIZE {
+                        if !inp.is_empty() && HEADER_ENC_WCHAR_BUFSIZE - offset >= MIN_WCHAR_BUFSIZE
+                        {
                             wchar_buf.copy_within(p..e, 0);
                             break; // refill
                         }
@@ -321,12 +337,11 @@ pub fn mb_encode_mimeheader(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
             base64 = false;
         }
     }
-    if let Some(t) = args.str_opt(2) {
-        if let Some(&t) = t.first() {
-            if t == b'Q' || t == b'q' {
-                base64 = false;
-            }
-        }
+    if let Some(t) = args.str_opt(2)
+        && let Some(&t) = t.first()
+        && (t == b'Q' || t == b'q')
+    {
+        base64 = false;
     }
     let linefeed = args.str(3).clone();
     let indent = args.int(4);
@@ -477,21 +492,21 @@ pub fn mime_header_decode(s: &[u8], outcode: &'static Encoding) -> Vec<u8> {
             // Does this look like an encoded word? Try to decode it.
             if let Some(i) = s[p + 2..].iter().position(|&c| c == b'?') {
                 let incode_end = p + 2 + i;
-                if e - incode_end >= 3 {
-                    if let Some(next) = decode_encoded_word(s, p, outcode, &mut buf, &mut state) {
-                        p = next;
-                        // Collapse whitespace; it becomes a space only if no
-                        // encoded word follows directly.
-                        if p < e && is_ws(s[p]) {
-                            while p < e && is_ws(s[p]) {
-                                p += 1;
-                            }
-                            space_pending = true;
-                        } else {
-                            space_pending = false;
+                if e - incode_end >= 3
+                    && let Some(next) = decode_encoded_word(s, p, outcode, &mut buf, &mut state)
+                {
+                    p = next;
+                    // Collapse whitespace; it becomes a space only if no
+                    // encoded word follows directly.
+                    if p < e && is_ws(s[p]) {
+                        while p < e && is_ws(s[p]) {
+                            p += 1;
                         }
-                        continue;
+                        space_pending = true;
+                    } else {
+                        space_pending = false;
                     }
+                    continue;
                 }
             }
         }
@@ -531,5 +546,7 @@ pub fn mime_header_decode(s: &[u8], outcode: &'static Encoding) -> Vec<u8> {
 pub fn mb_decode_mimeheader(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     let s = args.str(0).clone();
     let outcode = globals(vm)?.current_internal_encoding;
-    Ok(Value::String(PhpStr::from_vec(mime_header_decode(&s, outcode))))
+    Ok(Value::String(PhpStr::from_vec(mime_header_decode(
+        &s, outcode,
+    ))))
 }

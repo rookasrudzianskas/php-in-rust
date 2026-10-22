@@ -113,7 +113,13 @@ fn mph_hash(d: u32, x: u32) -> u32 {
 const CODE_NOT_FOUND: u32 = u32::MAX;
 
 /// `mph_lookup`: minimal perfect hash lookup in a case mapping table.
-fn mph_lookup(code: u32, g_table: &[i16], g_table_size: u32, table: &[u32], table_size: u32) -> u32 {
+fn mph_lookup(
+    code: u32,
+    g_table: &[i16],
+    g_table_size: u32,
+    table: &[u32],
+    table_size: u32,
+) -> u32 {
     let g = g_table[(mph_hash(0, code) % g_table_size) as usize];
     let idx = if g <= 0 {
         (-(g as i32)) as u32
@@ -128,16 +134,40 @@ fn mph_lookup(code: u32, g_table: &[i16], g_table_size: u32, table: &[u32], tabl
 }
 
 fn lookup_upper(code: u32) -> u32 {
-    mph_lookup(code, &_UCCASE_UPPER_G, _UCCASE_UPPER_G_SIZE, &_UCCASE_UPPER_TABLE, _UCCASE_UPPER_TABLE_SIZE)
+    mph_lookup(
+        code,
+        &_UCCASE_UPPER_G,
+        _UCCASE_UPPER_G_SIZE,
+        &_UCCASE_UPPER_TABLE,
+        _UCCASE_UPPER_TABLE_SIZE,
+    )
 }
 fn lookup_lower(code: u32) -> u32 {
-    mph_lookup(code, &_UCCASE_LOWER_G, _UCCASE_LOWER_G_SIZE, &_UCCASE_LOWER_TABLE, _UCCASE_LOWER_TABLE_SIZE)
+    mph_lookup(
+        code,
+        &_UCCASE_LOWER_G,
+        _UCCASE_LOWER_G_SIZE,
+        &_UCCASE_LOWER_TABLE,
+        _UCCASE_LOWER_TABLE_SIZE,
+    )
 }
 fn lookup_title(code: u32) -> u32 {
-    mph_lookup(code, &_UCCASE_TITLE_G, _UCCASE_TITLE_G_SIZE, &_UCCASE_TITLE_TABLE, _UCCASE_TITLE_TABLE_SIZE)
+    mph_lookup(
+        code,
+        &_UCCASE_TITLE_G,
+        _UCCASE_TITLE_G_SIZE,
+        &_UCCASE_TITLE_TABLE,
+        _UCCASE_TITLE_TABLE_SIZE,
+    )
 }
 fn lookup_fold(code: u32) -> u32 {
-    mph_lookup(code, &_UCCASE_FOLD_G, _UCCASE_FOLD_G_SIZE, &_UCCASE_FOLD_TABLE, _UCCASE_FOLD_TABLE_SIZE)
+    mph_lookup(
+        code,
+        &_UCCASE_FOLD_G,
+        _UCCASE_FOLD_G_SIZE,
+        &_UCCASE_FOLD_TABLE,
+        _UCCASE_FOLD_TABLE_SIZE,
+    )
 }
 
 #[inline]
@@ -339,19 +369,31 @@ pub fn convert_case(
         match case_mode {
             CaseMode::UpperSimple => {
                 for &w in wchars {
-                    converted_buf[p] = if w > 0xFFFFFF { w } else { simple(toupper_raw(w, enc)) };
+                    converted_buf[p] = if w > 0xFFFFFF {
+                        w
+                    } else {
+                        simple(toupper_raw(w, enc))
+                    };
                     p += 1;
                 }
             }
             CaseMode::LowerSimple => {
                 for &w in wchars {
-                    converted_buf[p] = if w > 0xFFFFFF { w } else { simple(tolower_raw(w, enc)) };
+                    converted_buf[p] = if w > 0xFFFFFF {
+                        w
+                    } else {
+                        simple(tolower_raw(w, enc))
+                    };
                     p += 1;
                 }
             }
             CaseMode::FoldSimple => {
                 for &w in wchars {
-                    converted_buf[p] = if w > 0xFFFFFF { w } else { simple(tofold_raw(w, enc)) };
+                    converted_buf[p] = if w > 0xFFFFFF {
+                        w
+                    } else {
+                        simple(tofold_raw(w, enc))
+                    };
                     p += 1;
                 }
             }
@@ -401,7 +443,16 @@ pub fn convert_case(
                         continue;
                     }
                     if w == 0x3A3
-                        && is_final_sigma(wchars, i, &converted_buf, p, converted_end, input, state, enc)
+                        && is_final_sigma(
+                            wchars,
+                            i,
+                            &converted_buf,
+                            p,
+                            converted_end,
+                            input,
+                            state,
+                            enc,
+                        )
                     {
                         converted_buf[p] = 0x3C2;
                         p += 1;
@@ -425,12 +476,25 @@ pub fn convert_case(
                     }
                     if title_mode
                         && w == 0x3A3
-                        && is_final_sigma(wchars, i, &converted_buf, p, converted_end, input, state, enc)
+                        && is_final_sigma(
+                            wchars,
+                            i,
+                            &converted_buf,
+                            p,
+                            converted_end,
+                            input,
+                            state,
+                            enc,
+                        )
                     {
                         converted_buf[p] = 0x3C2;
                         p += 1;
                     } else {
-                        let w2 = if title_mode { tolower_raw(w, enc) } else { totitle_raw(w, enc) };
+                        let w2 = if title_mode {
+                            tolower_raw(w, enc)
+                        } else {
+                            totitle_raw(w, enc)
+                        };
                         if w2 > 0xFFFFFF {
                             emit_special(w2, &mut converted_buf, &mut p);
                         } else {

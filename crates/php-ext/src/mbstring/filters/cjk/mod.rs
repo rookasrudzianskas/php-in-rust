@@ -289,6 +289,9 @@ mod tests {
         assert_eq!(mbfl_bisec_srch(4, &t, 3), -1);
         assert_eq!(mbfl_bisec_srch(6, &t, 3), 1);
         assert_eq!(mbfl_bisec_srch2(20, &t, 6), 4);
-        assert_eq!(mbfl_binary_search_paired_sorted_table(5, &[[1, 2], [5, 7]]), Some(7));
+        assert_eq!(
+            mbfl_binary_search_paired_sorted_table(5, &[[1, 2], [5, 7]]),
+            Some(7)
+        );
     }
 }

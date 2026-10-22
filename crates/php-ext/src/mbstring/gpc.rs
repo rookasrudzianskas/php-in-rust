@@ -5,7 +5,7 @@
 use std::rc::Rc;
 
 use php_runtime::errors::DisplayErrors;
-use php_runtime::{ArrayKey, Args, PResult, PhpArray, PhpStr, Value, Vm};
+use php_runtime::{Args, ArrayKey, PResult, PhpArray, PhpStr, Value, Vm};
 
 use super::conversion::guess_encoding_for_strings;
 use super::globals::{globals, strict_detection};
@@ -43,9 +43,15 @@ enum Step {
 /// steps `php_register_variable_ex` performs (mirroring its in-place
 /// C-string surgery); `None` for an empty name.
 fn plan_variable(var_name: &[u8], max_nesting: i64) -> Option<(Vec<u8>, Vec<Step>)> {
-    let var_name = &var_name[..var_name.iter().position(|&c| c == 0).unwrap_or(var_name.len())];
+    let var_name = &var_name[..var_name
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(var_name.len())];
     // Ignore leading spaces.
-    let pre = &var_name[var_name.iter().position(|&c| c != b' ').unwrap_or(var_name.len())..];
+    let pre = &var_name[var_name
+        .iter()
+        .position(|&c| c != b' ')
+        .unwrap_or(var_name.len())..];
     let mut buf = pre.to_vec();
     buf.push(0);
     let cstrlen = |buf: &[u8], from: usize| buf[from..].iter().position(|&c| c == 0).unwrap_or(0);
@@ -175,7 +181,12 @@ fn apply_steps(arr: &mut PhpArray, steps: &[Step], val: Value) -> bool {
 }
 
 /// `php_register_variable_safe` into a plain array.
-fn register_variable(vm: &mut Vm, var_name: &[u8], val: Value, track: &mut PhpArray) -> PResult<()> {
+fn register_variable(
+    vm: &mut Vm,
+    var_name: &[u8],
+    val: Value,
+    track: &mut PhpArray,
+) -> PResult<()> {
     let max_nesting = match vm.ini_get("max_input_nesting_level") {
         Some(_) => vm.ini_int("max_input_nesting_level"),
         None => 64,
@@ -212,7 +223,10 @@ fn encoding_handler(
     }
     // Split (php_strtok_r skips empty tokens) and decode.
     let mut list: Vec<Vec<u8>> = Vec::new();
-    for var in res.split(|c| separator.contains(c)).filter(|t| !t.is_empty()) {
+    for var in res
+        .split(|c| separator.contains(c))
+        .filter(|t| !t.is_empty())
+    {
         match var.iter().position(|&c| c == b'=') {
             Some(eq) => {
                 list.push(php_url_decode(&var[..eq]));
@@ -256,7 +270,10 @@ fn encoding_handler(
 
     let (substchar, mode) = {
         let g = globals(vm)?;
-        (g.current_filter_illegal_substchar, g.current_filter_illegal_mode)
+        (
+            g.current_filter_illegal_substchar,
+            g.current_filter_illegal_mode,
+        )
     };
     for pair in list.chunks(2) {
         let (var, val) = (&pair[0], &pair[1]);

@@ -185,13 +185,12 @@ pub use super::encodings::ENCODING_LIST;
 /// aliases, all ASCII case-insensitive.
 pub fn name2encoding(name: &[u8]) -> Option<&'static Encoding> {
     // php-src's perfect hash only covers primary names of 2..=23 bytes.
-    if (2..=23).contains(&name.len()) {
-        if let Some(e) = ENCODING_LIST
+    if (2..=23).contains(&name.len())
+        && let Some(e) = ENCODING_LIST
             .iter()
             .find(|e| e.name.as_bytes().eq_ignore_ascii_case(name))
-        {
-            return Some(e);
-        }
+    {
+        return Some(e);
     }
     if let Some(e) = ENCODING_LIST.iter().find(|e| {
         e.mime_name

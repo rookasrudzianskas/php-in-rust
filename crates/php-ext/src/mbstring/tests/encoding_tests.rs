@@ -18,12 +18,12 @@ pub fn data_path(name: &str) -> String {
     )
 }
 
+/// Character bytes and Unicode bytes, in file order and keyed by Unicode.
+pub type ConversionTable = (Vec<(Vec<u8>, Vec<u8>)>, HashMap<Vec<u8>, Vec<u8>>);
+
 /// `readConversionTable`: character bytes to big-endian Unicode (2 bytes,
 /// or 4 with `utf32`). Codepoints 0xFFFD are skipped.
-pub fn read_conversion_table(
-    name: &str,
-    utf32: bool,
-) -> (Vec<(Vec<u8>, Vec<u8>)>, HashMap<Vec<u8>, Vec<u8>>) {
+pub fn read_conversion_table(name: &str, utf32: bool) -> ConversionTable {
     let text = std::fs::read(data_path(name)).expect("data file");
     let mut list = Vec::new();
     let mut to: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();

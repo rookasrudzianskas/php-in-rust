@@ -25,10 +25,10 @@ fn parse_mail_headers(s: &[u8]) -> HashMap<Vec<u8>, Vec<u8>> {
     let mut fld_val: Option<Vec<u8>> = None;
 
     let mut store = |name: &mut Option<Vec<u8>>, val: &mut Option<Vec<u8>>| {
-        if let Some(n) = name.take() {
-            if let Some(v) = val.take() {
-                ht.insert(n.to_ascii_lowercase(), v);
-            }
+        if let Some(n) = name.take()
+            && let Some(v) = val.take()
+        {
+            ht.insert(n.to_ascii_lowercase(), v);
         }
         *val = None;
     };
@@ -41,10 +41,10 @@ fn parse_mail_headers(s: &[u8]) -> HashMap<Vec<u8>, Vec<u8>> {
                     token_pos += 1;
                 }
                 if state == 0 || state == 1 {
-                    if let Some(t) = token {
-                        if token_pos > 0 {
-                            fld_name = Some(s[t..t + token_pos].to_vec());
-                        }
+                    if let Some(t) = token
+                        && token_pos > 0
+                    {
+                        fld_name = Some(s[t..t + token_pos].to_vec());
                     }
                     state = 2;
                 } else {
@@ -104,10 +104,10 @@ fn parse_mail_headers(s: &[u8]) -> HashMap<Vec<u8>, Vec<u8>> {
                     _ => {}
                 }
                 if fallthrough && crlf_state == -1 {
-                    if let Some(t) = token {
-                        if token_pos > 0 {
-                            fld_val = Some(s[t..t + token_pos].to_vec());
-                        }
+                    if let Some(t) = token
+                        && token_pos > 0
+                    {
+                        fld_val = Some(s[t..t + token_pos].to_vec());
                     }
                     store(&mut fld_name, &mut fld_val);
                     token = Some(i);
@@ -131,10 +131,10 @@ fn parse_mail_headers(s: &[u8]) -> HashMap<Vec<u8>, Vec<u8>> {
     if state == 3 {
         if empty_value {
             // `token = ""`: a zero-length value is not stored.
-        } else if let Some(t) = token {
-            if token_pos > 0 {
-                fld_val = Some(s[t..t + token_pos].to_vec());
-            }
+        } else if let Some(t) = token
+            && token_pos > 0
+        {
+            fld_val = Some(s[t..t + token_pos].to_vec());
         }
         store(&mut fld_name, &mut fld_val);
     }
@@ -213,24 +213,24 @@ pub fn mb_send_mail(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
             }
             if p < ct.len() {
                 let mut rest = &ct[p..];
-                if let Some(param_name) = strtok(&mut rest, b"= ") {
-                    if param_name.eq_ignore_ascii_case(b"charset") {
-                        let charset = strtok(&mut rest, b"= \"");
-                        let new_cs = match charset {
-                            Some(c) => name2encoding_cstr(c),
-                            None => Some(tran_cs),
-                        };
-                        tran_cs = match new_cs {
-                            Some(e) => e,
-                            None => {
-                                vm.warning(format!(
-                                    "Unsupported charset \"{}\" - will be regarded as ascii",
-                                    String::from_utf8_lossy(charset.unwrap_or_default())
-                                ))?;
-                                enc(NoEncoding::Ascii)
-                            }
-                        };
-                    }
+                if let Some(param_name) = strtok(&mut rest, b"= ")
+                    && param_name.eq_ignore_ascii_case(b"charset")
+                {
+                    let charset = strtok(&mut rest, b"= \"");
+                    let new_cs = match charset {
+                        Some(c) => name2encoding_cstr(c),
+                        None => Some(tran_cs),
+                    };
+                    tran_cs = match new_cs {
+                        Some(e) => e,
+                        None => {
+                            vm.warning(format!(
+                                "Unsupported charset \"{}\" - will be regarded as ascii",
+                                String::from_utf8_lossy(charset.unwrap_or_default())
+                            ))?;
+                            enc(NoEncoding::Ascii)
+                        }
+                    };
                 }
             }
         }
@@ -258,7 +258,10 @@ pub fn mb_send_mail(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     // To: drop trailing whitespace, replace control characters by spaces
     // except folding CRLF + whitespace.
     let mut to_r = to.to_vec();
-    while to_r.last().is_some_and(|c| c.is_ascii_whitespace() || *c == 0x0b) {
+    while to_r
+        .last()
+        .is_some_and(|c| c.is_ascii_whitespace() || *c == 0x0b)
+    {
         to_r.pop();
     }
     let end = to_r.iter().position(|&c| c == 0).unwrap_or(to_r.len());
@@ -291,7 +294,10 @@ pub fn mb_send_mail(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     let strict = strict_detection(vm);
     let (internal, detect_order) = {
         let g = globals(vm)?;
-        (g.current_internal_encoding, g.current_detect_order_list.clone())
+        (
+            g.current_internal_encoding,
+            g.current_detect_order_list.clone(),
+        )
     };
     let subj_enc = if internal.is(NoEncoding::Pass) {
         guess_encoding(&subject, &detect_order, strict, false).unwrap_or(internal)
@@ -314,7 +320,13 @@ pub fn mb_send_mail(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
         internal
     };
     let (tmp, _) = mb_fast_convert(&message, msg_enc, tran_cs, b'?' as u32, ILLEGAL_MODE_CHAR);
-    let (conv, _) = mb_fast_convert(&tmp, enc(NoEncoding::EightBit), body_enc, b'?' as u32, ILLEGAL_MODE_CHAR);
+    let (conv, _) = mb_fast_convert(
+        &tmp,
+        enc(NoEncoding::EightBit),
+        body_enc,
+        b'?' as u32,
+        ILLEGAL_MODE_CHAR,
+    );
 
     // Other headers
     let mut hdr: Vec<u8> = Vec::new();
@@ -357,7 +369,9 @@ pub fn mb_send_mail(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
         hdr.extend_from_slice(preferred_mime_name(body_enc).unwrap_or("7bit").as_bytes());
     }
 
-    let force = vm.ini_get("mail.force_extra_parameters").filter(|f| !f.is_empty());
+    let force = vm
+        .ini_get("mail.force_extra_parameters")
+        .filter(|f| !f.is_empty());
     let extra = match (force, extra_cmd) {
         (Some(f), _) => Some(crate::standard::exec::php_escape_shell_cmd(vm, &f)?),
         (None, Some(e)) => Some(crate::standard::exec::php_escape_shell_cmd(vm, &e)?),
@@ -382,8 +396,12 @@ mod tests {
 
     #[test]
     fn parses_headers() {
-        let ht = parse_mail_headers(b"Content-Type: text/plain; charset=EUC-JP\r\nX-Foo: bar\r\n baz");
-        assert_eq!(ht.get(b"content-type".as_slice()).unwrap(), b"text/plain; charset=EUC-JP");
+        let ht =
+            parse_mail_headers(b"Content-Type: text/plain; charset=EUC-JP\r\nX-Foo: bar\r\n baz");
+        assert_eq!(
+            ht.get(b"content-type".as_slice()).unwrap(),
+            b"text/plain; charset=EUC-JP"
+        );
         // php-src's parser cuts folded values short.
         assert_eq!(ht.get(b"x-foo".as_slice()).unwrap(), b"bar\r\n b");
     }

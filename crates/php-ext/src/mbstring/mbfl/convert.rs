@@ -203,7 +203,12 @@ pub fn decode_all(input: &[u8], from: &'static Encoding) -> Vec<u32> {
 }
 
 /// Encodes `input` codepoints in one call with `end = true`.
-pub fn encode_all(input: &[u32], to: &'static Encoding, replacement_char: u32, error_mode: u32) -> ConvertBuf {
+pub fn encode_all(
+    input: &[u32],
+    to: &'static Encoding,
+    replacement_char: u32,
+    error_mode: u32,
+) -> ConvertBuf {
     let mut buf = ConvertBuf::new(input.len(), replacement_char, error_mode);
     (to.from_wchar)(input, &mut buf, true);
     buf

@@ -4,7 +4,7 @@
 
 use std::rc::Rc;
 
-use php_runtime::{ArrayKey, Args, PResult, PhpArray, PhpStr, Value, Vm};
+use php_runtime::{Args, ArrayKey, PResult, PhpArray, PhpStr, Value, Vm};
 
 use super::filters::cjk::iso2022::mb_convert_kana_codepoint;
 use super::filters::cjk::kana::*;
@@ -133,7 +133,11 @@ fn count_demerits(array: &mut Vec<Candidate<'_>>, strict: bool) {
     }
     for c in array.iter_mut() {
         let d = c.demerits as f64 * c.multiplier as f64;
-        c.demerits = if d < u64::MAX as f64 { d as u64 } else { u64::MAX };
+        c.demerits = if d < u64::MAX as f64 {
+            d as u64
+        } else {
+            u64::MAX
+        };
     }
 }
 
@@ -286,10 +290,10 @@ pub fn mb_detect_encoding(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     let mut elist = match args.get(1).clone() {
         Value::Array(a) => {
             // The whole list from mb_list_encodings(): order is meaningless.
-            if let Some(all) = &globals(vm)?.all_encodings_list {
-                if Rc::ptr_eq(all, &a) {
-                    order_significant = false;
-                }
+            if let Some(all) = &globals(vm)?.all_encodings_list
+                && Rc::ptr_eq(all, &a)
+            {
+                order_significant = false;
             }
             parse_encoding_array(vm, &a, 2)?
         }
@@ -320,7 +324,12 @@ pub fn mb_detect_encoding(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
 }
 
 /// `jp_kana_convert`.
-fn jp_kana_convert(input: &[u8], encoding: &'static Encoding, mode: u32, illegal: (u32, u32)) -> Vec<u8> {
+fn jp_kana_convert(
+    input: &[u8],
+    encoding: &'static Encoding,
+    mode: u32,
+    illegal: (u32, u32),
+) -> Vec<u8> {
     // Each codepoint may expand to 2 when converting fullwidth to halfwidth.
     let mut wchar_buf = [0u32; 64];
     let mut converted: Vec<u32> = Vec::with_capacity(128);
@@ -403,10 +412,9 @@ pub fn mb_convert_kana(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
             } else if let Some(i) = KANA_FLAGS.iter().position(|&f| f == c) {
                 opt |= 1 << i;
             } else {
-                return Err(vm.argument_value_error(
-                    2,
-                    &format!("contains invalid flag: '{}'", c as char),
-                ));
+                return Err(
+                    vm.argument_value_error(2, &format!("contains invalid flag: '{}'", c as char))
+                );
             }
         }
         // Converting the same characters both ways makes no sense.
@@ -423,7 +431,10 @@ pub fn mb_convert_kana(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
             }
             return Err(vm.argument_value_error(
                 2,
-                &format!("must not combine '{}' and '{}' flags", flag1 as char, flag2 as char),
+                &format!(
+                    "must not combine '{}' and '{}' flags",
+                    flag1 as char, flag2 as char
+                ),
             ));
         }
         if opt & HAN2ZEN_HIRAGANA != 0 && opt & HAN2ZEN_KATAKANA != 0 {
@@ -448,7 +459,9 @@ pub fn mb_convert_kana(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     };
     let encoding = get_encoding(vm, args.str_opt(2), 3)?;
     let illegal = illegal_settings(vm)?;
-    Ok(Value::String(PhpStr::from_vec(jp_kana_convert(&s, encoding, opt, illegal))))
+    Ok(Value::String(PhpStr::from_vec(jp_kana_convert(
+        &s, encoding, opt, illegal,
+    ))))
 }
 
 // ----- mb_convert_variables ---------------------------------------------
@@ -527,10 +540,10 @@ fn convert_variable(
                     stack.pop();
                     return Ok(true);
                 }
-                if let Some(slot) = arr.get_mut(&k) {
-                    if !matches!(slot, Value::Ref(_)) {
-                        *slot = e;
-                    }
+                if let Some(slot) = arr.get_mut(&k)
+                    && !matches!(slot, Value::Ref(_))
+                {
+                    *slot = e;
                 }
             }
             stack.pop();
@@ -575,10 +588,10 @@ pub fn mb_convert_variables(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     let mut order_significant = true;
     let elist = match args.get(1).clone() {
         Value::Array(a) => {
-            if let Some(all) = &globals(vm)?.all_encodings_list {
-                if Rc::ptr_eq(all, &a) {
-                    order_significant = false;
-                }
+            if let Some(all) = &globals(vm)?.all_encodings_list
+                && Rc::ptr_eq(all, &a)
+            {
+                order_significant = false;
             }
             parse_encoding_array(vm, &a, 2)?
         }
@@ -627,7 +640,7 @@ pub fn mb_convert_variables(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
 
 /// `make_conversion_map`.
 fn make_conversion_map(vm: &mut Vm, map: &PhpArray) -> PResult<Vec<u32>> {
-    if map.len() % 4 != 0 {
+    if !map.len().is_multiple_of(4) {
         return Err(vm.argument_value_error(2, "must have a multiple of 4 elements"));
     }
     let mut out = Vec::with_capacity(map.len());
@@ -635,7 +648,9 @@ fn make_conversion_map(vm: &mut Vm, map: &PhpArray) -> PResult<Vec<u32>> {
         match zval_try_get_long(vm, v)? {
             Some(l) => out.push(l as u32),
             None => {
-                return Err(vm.argument_value_error(2, "must only be composed of values of type int"));
+                return Err(
+                    vm.argument_value_error(2, "must only be composed of values of type int")
+                );
             }
         }
     }
@@ -682,7 +697,7 @@ fn zval_try_get_long(vm: &mut Vm, v: &Value) -> PResult<Option<i64>> {
 
 /// `html_numeric_entity_convert`.
 fn entity_convert(w: u32, convmap: &[u32]) -> Option<u32> {
-    convmap.chunks_exact(4).find_map(|m| {
+    convmap.as_chunks::<4>().0.iter().find_map(|m| {
         let (lo, hi, offset, mask) = (m[0], m[1], m[2], m[3]);
         (w >= lo && w <= hi).then(|| w.wrapping_add(offset) & mask)
     })
@@ -690,14 +705,20 @@ fn entity_convert(w: u32, convmap: &[u32]) -> Option<u32> {
 
 /// `html_numeric_entity_deconvert`.
 fn entity_deconvert(number: u32, convmap: &[u32]) -> Option<u32> {
-    convmap.chunks_exact(4).find_map(|m| {
+    convmap.as_chunks::<4>().0.iter().find_map(|m| {
         let codepoint = number.wrapping_sub(m[2]);
         (codepoint >= m[0] && codepoint <= m[1]).then_some(codepoint)
     })
 }
 
 /// `html_numeric_entity_encode`.
-fn numeric_entity_encode(input: &[u8], encoding: &'static Encoding, convmap: &[u32], hex: bool, illegal: (u32, u32)) -> Vec<u8> {
+fn numeric_entity_encode(
+    input: &[u8],
+    encoding: &'static Encoding,
+    convmap: &[u32],
+    hex: bool,
+    illegal: (u32, u32),
+) -> Vec<u8> {
     let mut wchar_buf = [0u32; 32];
     let mut converted: Vec<u32> = Vec::with_capacity(32 * 13);
     let mut state = 0u32;
@@ -733,7 +754,9 @@ pub fn mb_encode_numericentity(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     let encoding = get_encoding(vm, args.str_opt(2), 3)?;
     let convmap = make_conversion_map(vm, &map)?;
     let illegal = illegal_settings(vm)?;
-    Ok(Value::String(PhpStr::from_vec(numeric_entity_encode(&s, encoding, &convmap, hex, illegal))))
+    Ok(Value::String(PhpStr::from_vec(numeric_entity_encode(
+        &s, encoding, &convmap, hex, illegal,
+    ))))
 }
 
 const DEC_ENTITY_MINLEN: usize = 3; // "&#" and 1 decimal digit
@@ -746,12 +769,19 @@ fn is_digit(w: u32) -> bool {
 }
 
 fn is_hex_digit(w: u32) -> bool {
-    is_digit(w) || (b'A' as u32..=b'F' as u32).contains(&w) || (b'a' as u32..=b'f' as u32).contains(&w)
+    is_digit(w)
+        || (b'A' as u32..=b'F' as u32).contains(&w)
+        || (b'a' as u32..=b'f' as u32).contains(&w)
 }
 
 /// `html_numeric_entity_decode`: an entity cut off at the end of a batch is
 /// carried over to the next one.
-fn numeric_entity_decode(input: &[u8], encoding: &'static Encoding, convmap: &[u32], illegal: (u32, u32)) -> Vec<u8> {
+fn numeric_entity_decode(
+    input: &[u8],
+    encoding: &'static Encoding,
+    convmap: &[u32],
+    illegal: (u32, u32),
+) -> Vec<u8> {
     const AMP: u32 = b'&' as u32;
     let mut wchar_buf = [0u32; 128];
     let mut converted: Vec<u32> = Vec::with_capacity(128);
@@ -894,7 +924,9 @@ pub fn mb_decode_numericentity(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     let encoding = get_encoding(vm, args.str_opt(2), 3)?;
     let convmap = make_conversion_map(vm, &map)?;
     let illegal = illegal_settings(vm)?;
-    Ok(Value::String(PhpStr::from_vec(numeric_entity_decode(&s, encoding, &convmap, illegal))))
+    Ok(Value::String(PhpStr::from_vec(numeric_entity_decode(
+        &s, encoding, &convmap, illegal,
+    ))))
 }
 
 /// The shared `mb_list_encodings()` array (re-exported for tests).
