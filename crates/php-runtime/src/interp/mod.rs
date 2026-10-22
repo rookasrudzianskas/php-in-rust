@@ -66,6 +66,10 @@ pub struct State {
     pub shutdown_functions: Vec<(Value, Vec<Value>)>,
     /// `register_tick_function` entries.
     pub tick_functions: Vec<(Value, Vec<Value>)>,
+    /// `EG(ticks_count)`.
+    pub ticks_count: u32,
+    /// Tick functions being called (they are not re-entered).
+    pub ticks_calling: Vec<Value>,
     /// Autoloaders (`spl_autoload_register` stores its callables here; they
     /// are called in order by class lookups).
     pub autoload_functions: Vec<Value>,

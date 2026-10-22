@@ -1078,20 +1078,69 @@ fn register_tick_function(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
     Ok(Value::Bool(true))
 }
 
+/// What `zend_fcc_equals` compares: the function (or the closure object of
+/// an anonymous function), the object and a trampoline's method name.
+fn tick_callable_key(vm: &mut Vm, v: &Value) -> Option<(String, u32, Option<Vec<u8>>)> {
+    let info = call::check_callable(vm, v, false).ok()?;
+    let t = info.target;
+    if let Some(c) = &t.closure {
+        if !c.from_callable {
+            if let Value::Object(o) = &*v.deref() {
+                return Some((String::new(), o.id(), None));
+            }
+        }
+    }
+    let name = t.func.display_name().to_ascii_lowercase();
+    let this = t.this.as_ref().map_or(0, |o| o.id());
+    let magic = t.magic_name.as_ref().map(|m| m.as_bytes().to_ascii_lowercase());
+    Some((name, this, magic))
+}
+
 fn unregister_tick_function(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
     let f = a.get(0).clone();
-    vm.interp
-        .tick_functions
-        .retain(|(g, _)| !crate::value::ops::is_identical(g, &f));
+    let Some(key) = tick_callable_key(vm, &f) else { return Ok(Value::Null) };
+    let entries: Vec<Value> = vm.interp.tick_functions.iter().map(|(g, _)| g.clone()).collect();
+    let calling = vm.interp.ticks_calling.clone();
+    for (i, g) in entries.iter().enumerate() {
+        if tick_callable_key(vm, g).as_ref() != Some(&key) {
+            continue;
+        }
+        if calling.iter().any(|c| crate::value::ops::is_identical(c, g)) {
+            return Err(vm.throw_error("Error", "Registered tick function cannot be unregistered while it is being executed"));
+        }
+        vm.interp.tick_functions.remove(i);
+        break;
+    }
     Ok(Value::Null)
 }
 
 /// Runs the registered tick functions (`declare(ticks=N)`).
+/// `ZEND_TICKS`: every `n`th tick runs the tick functions.
+pub fn tick(vm: &mut Vm, n: u32) -> PResult<()> {
+    vm.interp.ticks_count += 1;
+    if vm.interp.ticks_count >= n {
+        vm.interp.ticks_count = 0;
+        run_ticks(vm)?;
+    }
+    Ok(())
+}
+
 pub fn run_ticks(vm: &mut Vm) -> PResult<()> {
     let ticks = vm.interp.tick_functions.clone();
     // Fibers cannot switch while tick functions run (ZEND_TICKS).
     super::fiber::block_switch();
-    let r = ticks.into_iter().try_for_each(|(f, args)| vm.call(&f, args).map(drop));
+    let r = ticks.into_iter().try_for_each(|(f, args)| {
+        // A tick function is not re-entered (user_tick_function_call).
+        if vm.interp.ticks_calling.iter().any(|g| crate::value::ops::is_identical(g, &f)) {
+            return Ok(());
+        }
+        vm.interp.ticks_calling.push(f.clone());
+        let r = vm.call(&f, args).map(drop);
+        if let Some(i) = vm.interp.ticks_calling.iter().rposition(|g| crate::value::ops::is_identical(g, &f)) {
+            vm.interp.ticks_calling.remove(i);
+        }
+        r
+    });
     super::fiber::unblock_switch();
     r
 }

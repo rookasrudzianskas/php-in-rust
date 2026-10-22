@@ -191,6 +191,8 @@ pub(crate) struct Lowerer<'v> {
     in_const_expr: bool,
     /// Nesting depth of top-level statement compilation (0 = top level of file).
     depth: u32,
+    /// `FC(declarables).ticks`: emit a tick after each statement.
+    ticks: u32,
 }
 
 /// `zend_is_auto_global`.
@@ -228,6 +230,7 @@ impl<'v> Lowerer<'v> {
             line: 0,
             in_const_expr: false,
             depth: 0,
+            ticks: 0,
         }
     }
 
@@ -298,8 +301,25 @@ impl<'v> Lowerer<'v> {
                 break;
             }
             self.top_stmt(s, i == 0 || stmts[..i].iter().all(is_declare_or_nop), &mut out)?;
+            self.emit_tick(s, &mut out);
         }
         Ok(out)
+    }
+
+    /// `zend_emit_tick` after a statement compiled under `declare(ticks=N)`
+    /// (not after statement lists, labels and empty statements, nor when
+    /// the code emitted so far already ends with a tick).
+    fn emit_tick(&mut self, s: &ast::Stmt, out: &mut Block) {
+        if self.ticks == 0
+            || matches!(s.kind, ast::StmtKind::Block(_) | ast::StmtKind::Label(_) | ast::StmtKind::Nop)
+            || ends_with_tick(out)
+        {
+            return;
+        }
+        out.push(Stmt {
+            kind: StmtKind::Ticks(self.ticks, Vec::new()),
+            line: s.line,
+        });
     }
 
     fn top_stmt(&mut self, s: &ast::Stmt, first: bool, out: &mut Block) -> CResult<()> {
@@ -346,6 +366,7 @@ impl<'v> Lowerer<'v> {
                         }
                         let first = body[..i].iter().all(is_declare_or_nop);
                         self.top_stmt(s, first, out)?;
+                        self.emit_tick(s, out);
                     }
                     self.namespace = PhpStr::new();
                 }
@@ -376,8 +397,9 @@ impl<'v> Lowerer<'v> {
             let lit = match &d.value.kind {
                 ast::ExprKind::Int(_)
                 | ast::ExprKind::Float(_)
-                | ast::ExprKind::String(_)
-                | ast::ExprKind::Const(_) => true,
+                | ast::ExprKind::String(_) => true,
+                // A constant is not a literal (ZEND_AST_ZVAL) for ticks.
+                ast::ExprKind::Const(_) => !d.name.eq_ignore_case(b"ticks"),
                 ast::ExprKind::Unary { op, expr } => {
                     matches!(op, ast::UnaryOp::Minus | ast::UnaryOp::Plus)
                         && matches!(expr.kind, ast::ExprKind::Int(_) | ast::ExprKind::Float(_))
@@ -420,33 +442,26 @@ impl<'v> Lowerer<'v> {
                 )?;
             }
         }
+        let orig_ticks = self.ticks;
+        if let Some(n) = ticks {
+            self.ticks = n;
+        }
         if let Some(body) = body {
             let inner = if self.depth == 0 && self.fs.kind == FuncKind::Main {
                 let mut b = Vec::new();
                 for s in body {
                     self.top_stmt(s, false, &mut b)?;
+                    self.emit_tick(s, &mut b);
                 }
                 b
             } else {
                 self.block(body)?
             };
-            match ticks {
-                Some(n) if n > 0 => out.push(Stmt {
-                    kind: StmtKind::Ticks(n, inner),
-                    line,
-                }),
-                _ => out.push(Stmt {
-                    kind: StmtKind::Block(inner),
-                    line,
-                }),
-            }
-        } else if let Some(n) = ticks {
-            // `declare(ticks=N);` applies to the rest of the file: handled by
-            // wrapping subsequent statements at runtime.
-            out.push(Stmt {
-                kind: StmtKind::Ticks(n, Vec::new()),
-                line,
-            });
+            // Block mode: the directives only apply to the block. The block
+            // is not a scope (labels inside it are reachable by goto).
+            self.ticks = orig_ticks;
+            let _ = line;
+            out.extend(inner);
         }
         Ok(())
     }
@@ -457,6 +472,7 @@ impl<'v> Lowerer<'v> {
         for s in stmts {
             if let ast::StmtKind::Declare { directives, body } = &s.kind {
                 self.declare(directives, body.as_ref(), false, s.line, &mut out)?;
+                self.emit_tick(s, &mut out);
                 continue;
             }
             if let ast::StmtKind::HaltCompiler { .. } = s.kind {
@@ -466,6 +482,7 @@ impl<'v> Lowerer<'v> {
             }
             let st = self.stmt(s)?;
             out.push(st);
+            self.emit_tick(s, &mut out);
         }
         self.depth -= 1;
         Ok(out)
@@ -488,6 +505,17 @@ impl<'v> Lowerer<'v> {
         let line = s.line;
         let kind = match &s.kind {
             ast::StmtKind::Expr(e) => {
+                if let ast::ExprKind::Var(ast::VarName::Name(n)) = &e.kind {
+                    if n.as_bytes() != b"this" && !is_auto_global(n.as_bytes()) {
+                        // A compiled variable as a statement emits no code
+                        // (no undefined-variable warning).
+                        let _ = self.expr(e)?;
+                        return Ok(Stmt {
+                            kind: StmtKind::Nop,
+                            line,
+                        });
+                    }
+                }
                 if let ast::ExprKind::VoidCast(inner) = &e.kind {
                     StmtKind::Expr(Expr::Void(Box::new(self.expr(inner)?)))
                 } else {
@@ -1030,4 +1058,29 @@ pub(crate) enum LvMode {
     Unset,
     Isset,
     Ref,
+}
+
+/// Whether the code of `block` ends with a tick (`ZEND_TICKS` as the last
+/// emitted opcode; statements emitting no code are skipped).
+fn ends_with_tick(block: &[Stmt]) -> bool {
+    for st in block.iter().rev() {
+        match &st.kind {
+            StmtKind::Nop | StmtKind::Label(_) => continue,
+            StmtKind::Ticks(_, b) if b.is_empty() => return true,
+            StmtKind::Block(b) if b.is_empty() => continue,
+            StmtKind::Block(b) => return ends_with_tick(b),
+            StmtKind::If(branches, els) => {
+                let last = match els {
+                    Some(e) => e,
+                    None => match branches.last() {
+                        Some((_, b)) => b,
+                        None => return false,
+                    },
+                };
+                return ends_with_tick(last);
+            }
+            _ => return false,
+        }
+    }
+    false
 }
