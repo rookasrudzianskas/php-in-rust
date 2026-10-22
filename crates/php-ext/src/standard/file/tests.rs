@@ -798,3 +798,92 @@ fn open_basedir_restriction() {
         )
     );
 }
+
+#[test]
+fn flock_would_block_between_handles() {
+    let mut t = TestVm::new();
+    let d = scratch("flock2");
+    let f = format!("{d}/l");
+    let a = t.call("fopen", vec![s(&f), s("w")]).unwrap();
+    let b = t.call("fopen", vec![s(&f), s("r")]).unwrap();
+    assert_eq!(
+        t.call("flock", vec![a.clone(), Value::Int(2)]).unwrap().as_bool(),
+        Some(true)
+    );
+    let wb = Value::Ref(PhpRef::new(Value::Null));
+    let r = t
+        .call("flock", vec![b.clone(), Value::Int(2 | 4), wb.clone()])
+        .unwrap();
+    assert_eq!(r.as_bool(), Some(false));
+    assert_eq!(wb.unref().as_int(), Some(1));
+    t.call("fclose", vec![a]).unwrap();
+    assert_eq!(
+        t.call("flock", vec![b, Value::Int(2 | 4)]).unwrap().as_bool(),
+        Some(true)
+    );
+}
+
+#[test]
+fn php_fd_and_std_streams() {
+    let mut t = TestVm::new();
+    let fp = t.call("fopen", vec![s("php://fd/1"), s("w")]).unwrap();
+    assert!(matches!(fp, Value::Resource(_)));
+    let r = t.call("fopen", vec![s("php://fd/x"), s("w")]).unwrap();
+    assert_eq!(r.as_bool(), Some(false));
+    assert_eq!(
+        t.output(),
+        "\nWarning: fopen(): Failed to open stream: php://fd/ stream must be specified in the form php://fd/<orig fd> in /t.php on line 3\n"
+    );
+    let r = t.call("fopen", vec![s("php://fd/-1"), s("w")]).unwrap();
+    assert_eq!(r.as_bool(), Some(false));
+    assert!(t.output().contains(
+        "Failed to open stream: The file descriptors must be non-negative numbers smaller than"
+    ));
+    for url in ["php://stdin", "php://STDERR"] {
+        let fp = t.call("fopen", vec![s(url), s("r")]).unwrap();
+        let m = t.call("stream_get_meta_data", vec![fp]).unwrap();
+        let a = m.as_array().unwrap();
+        assert_eq!(as_bytes(a.get_str(b"wrapper_type").unwrap()), b"PHP");
+        assert_eq!(as_bytes(a.get_str(b"uri").unwrap()), url.as_bytes());
+    }
+}
+
+#[test]
+fn tmpfile_metadata_and_fstat() {
+    let mut t = TestVm::new();
+    let fp = t.call("tmpfile", vec![]).unwrap();
+    let m = t.call("stream_get_meta_data", vec![fp.clone()]).unwrap();
+    let a = m.as_array().unwrap();
+    assert_eq!(as_bytes(a.get_str(b"wrapper_type").unwrap()), b"plainfile");
+    assert_eq!(as_bytes(a.get_str(b"mode").unwrap()), b"r+b");
+    let uri = String::from_utf8(as_bytes(a.get_str(b"uri").unwrap())).unwrap();
+    assert!(std::path::Path::new(&uri).exists());
+    t.call("fwrite", vec![fp.clone(), s("12345")]).unwrap();
+    let st = t.call("fstat", vec![fp.clone()]).unwrap();
+    let st = st.as_array().unwrap();
+    assert_eq!(st.len(), 26);
+    assert_eq!(st.get_int(7).and_then(|v| v.as_int()), Some(5));
+    assert_eq!(st.get_str(b"size").and_then(|v| v.as_int()), Some(5));
+    assert_eq!(
+        t.call("ftruncate", vec![fp.clone(), Value::Int(2)]).unwrap().as_bool(),
+        Some(true)
+    );
+    t.call("fclose", vec![fp]).unwrap();
+    // the temporary file is removed on close
+    assert!(!std::path::Path::new(&uri).exists());
+}
+
+#[test]
+fn mac_line_endings_with_auto_detect() {
+    let mut t = TestVm::new();
+    let d = scratch("eol");
+    let f = format!("{d}/mac");
+    std::fs::write(&f, "a\rb\rc").unwrap();
+    t.vm.ini_set("auto_detect_line_endings", "1");
+    let fp = t.call("fopen", vec![s(&f), s("r")]).unwrap();
+    assert_eq!(as_bytes(&t.call("fgets", vec![fp.clone()]).unwrap()), b"a\r");
+    assert_eq!(as_bytes(&t.call("fgets", vec![fp.clone()]).unwrap()), b"b\r");
+    assert_eq!(as_bytes(&t.call("fgets", vec![fp]).unwrap()), b"c");
+    let r = t.call("file", vec![s(&f)]).unwrap();
+    assert_eq!(r.as_array().unwrap().len(), 3);
+}
