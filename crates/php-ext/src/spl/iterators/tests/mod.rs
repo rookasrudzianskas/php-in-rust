@@ -12,6 +12,7 @@ macro_rules! phpt {
     };
 }
 
+mod append;
 mod caching;
 mod dual;
 mod helpers;

@@ -28,15 +28,6 @@ fn print_values(vm: &mut Vm, it: &php_runtime::ObjRef) -> PResult<()> {
     })
 }
 
-fn print_pairs(vm: &mut Vm, it: &php_runtime::ObjRef) -> PResult<()> {
-    foreach_with(vm, it, true, |vm, k, v| {
-        let k = vm.to_php_string(&k)?;
-        let v = vm.to_php_string(&v)?;
-        vm.echo_str(&format!("{k}=>{v}\n"))?;
-        Ok(true)
-    })
-}
-
 fn var_dump_int(vm: &mut Vm, v: &Value) -> PResult<()> {
     vm.echo_str(&format!("int({})\n", int(v)))
 }
