@@ -3,7 +3,7 @@
 //! `array_splice`, `array_reverse`, `array_change_key_case` and the stack
 //! functions `array_push`, `array_pop`, `array_shift`, `array_unshift`.
 
-use php_runtime::{Args, ArrayKey, NativeFunction, PResult, PhpArray, Value, Vm};
+use php_runtime::{Args, ArrayKey, NativeFunction, PResult, PhpArray, PhpRef, Value, Vm};
 
 use super::util::{HT_MAX_SIZE, append_or_throw, cannot_add_element, copy_elem, set_array};
 use super::util::{ref_array, with_array_mut};
@@ -295,12 +295,37 @@ fn array_push(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     }
 }
 
+/// Whether the element `pick` selects from the array in `var` is a reference
+/// to `var` itself (`$a = [&$a, ...]`): `array_pop`/`array_shift` then return
+/// the variable's value as it is *after* the removal.
+fn is_self_reference(var: &PhpRef, pick: impl Fn(&PhpArray) -> Option<Value>) -> bool {
+    let slot = match &*var.borrow() {
+        Value::Array(a) => pick(a.as_ref()),
+        _ => None,
+    };
+    matches!(slot, Some(Value::Ref(r)) if PhpRef::ptr_eq(&r, var))
+}
+
 fn array_pop(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
-    Ok(with_array_mut(vm, args, 0, |a| a.pop()).unwrap_or(Value::Null))
+    let var = args.by_ref(0);
+    let self_ref = is_self_reference(&var, |a| a.last().map(|(_, v)| v.clone()));
+    let popped = with_array_mut(vm, args, 0, |a| a.pop());
+    Ok(match popped {
+        Some(_) if self_ref => var.get(),
+        Some(v) => v,
+        None => Value::Null,
+    })
 }
 
 fn array_shift(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
-    Ok(with_array_mut(vm, args, 0, |a| a.shift()).unwrap_or(Value::Null))
+    let var = args.by_ref(0);
+    let self_ref = is_self_reference(&var, |a| a.first().map(|(_, v)| v.clone()));
+    let shifted = with_array_mut(vm, args, 0, |a| a.shift());
+    Ok(match shifted {
+        Some(_) if self_ref => var.get(),
+        Some(v) => v,
+        None => Value::Null,
+    })
 }
 
 fn array_unshift(vm: &mut Vm, args: &mut Args) -> PResult<Value> {

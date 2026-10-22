@@ -304,3 +304,45 @@ fn pointer_is_shared_between_references() {
     assert_eq!(peek(&mut t, &a1, "current"), "'two'");
     assert_eq!(peek(&mut t, &a2, "current"), "'two'");
 }
+
+fn typed_class(name: &str, props: &[&str]) -> Rc<ClassEntry> {
+    let mut ce = ClassEntry::new(name, 0);
+    for p in props {
+        let mut info = PropertyInfo::new(*p, name, member_flags::PUBLIC);
+        info.default = Value::Undef; // `public int $p;` is uninitialised
+        ce.declare_property(info);
+    }
+    Rc::new(ce)
+}
+
+#[test]
+fn internal_pointer_skips_uninitialised_properties() {
+    // GH-16905: typed properties without a value are skipped.
+    let mut t = vm();
+    let x = ObjRef::new(typed_class("TestSomeUndef", &["a", "b", "c", "d"]));
+    x.set_prop(b"b", i(1));
+    x.set_prop(b"c", i(2));
+    let r = PhpRef::new(Value::Object(x));
+    assert_eq!(ptr(&mut t, &r, "reset"), "1");
+    assert_eq!(peek(&mut t, &r, "current"), "1");
+    assert_eq!(ptr(&mut t, &r, "end"), "2");
+    assert_eq!(ptr(&mut t, &r, "reset"), "1");
+    assert_eq!(ptr(&mut t, &r, "next"), "2");
+    assert_eq!(ptr(&mut t, &r, "end"), "2");
+    assert_eq!(ptr(&mut t, &r, "prev"), "1");
+    assert_eq!(peek(&mut t, &r, "key"), "'b'");
+    assert_eq!(peek(&mut t, &r, "current"), "1");
+
+    // An object without any initialised property: the pointer is moved past
+    // the end by the first read and stays there until reset().
+    let y = ObjRef::new(typed_class("TestAllUndef", &["a"]));
+    let r = PhpRef::new(Value::Object(y.clone()));
+    assert_eq!(peek(&mut t, &r, "key"), "null");
+    assert_eq!(peek(&mut t, &r, "current"), "false");
+    y.set_prop(b"a", i(1));
+    assert_eq!(peek(&mut t, &r, "key"), "null");
+    assert_eq!(peek(&mut t, &r, "current"), "false");
+    ptr(&mut t, &r, "reset");
+    assert_eq!(peek(&mut t, &r, "key"), "'a'");
+    assert_eq!(peek(&mut t, &r, "current"), "1");
+}

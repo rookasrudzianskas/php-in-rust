@@ -116,13 +116,15 @@ pub fn with_array_mut<R>(
             }
         }
     }
-    let out = {
-        let mut slot = r.borrow_mut();
-        match &mut *slot {
-            Value::Array(a) => f(Rc::make_mut(a)),
-            other => panic!("array expected after ZPP, got {other:?}"),
-        }
+    // Take the array out of the variable while `f` runs: element references
+    // may point back at the variable itself (`$a[] = &$a`), and reading them
+    // must not hit a RefCell that is mutably borrowed.
+    let mut taken = std::mem::replace(&mut *r.borrow_mut(), Value::Null);
+    let out = match &mut taken {
+        Value::Array(a) => f(Rc::make_mut(a)),
+        other => panic!("array expected after ZPP, got {other:?}"),
     };
+    *r.borrow_mut() = taken;
     if !released.is_empty() {
         if let (Some(frame), Value::Array(cur)) = (vm.frames.last_mut(), &*r.borrow()) {
             for idx in released {

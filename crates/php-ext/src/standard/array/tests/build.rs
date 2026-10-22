@@ -778,3 +778,43 @@ fn array_unshift_phpt() {
     let (_, a) = call_ref(&mut t, "array_unshift", php("[]"), vec![php("[1]")]);
     assert_eq!(show(&a), "[[1]]");
 }
+
+#[test]
+fn array_pop_shift_on_self_referencing_arrays() {
+    // gh16957.phpt / gh17447.phpt
+    let mut t = vm();
+    // $new_array = [&$new_array, 1, 'two']; $shifted = array_shift($new_array);
+    let var = PhpRef::new(Value::Null);
+    var.set(Value::array(PhpArray::from_values(vec![
+        Value::Ref(var.clone()),
+        i(1),
+        s("two"),
+    ])));
+    let r = t
+        .call("array_shift", vec![Value::Ref(var.clone())])
+        .unwrap();
+    assert_eq!(show(&r), "[1, 'two']");
+    assert_eq!(show(&var.get()), "[1, 'two']");
+
+    // $new_array2 = [&$new_array2, 2 => 1, 300 => 'two'];
+    let var = PhpRef::new(Value::Null);
+    let mut a = PhpArray::new();
+    a.append(Value::Ref(var.clone())).unwrap();
+    a.insert(2.into(), i(1));
+    a.insert(300.into(), s("two"));
+    var.set(Value::array(a));
+    let r = t
+        .call("array_shift", vec![Value::Ref(var.clone())])
+        .unwrap();
+    assert_eq!(show(&r), "[1, 'two']");
+    assert_eq!(show(&var.get()), "[1, 'two']");
+
+    // $input[] = &$input; array_pop($input)
+    let var = PhpRef::new(Value::Null);
+    var.set(Value::array(PhpArray::from_values(vec![Value::Ref(
+        var.clone(),
+    )])));
+    let r = t.call("array_pop", vec![Value::Ref(var.clone())]).unwrap();
+    assert_eq!(show(&r), "[]");
+    assert_eq!(show(&var.get()), "[]");
+}
