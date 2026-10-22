@@ -3,6 +3,7 @@
 
 pub mod encoding_tests;
 mod functions;
+mod strings;
 
 use php_runtime::{PhpArray, Value};
 
@@ -57,6 +58,26 @@ pub fn vd(t: &mut TestVm, name: &str, args: Vec<Value>) -> String {
     let v = call(t, name, args);
     let before = t.output();
     format!("{before}{}", dump(t, v))
+}
+
+/// `var_dump()` of a call's result (without diagnostics).
+pub fn dump_str(t: &mut TestVm, name: &str, args: Vec<Value>) -> String {
+    let v = call(t, name, args);
+    dump(t, v)
+}
+
+/// The exception a call throws, as `Class: message`.
+pub fn err(t: &mut TestVm, name: &str, args: Vec<Value>) -> String {
+    let (class, msg) = crate::testing::thrown(t.call(name, args));
+    format!("{class}: {msg}")
+}
+
+/// Hex of each string in an array result.
+pub fn hexes(v: &Value) -> Vec<String> {
+    match v {
+        Value::Array(a) => a.values().map(hex).collect(),
+        other => panic!("expected array, got {other:?}"),
+    }
 }
 
 /// An int result.

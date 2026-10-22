@@ -842,7 +842,8 @@ fn trim_each_wchar(
     if left == 0 && right == 0 {
         return None;
     }
-    Some(get_substr(s, left, total_len - (right + left), encoding, illegal))
+    // Everything trimmed: the length wraps around (size_t), selecting nothing.
+    Some(get_substr(s, left, total_len.wrapping_sub(right + left), encoding, illegal))
 }
 
 const TRIM_DEFAULT_CHARS: [u32; 27] = [
