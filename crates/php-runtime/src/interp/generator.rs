@@ -387,7 +387,7 @@ fn pop_frames(vm: &mut Vm, n: usize) {
 
 /// Runs queued destructors now (php-src destroys values as soon as they are
 /// released); an exception they throw is chained onto a pending one.
-fn run_dtors<T>(vm: &mut Vm, r: PResult<T>) -> PResult<T> {
+pub(crate) fn run_queued_destructors<T>(vm: &mut Vm, r: PResult<T>) -> PResult<T> {
     if !object::has_pending_destructors() {
         return r;
     }
@@ -460,7 +460,7 @@ fn run_step(vm: &mut Vm, gn: &Rc<GenObj>, frames: &mut PathFrames) -> Step {
             frames.pop(vm);
             let env = gn.env.borrow_mut().take();
             drop(env);
-            let res = run_dtors(vm, res);
+            let res = run_queued_destructors(vm, res);
             match res {
                 Ok(_) => Step::Returned,
                 Err(f) => Step::Threw(f),
@@ -771,7 +771,7 @@ pub fn eval_yield_from(vm: &mut Vm, cx: &Ctx, e: &Expr, line: u32) -> PResult<Va
                 None => Ok(Value::Null),
                 // The remaining values are released before the exception
                 // reaches the generator.
-                Some(f) => run_dtors(vm, Err(f)),
+                Some(f) => run_queued_destructors(vm, Err(f)),
             }
         }
         Value::Object(o) => {
@@ -794,7 +794,7 @@ pub fn eval_yield_from(vm: &mut Vm, cx: &Ctx, e: &Expr, line: u32) -> PResult<Va
             });
             drop(o);
             match (r, err) {
-                (Err(e), _) | (Ok(()), Some(e)) => run_dtors(vm, Err(e)),
+                (Err(e), _) | (Ok(()), Some(e)) => run_queued_destructors(vm, Err(e)),
                 (Ok(()), None) => Ok(Value::Null),
             }
         }
@@ -893,7 +893,7 @@ fn gen_dtor(vm: &mut Vm, o: &ObjRef) -> PResult<()> {
     let mut r = Ok(());
     if parent.is_some() {
         drop(parent);
-        r = run_dtors(vm, Ok(()));
+        r = run_queued_destructors(vm, Ok(()));
     }
     let (alive, started) = {
         let c = g.core.borrow();
@@ -904,12 +904,12 @@ fn gen_dtor(vm: &mut Vm, o: &ObjRef) -> PResult<()> {
     }
     if !started {
         close(&g);
-        return run_dtors(vm, r);
+        return run_queued_destructors(vm, r);
     }
     g.core.borrow_mut().forced_close = true;
     let Some(mut co) = g.co.borrow_mut().take() else {
         close(&g);
-        return run_dtors(vm, r);
+        return run_queued_destructors(vm, r);
     };
     {
         let mut c = g.core.borrow_mut();
@@ -948,7 +948,7 @@ fn gen_dtor(vm: &mut Vm, o: &ObjRef) -> PResult<()> {
     g.core.borrow_mut().running = false;
     vm.pop_frame();
     close(&g);
-    let out = run_dtors(vm, out);
+    let out = run_queued_destructors(vm, out);
     vm.current_file = saved_file;
     vm.current_line = saved_line;
     match (out, r) {

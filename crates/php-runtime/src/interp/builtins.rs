@@ -1089,10 +1089,11 @@ fn unregister_tick_function(vm: &mut Vm, a: &mut Args) -> PResult<Value> {
 /// Runs the registered tick functions (`declare(ticks=N)`).
 pub fn run_ticks(vm: &mut Vm) -> PResult<()> {
     let ticks = vm.interp.tick_functions.clone();
-    for (f, args) in ticks {
-        vm.call(&f, args)?;
-    }
-    Ok(())
+    // Fibers cannot switch while tick functions run (ZEND_TICKS).
+    super::fiber::block_switch();
+    let r = ticks.into_iter().try_for_each(|(f, args)| vm.call(&f, args).map(drop));
+    super::fiber::unblock_switch();
+    r
 }
 
 // ----- assert -------------------------------------------------------------------------------------
