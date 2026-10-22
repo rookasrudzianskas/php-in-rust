@@ -1748,6 +1748,108 @@ impl crate::class::InternalIterator for HookedIter {
     }
 }
 
+/// `zend_hooked_object_build_properties` with the hooked properties read
+/// through their get hooks (what `json_encode()` and `get_object_vars()`
+/// see): `(mangled key, value)`, declared then dynamic properties.
+fn hooked_property_values(vm: &mut Vm, obj: &ObjRef) -> PResult<Vec<(PhpStr, Value)>> {
+    let class = obj.class().clone();
+    let mut chain = Vec::new();
+    let mut c = Some(class.clone());
+    while let Some(ce) = c {
+        c = ce.parent.clone();
+        chain.push(ce);
+    }
+    let mut entries: Vec<(PhpStr, PropertyInfo)> = Vec::new();
+    for pce in chain.iter().rev() {
+        for info in pce.properties.values() {
+            if info.is_static() {
+                continue;
+            }
+            let mut key = mangled_name(info);
+            if info.flags & member_flags::PROTECTED != 0
+                && class.properties.get(&info.name).is_some_and(|ci| ci.flags & member_flags::PUBLIC != 0)
+            {
+                key = info.name.clone();
+            }
+            match entries.iter().position(|(k, _)| *k == key) {
+                Some(i) => entries[i].1 = info.clone(),
+                None => entries.push((key, info.clone())),
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (key, info) in entries {
+        if let Some(h) = prop_hooks(&info) {
+            if is_virtual(&info) && h.get.is_none() {
+                continue;
+            }
+            if h.get.is_none() && slot_value(obj, info.slot).is_undef() {
+                continue;
+            }
+            let scope = vm.find_class(&info.declaring_class);
+            let v = read_property_handler(vm, scope.as_ref(), obj, &info.name, Fetch::Is)?;
+            out.push((key, v.into_unref()));
+        } else {
+            let v = slot_value(obj, info.slot);
+            if !v.is_undef() {
+                out.push((key, v));
+            }
+        }
+    }
+    if let Some(d) = obj.obj().dyn_props.borrow().as_ref() {
+        for (k, v) in d.iter() {
+            out.push((k.to_php_str(), v.clone()));
+        }
+    }
+    Ok(out)
+}
+
+/// The `get_properties_for` handler of classes with hooked properties:
+/// `json_encode()` and `get_object_vars()` read hooked properties through
+/// their get hooks; other purposes use the backing values.
+pub(crate) fn hooked_properties_for(vm: &mut Vm, obj: &ObjRef, purpose: PropPurpose) -> PResult<Option<PhpArray>> {
+    match purpose {
+        PropPurpose::Json => {
+            let mut t = PhpArray::new();
+            for (k, v) in hooked_property_values(vm, obj)? {
+                t.insert(ArrayKey::Str(k), v);
+            }
+            Ok(Some(t))
+        }
+        PropPurpose::GetObjectVars => {
+            let scope = super::call::calling_scope(vm);
+            let mut t = PhpArray::new();
+            for (k, v) in hooked_property_values(vm, obj)? {
+                let (cls, name) = unmangle(&k);
+                let visible = match &cls {
+                    None => {
+                        // Declared public, or dynamic.
+                        match obj.class().properties.get(&name) {
+                            Some(info) if !info.is_static() => declared_accessible(vm, obj, info, scope.as_ref()),
+                            _ => true,
+                        }
+                    }
+                    Some(c) if c.as_slice() == b"*" => obj
+                        .class()
+                        .properties
+                        .get(&name)
+                        .is_some_and(|info| declared_accessible(vm, obj, info, scope.as_ref())),
+                    Some(c) => scope.as_ref().is_some_and(|s| s.name.eq_ignore_ascii_case(c)),
+                };
+                if visible {
+                    let v = match v {
+                        Value::Ref(r) if r.refcount() <= 2 => r.get(),
+                        v => v,
+                    };
+                    t.insert(ArrayKey::Str(PhpStr::from_vec(name)), v);
+                }
+            }
+            Ok(Some(t))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// `zend_hooked_object_get_iterator`: the `get_iterator` handler of classes
 /// with hooked properties.
 pub(crate) fn hooked_get_iterator(vm: &mut Vm, obj: &ObjRef, by_ref: bool) -> PResult<Rc<dyn std::any::Any>> {
