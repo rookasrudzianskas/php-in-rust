@@ -101,9 +101,21 @@ fn internal_pointer_is_reset_by_modifying_functions() {
 
 fn my_class() -> Rc<ClassEntry> {
     let mut ce = ClassEntry::new("MyClass", 0);
-    ce.declare_property(PropertyInfo::new("pri_value", "MyClass", member_flags::PRIVATE));
-    ce.declare_property(PropertyInfo::new("pub_value", "MyClass", member_flags::PUBLIC));
-    ce.declare_property(PropertyInfo::new("pro_value", "MyClass", member_flags::PROTECTED));
+    ce.declare_property(PropertyInfo::new(
+        "pri_value",
+        "MyClass",
+        member_flags::PRIVATE,
+    ));
+    ce.declare_property(PropertyInfo::new(
+        "pub_value",
+        "MyClass",
+        member_flags::PUBLIC,
+    ));
+    ce.declare_property(PropertyInfo::new(
+        "pro_value",
+        "MyClass",
+        member_flags::PROTECTED,
+    ));
     Rc::new(ce)
 }
 
@@ -127,7 +139,10 @@ fn internal_pointer_of_objects_is_deprecated() {
         "\nDeprecated: current(): Calling current() on an object is deprecated in /t.php on line 3\n"
     );
     assert_eq!(ptr(&mut t, &r, "next"), "2");
-    assert!(t.output().contains("Deprecated: next(): Calling next() on an object is deprecated"));
+    assert!(
+        t.output()
+            .contains("Deprecated: next(): Calling next() on an object is deprecated")
+    );
     assert_eq!(peek(&mut t, &r, "key"), "'pub_value'");
     t.output();
     assert_eq!(ptr(&mut t, &r, "next"), "3");
@@ -136,7 +151,10 @@ fn internal_pointer_of_objects_is_deprecated() {
     assert_eq!(ptr(&mut t, &r, "end"), "3");
     assert_eq!(ptr(&mut t, &r, "reset"), "1");
     assert_eq!(peek(&mut t, &r, "pos"), "1");
-    assert!(t.output().contains("Deprecated: pos(): Calling pos() on an object is deprecated"));
+    assert!(
+        t.output()
+            .contains("Deprecated: pos(): Calling pos() on an object is deprecated")
+    );
 }
 
 #[test]
@@ -146,7 +164,12 @@ fn array_walk_modifies_by_reference() {
     assert_eq!(show(&r.unwrap()), "true");
     assert_eq!(show(&a), "[2, 3, 4]");
     // With the extra argument.
-    let (_, a) = call_ref(&mut t, "array_walk", php("['a' => 1, 'b' => 2]"), vec![s("t_inc"), i(10)]);
+    let (_, a) = call_ref(
+        &mut t,
+        "array_walk",
+        php("['a' => 1, 'b' => 2]"),
+        vec![s("t_inc"), i(10)],
+    );
     assert_eq!(show(&a), "['a' => 12, 'b' => 13]");
     // Empty arrays do nothing.
     let (r, a) = call_ref(&mut t, "array_walk", php("[]"), vec![s("t_inc")]);
@@ -185,7 +208,12 @@ fn array_walk_recursive_phpt() {
     );
     assert_eq!(show(&a), "[0 => 2, 1 => [3, [4, 5]], 'k' => 6]");
     // Exceptions propagate.
-    let (r, _) = call_ref(&mut t, "array_walk_recursive", php("[1, [2]]"), vec![s("t_throw")]);
+    let (r, _) = call_ref(
+        &mut t,
+        "array_walk_recursive",
+        php("[1, [2]]"),
+        vec![s("t_throw")],
+    );
     assert_eq!(thrown(r), ("Exception".into(), "boom".into()));
 }
 
@@ -194,7 +222,10 @@ fn array_walk_recursive_detects_recursion() {
     let mut t = vm();
     // $a = [1]; $a[] = &$a;
     let var = PhpRef::new(Value::Null);
-    var.set(Value::array(PhpArray::from_values(vec![i(1), Value::Ref(var.clone())])));
+    var.set(Value::array(PhpArray::from_values(vec![
+        i(1),
+        Value::Ref(var.clone()),
+    ])));
     let r = t.call(
         "array_walk_recursive",
         vec![Value::Ref(var.clone()), s("t_walk_log")],
@@ -213,7 +244,10 @@ fn array_walk_objects_are_deprecated() {
     assert!(out.contains(
         "Deprecated: array_walk(): Passing an object for argument #1 $array to array_walk() is deprecated, call get_object_vars() first instead in /t.php on line 3"
     ));
-    assert_eq!(take_log(), ["\0MyClass\0pri_value=1", "pub_value=2", "\0*\0pro_value=3"]);
+    assert_eq!(
+        take_log(),
+        ["\0MyClass\0pri_value=1", "pub_value=2", "\0*\0pro_value=3"]
+    );
 }
 
 #[test]
@@ -235,4 +269,38 @@ fn array_walk_callback_is_validated() {
             "array_walk(): Argument #1 ($array) must be of type object|array, string given".into()
         )
     );
+}
+
+#[test]
+fn pointer_at_the_end_sees_later_appends() {
+    // current_variation6.phpt
+    let mut t = vm();
+    let r = PhpRef::new(php("['foo' => 1, 'bar' => 2, 'baz' => 3]"));
+    assert_eq!(ptr(&mut t, &r, "reset"), "1");
+    assert_eq!(ptr(&mut t, &r, "next"), "2");
+    assert_eq!(ptr(&mut t, &r, "next"), "3");
+    assert_eq!(ptr(&mut t, &r, "next"), "false");
+    // unset($array["baz"]); $array[] = 4;
+    {
+        let mut b = r.borrow_mut();
+        let Value::Array(a) = &mut *b else {
+            unreachable!()
+        };
+        let a = Rc::make_mut(a);
+        a.remove(&"baz".into());
+        a.append(i(4)).unwrap();
+    }
+    assert_eq!(peek(&mut t, &r, "current"), "4");
+}
+
+#[test]
+fn pointer_is_shared_between_references() {
+    // end_variation3.phpt
+    let mut t = vm();
+    let a1 = PhpRef::new(php("['zero', 'one', 'two']"));
+    assert_eq!(peek(&mut t, &a1, "current"), "'zero'");
+    ptr(&mut t, &a1, "end");
+    let a2 = a1.clone(); // $array2 = &$array1
+    assert_eq!(peek(&mut t, &a1, "current"), "'two'");
+    assert_eq!(peek(&mut t, &a2, "current"), "'two'");
 }

@@ -8,7 +8,7 @@ use std::cell::RefCell;
 
 use php_runtime::value::numeric::is_numeric_str;
 use php_runtime::{
-    ArrayKey, Args, NativeFunction, PResult, PhpArray, PhpRef, PhpStr, Registry, Value, Vm,
+    Args, ArrayKey, NativeFunction, PResult, PhpArray, PhpRef, PhpStr, Registry, Value, Vm,
 };
 
 use crate::testing::{TestVm, thrown};
@@ -477,7 +477,10 @@ pub fn is_num(v: &str) -> bool {
 
 #[test]
 fn dsl_roundtrip() {
-    assert_eq!(show(&php("[1, 'a', 2.5, true, null]")), "[1, 'a', 2.5, true, null]");
+    assert_eq!(
+        show(&php("[1, 'a', 2.5, true, null]")),
+        "[1, 'a', 2.5, true, null]"
+    );
     assert_eq!(
         show(&php("['a' => 1, 5 => [1, 2], '7' => 'x']")),
         "['a' => 1, 5 => [1, 2], 7 => 'x']"

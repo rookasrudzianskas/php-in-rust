@@ -40,7 +40,10 @@ fn sort_basic_phpt() {
     for (flags, want) in flag_variants().into_iter().zip(expected) {
         assert_eq!(sorted(&mut t, "sort", STRINGS, flags), want);
     }
-    assert_eq!(sorted(&mut t, "sort", "[100, 33, 555, 22]", vec![]), "[22, 33, 100, 555]");
+    assert_eq!(
+        sorted(&mut t, "sort", "[100, 33, 555, 22]", vec![]),
+        "[22, 33, 100, 555]"
+    );
     assert_eq!(
         sorted(&mut t, "sort", "[100, 33, 555, 22]", vec![i(NUMERIC)]),
         "[22, 33, 100, 555]"
@@ -61,7 +64,10 @@ fn rsort_basic_phpt() {
     for (flags, want) in flag_variants().into_iter().zip(expected) {
         assert_eq!(sorted(&mut t, "rsort", STRINGS, flags), want);
     }
-    assert_eq!(sorted(&mut t, "rsort", "[100, 33, 555, 22]", vec![]), "[555, 100, 33, 22]");
+    assert_eq!(
+        sorted(&mut t, "rsort", "[100, 33, 555, 22]", vec![]),
+        "[555, 100, 33, 22]"
+    );
 }
 
 #[test]
@@ -79,7 +85,12 @@ fn asort_basic_phpt() {
         assert_eq!(sorted(&mut t, "asort", STRINGS, flags), want);
     }
     assert_eq!(
-        sorted(&mut t, "asort", "[1 => 100, 2 => 33, 3 => 555, 4 => 22]", vec![]),
+        sorted(
+            &mut t,
+            "asort",
+            "[1 => 100, 2 => 33, 3 => 555, 4 => 22]",
+            vec![]
+        ),
         "[4 => 22, 2 => 33, 1 => 100, 3 => 555]"
     );
 }
@@ -117,11 +128,21 @@ fn ksort_mixed_keys_uses_php8_comparison() {
     let mut t = vm();
     // int keys compare with string keys like `2 <=> "b"`: as strings.
     assert_eq!(
-        sorted(&mut t, "ksort", "['b' => 1, 2 => 2, 'a' => 3, 1 => 4]", vec![]),
+        sorted(
+            &mut t,
+            "ksort",
+            "['b' => 1, 2 => 2, 'a' => 3, 1 => 4]",
+            vec![]
+        ),
         "[1 => 4, 2 => 2, 'a' => 3, 'b' => 1]"
     );
     assert_eq!(
-        sorted(&mut t, "krsort", "['b' => 1, 2 => 2, 'a' => 3, 1 => 4]", vec![]),
+        sorted(
+            &mut t,
+            "krsort",
+            "['b' => 1, 2 => 2, 'a' => 3, 1 => 4]",
+            vec![]
+        ),
         "['b' => 1, 'a' => 3, 2 => 2, 1 => 4]"
     );
 }
@@ -235,7 +256,9 @@ fn usort_is_stable() {
     // usort_stability.phpt
     let mut t = vm();
     let n = 10_000;
-    let big = Value::array(php_runtime::PhpArray::from_values((0..=n).map(Value::Int).collect()));
+    let big = Value::array(php_runtime::PhpArray::from_values(
+        (0..=n).map(Value::Int).collect(),
+    ));
     let (_, a) = call_ref(&mut t, "usort", big.clone(), vec![s("t_zero")]);
     assert_eq!(show(&a), show(&big));
     // asort_stability: equal values keep their original order.
@@ -274,7 +297,12 @@ fn usort_exact_comparison_sequence() {
     assert_eq!(take_log().len(), 4);
 
     // Insertion sort for 6..16 elements: sorted input needs n-1 comparisons.
-    let (_, a) = call_ref(&mut t, "usort", php("[1, 2, 3, 4, 5, 6, 7, 8]"), vec![s("t_log")]);
+    let (_, a) = call_ref(
+        &mut t,
+        "usort",
+        php("[1, 2, 3, 4, 5, 6, 7, 8]"),
+        vec![s("t_log")],
+    );
     assert_eq!(show(&a), "[1, 2, 3, 4, 5, 6, 7, 8]");
     assert_eq!(take_log().len(), 7);
 }
@@ -322,10 +350,20 @@ fn usort_bool_return_is_deprecated() {
     }
     // uksort / uasort likewise.
     t.output();
-    let (_, a) = call_ref(&mut t, "uksort", php("[3 => 'a', 1 => 'b', 2 => 'c']"), vec![s("t_gt")]);
+    let (_, a) = call_ref(
+        &mut t,
+        "uksort",
+        php("[3 => 'a', 1 => 'b', 2 => 'c']"),
+        vec![s("t_gt")],
+    );
     assert_eq!(show(&a), "[1 => 'b', 2 => 'c', 3 => 'a']");
     assert!(t.output().contains("Deprecated: uksort(): Returning bool"));
-    let (_, a) = call_ref(&mut t, "uasort", php("['x' => 3, 'y' => 1]"), vec![s("t_gt")]);
+    let (_, a) = call_ref(
+        &mut t,
+        "uasort",
+        php("['x' => 3, 'y' => 1]"),
+        vec![s("t_gt")],
+    );
     assert_eq!(show(&a), "['y' => 1, 'x' => 3]");
     assert!(t.output().contains("Deprecated: uasort(): Returning bool"));
 }
@@ -333,7 +371,12 @@ fn usort_bool_return_is_deprecated() {
 #[test]
 fn usort_callback_errors() {
     let mut t = vm();
-    let (r, _) = call_ref(&mut t, "usort", php("[3, 1, 2]"), vec![s("nope_not_a_function")]);
+    let (r, _) = call_ref(
+        &mut t,
+        "usort",
+        php("[3, 1, 2]"),
+        vec![s("nope_not_a_function")],
+    );
     assert_eq!(
         thrown(r),
         (
@@ -384,17 +427,20 @@ fn array_multisort_basic_phpt() {
     let mut t = vm();
     let ar1 = php("['row1' => 2, 'row2' => 1, 'row3' => 1]");
     let ar2 = php("['row1' => 2, 'row2' => 'aa', 'row3' => '1']");
-    let (r, out) = multisort(
-        &mut t,
-        vec![ar1, i(4), i(0), ar2, i(3), i(2)],
-    );
+    let (r, out) = multisort(&mut t, vec![ar1, i(4), i(0), ar2, i(3), i(2)]);
     assert_eq!(show(&r.unwrap()), "true");
     assert_eq!(show(&out[0]), "['row2' => 1, 'row3' => 1, 'row1' => 2]");
-    assert_eq!(show(&out[1]), "['row2' => 'aa', 'row3' => '1', 'row1' => 2]");
+    assert_eq!(
+        show(&out[1]),
+        "['row2' => 'aa', 'row3' => '1', 'row1' => 2]"
+    );
 
     let (r, out) = multisort(&mut t, vec![out[1].clone()]);
     assert_eq!(show(&r.unwrap()), "true");
-    assert_eq!(show(&out[0]), "['row3' => '1', 'row1' => 2, 'row2' => 'aa']");
+    assert_eq!(
+        show(&out[0]),
+        "['row3' => '1', 'row1' => 2, 'row2' => 'aa']"
+    );
 }
 
 #[test]
@@ -440,10 +486,7 @@ fn array_multisort_errors() {
     let (r, _) = multisort(&mut t, vec![php("[1, 2]"), php("[1]")]);
     assert_eq!(
         thrown(r),
-        (
-            "ValueError".into(),
-            "Array sizes are inconsistent".into()
-        )
+        ("ValueError".into(), "Array sizes are inconsistent".into())
     );
     let (r, _) = multisort(&mut t, vec![php("[1]"), s("x")]);
     assert_eq!(
@@ -459,15 +502,71 @@ fn array_multisort_errors() {
 fn array_multisort_stability_and_flags() {
     let mut t = vm();
     // Stable for equal rows.
-    let (_, out) = multisort(&mut t, vec![php("[1, 1, 1, 1]"), php("['a', 'b', 'c', 'd']")]);
+    let (_, out) = multisort(
+        &mut t,
+        vec![php("[1, 1, 1, 1]"), php("['a', 'b', 'c', 'd']")],
+    );
     assert_eq!(show(&out[1]), "['a', 'b', 'c', 'd']");
     // Case-insensitive string sort.
     let (_, out) = multisort(&mut t, vec![php("['b', 'A', 'c', 'B']"), i(2 | CASE)]);
     assert_eq!(show(&out[0]), "['A', 'b', 'B', 'c']");
     // Natural sort.
-    let (_, out) = multisort(&mut t, vec![php("['img12', 'img10', 'img2', 'img1']"), i(NATURAL)]);
+    let (_, out) = multisort(
+        &mut t,
+        vec![php("['img12', 'img10', 'img2', 'img1']"), i(NATURAL)],
+    );
     assert_eq!(show(&out[0]), "['img1', 'img2', 'img10', 'img12']");
     // Integer keys are renumbered, string keys are kept.
     let (_, out) = multisort(&mut t, vec![php("['x' => 2, 5 => 1, 9 => 3]")]);
     assert_eq!(show(&out[0]), "[0 => 1, 'x' => 2, 1 => 3]");
+}
+
+#[test]
+fn sort_mixed_values_matches_php_exactly() {
+    // sort_variation11.phpt ("OK to fail as result is unpredictable"): the
+    // result of sorting values without a total order depends on the exact
+    // zend_sort algorithm and the stable-sort fallback.
+    let mut t = vm();
+    let input = r#"[[], [[33, -5, 6], [11], [22, -55], []], -4, "4", 4.00, "b", "5", -2, -2.0, -2.98989, "-.9", "True", "", NULL, "ab", "abcd", 0.0, -0, "abcd\0abcd\0abcd", '', true, false]"#;
+    let want = r#"['', null, '', 0.0, false, -4, -2.98989, -2, -2.0, '-.9', 0, '4', 4.0, '5', 'True', 'ab', 'abcd', 'abcd\0abcd\0abcd', 'b', [], [[33, -5, 6], [11], [22, -55], []], true]"#;
+    assert_eq!(sorted(&mut t, "sort", input, vec![]), want);
+    assert_eq!(sorted(&mut t, "sort", input, vec![i(REGULAR)]), want);
+}
+
+#[test]
+fn asort_arsort_rsort_mixed_values_match_php_exactly() {
+    // asort_variation11.phpt, arsort_variation11.phpt, rsort_variation11.phpt
+    let mut t = vm();
+    let keyed = r#"["array1" => [], "array2" => ["sub_array[2,1]" => [33, -5, 6], "sub_array[2,2]" => [11], "sub_array[2,3]" => [22, -55], "sub_array[2,4]" => []], 4 => 4, "4" => "4", 4 => 4.01, "b" => "b", "5" => "5", -2 => -2, -2 => -2.01, -2 => -2.98989, "-.9" => "-.9", "True" => "True", "" => "", "ab" => "ab", "abcd" => "abcd", 0 => 0.01, -0 => -0, '' => '', "abcd\0abcd\0abcd" => "abcd\0abcd\0abcd", 0 => 0.001]"#;
+    let want_asort = r#"['' => '', -2 => -2.98989, '-.9' => '-.9', 0 => 0.001, 4 => 4.01, 5 => '5', 'True' => 'True', 'ab' => 'ab', 'abcd' => 'abcd', 'abcd\0abcd\0abcd' => 'abcd\0abcd\0abcd', 'b' => 'b', 'array1' => [], 'array2' => ['sub_array[2,1]' => [33, -5, 6], 'sub_array[2,2]' => [11], 'sub_array[2,3]' => [22, -55], 'sub_array[2,4]' => []]]"#;
+    let want_arsort = r#"['array2' => ['sub_array[2,1]' => [33, -5, 6], 'sub_array[2,2]' => [11], 'sub_array[2,3]' => [22, -55], 'sub_array[2,4]' => []], 'array1' => [], 'b' => 'b', 'abcd\0abcd\0abcd' => 'abcd\0abcd\0abcd', 'abcd' => 'abcd', 'ab' => 'ab', 'True' => 'True', 5 => '5', 4 => 4.01, 0 => 0.001, '-.9' => '-.9', -2 => -2.98989, '' => '']"#;
+    assert_eq!(sorted(&mut t, "asort", keyed, vec![]), want_asort);
+    assert_eq!(sorted(&mut t, "arsort", keyed, vec![]), want_arsort);
+
+    let list = r#"[[], [[33, -5, 6], [11], [22, -55], []], -4, "4", 4.00, "b", "5", -2, -2.0, -2.98989, "-.9", "True", "", NULL, "ab", "abcd", 0.0, -0, "abcd\0abcd\0abcd", '', true, false]"#;
+    let want_rsort = r#"[[[33, -5, 6], [11], [22, -55], []], [], 'b', 'abcd\0abcd\0abcd', 'abcd', 'ab', 'True', '5', '4', 4.0, '-.9', -2, -2.0, -2.98989, true, '', null, 0.0, 0, -4, '', false]"#;
+    assert_eq!(sorted(&mut t, "rsort", list, vec![]), want_rsort);
+}
+
+#[test]
+fn array_multisort_variations_phpt() {
+    let mut t = vm();
+    // array_multisort_variation4.phpt
+    let (r, out) = multisort(
+        &mut t,
+        vec![
+            php("[4, 3, 3, 3]"),
+            php("[9, 3, 2, 2]"),
+            php("[9, 9, 2, 1]"),
+        ],
+    );
+    assert_eq!(show(&r.unwrap()), "true");
+    assert_eq!(show(&out[0]), "[3, 3, 3, 4]");
+    assert_eq!(show(&out[1]), "[2, 2, 3, 9]");
+    assert_eq!(show(&out[2]), "[1, 2, 9, 9]");
+    // array_multisort_variation10.phpt: an anonymous array argument.
+    assert_eq!(
+        run(&mut t, "array_multisort", vec![php("[1, 3, 2, 4]")]),
+        "true"
+    );
 }
