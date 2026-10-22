@@ -1133,9 +1133,23 @@ fn fetch_property_address(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, n
 pub fn assign_prop_ref(vm: &mut Vm, scope: Option<&ClassRef>, obj: &ObjRef, name: &PhpStr, r: PhpRef) -> PResult<()> {
     match get_property_ptr(vm, scope, obj, name, Fetch::W)? {
         Ptr::Null => {
-            // Errors of the fallback read (readonly, hooks) take precedence.
-            let _ = read_property_handler(vm, scope, obj, name, Fetch::W)?;
-            Err(vm.throw_error("Error", "Cannot assign by reference to overloaded object"))
+            // The fallback read may throw (readonly, hooks). When a get hook
+            // produced the value, php-src throws again with the first
+            // exception as previous.
+            let via_get_hook = match lookup_prop(vm, obj.class(), name, scope) {
+                Lookup::Declared(info) => prop_hooks(&info).is_some_and(|h| h.get.is_some()) && should_call_hook(vm, &info, obj),
+                _ => false,
+            };
+            let prev = match read_property_handler(vm, scope, obj, name, Fetch::W) {
+                Ok(_) => None,
+                Err(Flow::Exception(e)) if via_get_hook => Some(e),
+                Err(f) => return Err(f),
+            };
+            let err = vm.throw_error("Error", "Cannot assign by reference to overloaded object");
+            if let (Some(p), Flow::Exception(e)) = (prev, &err) {
+                e.set_prop(b"previous", Value::Object(p));
+            }
+            Err(err)
         }
         Ptr::Ext(_) => Err(vm.throw_error("Error", "Cannot assign by reference to overloaded object")),
         Ptr::Dyn => {
@@ -1509,6 +1523,249 @@ fn magic_unset(vm: &mut Vm, obj: &ObjRef, name: &PhpStr) -> PResult<()> {
     let r = call_magic(vm, obj, b"__unset", vec![Value::String(name.clone())]);
     guard_set(obj, name, IN_UNSET, false);
     r.map(|_| ())
+}
+
+// ---------------------------------------------------------------------------
+// foreach over objects with hooked properties (zend_property_hooks.c)
+// ---------------------------------------------------------------------------
+
+/// `zend_hooked_object_iterator`.
+struct HookedIter {
+    obj: ObjRef,
+    by_ref: bool,
+    /// Declared properties visible from the iterating scope: (unmangled name, info).
+    declared: Vec<(PhpStr, PropertyInfo)>,
+    pos: usize,
+    declared_done: bool,
+    /// Position in the dynamic property table (by insertion index).
+    dyn_pos: usize,
+    dynamic_done: bool,
+    current: Option<(Value, Value)>,
+}
+
+/// `zend_check_property_access` for a declared property from `scope`.
+fn declared_accessible(vm: &Vm, obj: &ObjRef, info: &PropertyInfo, scope: Option<&ClassRef>) -> bool {
+    match lookup_prop(vm, obj.class(), &info.name, scope) {
+        Lookup::Declared(found) => {
+            if info.flags & member_flags::PRIVATE != 0 {
+                found.flags & member_flags::PRIVATE != 0 && found.declaring_class.eq_ignore_ascii_case(&info.declaring_class)
+            } else {
+                found.flags & member_flags::PRIVATE == 0
+            }
+        }
+        _ => false,
+    }
+}
+
+/// `zho_build_properties_ex(zobj, check_access, force_ptr, false)`.
+fn hooked_declared_props(vm: &Vm, obj: &ObjRef, scope: Option<&ClassRef>) -> Vec<(PhpStr, PropertyInfo)> {
+    let class = obj.class().clone();
+    let mut chain = Vec::new();
+    let mut c = Some(class.clone());
+    while let Some(ce) = c {
+        c = ce.parent.clone();
+        chain.push(ce);
+    }
+    let mut keys: Vec<PhpStr> = Vec::new();
+    let mut out: Vec<(PhpStr, PropertyInfo)> = Vec::new();
+    for pce in chain.iter().rev() {
+        for info in pce.properties.values() {
+            if info.is_static() {
+                continue;
+            }
+            let mut key = mangled_name(info);
+            // Protected properties promoted to public keep their position.
+            if info.flags & member_flags::PROTECTED != 0
+                && class.properties.get(&info.name).is_some_and(|ci| ci.flags & member_flags::PUBLIC != 0)
+            {
+                key = info.name.clone();
+            }
+            if !declared_accessible(vm, obj, info, scope) {
+                continue;
+            }
+            match keys.iter().position(|k| *k == key) {
+                Some(i) => out[i] = (info.name.clone(), info.clone()),
+                None => {
+                    keys.push(key);
+                    out.push((info.name.clone(), info.clone()));
+                }
+            }
+        }
+    }
+    out
+}
+
+impl HookedIter {
+    /// `zho_declared_it_fetch_current`.
+    fn fetch_declared(&mut self, vm: &mut Vm) -> PResult<()> {
+        let (name, info) = self.declared[self.pos].clone();
+        let obj = self.obj.clone();
+        let class = obj.class().clone();
+        let value = if let Some(hooks) = prop_hooks(&info) {
+            let get = hooks.get.clone();
+            if get.is_none() && is_virtual(&info) {
+                return Ok(());
+            }
+            if self.by_ref && get.as_ref().is_none_or(|g| !g.has_flag(crate::class::fn_flags::RETURNS_REF)) {
+                return Err(vm.throw_error(
+                    "Error",
+                    format!(
+                        "Cannot create reference to property {}::${}",
+                        display_class_name(&class.name),
+                        name
+                    ),
+                ));
+            }
+            if get.is_none() && slot_value(&obj, info.slot).is_undef() {
+                // zend_read_property_ex(silent) returns uninitialized_zval.
+                return Ok(());
+            }
+            let scope = vm.find_class(&info.declaring_class);
+            let v = read_property_handler(vm, scope.as_ref(), &obj, &name, Fetch::Is)?;
+            if self.by_ref {
+                match v {
+                    Value::Ref(r) => Value::Ref(r),
+                    v => Value::Ref(PhpRef::new(v)),
+                }
+            } else {
+                v.into_unref()
+            }
+        } else {
+            let cur = slot_value(&obj, info.slot);
+            if cur.is_undef() {
+                return Ok(());
+            }
+            if !self.by_ref {
+                cur.into_unref()
+            } else if let Value::Ref(r) = cur {
+                Value::Ref(r)
+            } else {
+                if info.is_readonly() {
+                    return Err(vm.throw_error(
+                        "Error",
+                        format!(
+                            "Cannot acquire reference to readonly property {}::${}",
+                            display_class_name(&info.declaring_class),
+                            name
+                        ),
+                    ));
+                }
+                let mut props = obj.obj().props.borrow_mut();
+                let slot = &mut props[info.slot];
+                let v = std::mem::take(slot);
+                let r = PhpRef::new(v);
+                *slot = Value::Ref(r.clone());
+                Value::Ref(r)
+            }
+        };
+        self.current = Some((Value::String(name), value));
+        Ok(())
+    }
+
+    /// `zho_dynamic_it_fetch_current`.
+    fn fetch_dynamic(&mut self) {
+        let obj = self.obj.clone();
+        let mut d = obj.obj().dyn_props.borrow_mut();
+        let Some(t) = d.as_mut() else {
+            self.dynamic_done = true;
+            return;
+        };
+        let Some(key) = t.keys().nth(self.dyn_pos) else {
+            self.dynamic_done = true;
+            return;
+        };
+        let value = if self.by_ref {
+            Value::Ref(crate::value::array::make_element_ref(t, key.clone()))
+        } else {
+            t.get(&key).map(Value::unref).unwrap_or_default()
+        };
+        self.current = Some((key.to_value(), value));
+    }
+
+    /// `zho_it_fetch_current`.
+    fn fetch(&mut self, vm: &mut Vm) -> PResult<()> {
+        if self.current.is_some() {
+            return Ok(());
+        }
+        loop {
+            if !self.declared_done {
+                self.fetch_declared(vm)?;
+            } else if !self.dynamic_done {
+                self.fetch_dynamic();
+            } else {
+                break;
+            }
+            if self.current.is_some() || self.declared_done && self.dynamic_done {
+                break;
+            }
+            self.advance();
+        }
+        Ok(())
+    }
+
+    /// `zho_it_move_forward`.
+    fn advance(&mut self) {
+        self.current = None;
+        if !self.declared_done {
+            self.pos += 1;
+            if self.pos >= self.declared.len() {
+                self.declared_done = true;
+            }
+        } else if !self.dynamic_done {
+            self.dyn_pos += 1;
+        }
+    }
+}
+
+impl crate::class::InternalIterator for HookedIter {
+    fn rewind(&mut self, _vm: &mut Vm) -> PResult<()> {
+        self.current = None;
+        self.pos = 0;
+        self.declared_done = self.declared.is_empty();
+        self.dynamic_done = false;
+        self.dyn_pos = 0;
+        Ok(())
+    }
+
+    fn valid(&mut self, vm: &mut Vm) -> PResult<bool> {
+        self.fetch(vm)?;
+        Ok(self.current.is_some())
+    }
+
+    fn current(&mut self, vm: &mut Vm) -> PResult<Value> {
+        self.fetch(vm)?;
+        Ok(self.current.as_ref().map(|c| c.1.clone()).unwrap_or_default())
+    }
+
+    fn key(&mut self, vm: &mut Vm) -> PResult<Value> {
+        self.fetch(vm)?;
+        Ok(self.current.as_ref().map(|c| c.0.clone()).unwrap_or_default())
+    }
+
+    fn next(&mut self, _vm: &mut Vm) -> PResult<()> {
+        self.advance();
+        Ok(())
+    }
+}
+
+/// `zend_hooked_object_get_iterator`: the `get_iterator` handler of classes
+/// with hooked properties.
+pub(crate) fn hooked_get_iterator(vm: &mut Vm, obj: &ObjRef, by_ref: bool) -> PResult<Rc<dyn std::any::Any>> {
+    let scope = super::call::calling_scope(vm);
+    let declared = hooked_declared_props(vm, obj, scope.as_ref());
+    let it = HookedIter {
+        obj: obj.clone(),
+        by_ref,
+        declared_done: declared.is_empty(),
+        declared,
+        pos: 0,
+        dyn_pos: 0,
+        dynamic_done: false,
+        current: None,
+    };
+    let b: Box<dyn crate::class::InternalIterator> = Box::new(it);
+    let cell: super::internal_iterator::IteratorCell = RefCell::new(b);
+    Ok(Rc::new(cell))
 }
 
 // ---------------------------------------------------------------------------

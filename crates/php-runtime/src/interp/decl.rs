@@ -940,6 +940,13 @@ fn inherit_interface_properties(vm: &mut Vm, ce: &mut ClassEntry, iface: &ClassR
 /// class's own hooked properties, after inheritance.
 fn verify_own_hooked_properties(vm: &mut Vm, ce: &mut ClassEntry, def: &ClassDef, data: &ClassData) -> PResult<()> {
     let cname = display_class_name(&def.name);
+    // foreach over objects with hooked properties (zend_hooked_object_get_iterator).
+    if ce.handlers.get_iterator.is_none()
+        && def.kind == ClassKindIr::Class
+        && ce.properties.values().any(|p| prop_hooks(p).is_some())
+    {
+        ce.handlers.get_iterator = Some(super::objects::hooked_get_iterator);
+    }
     for p in &def.props {
         let Some(info) = ce.properties.get(&p.name).cloned() else { continue };
         if !info.declaring_class.eq_ignore_ascii_case(&def.name) {
