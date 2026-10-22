@@ -458,25 +458,30 @@ struct SelEntry {
     fd: Option<i32>,
 }
 
-fn select_entries(arr: &PhpArray) -> Vec<SelEntry> {
-    arr.iter()
-        .filter_map(|(k, v)| {
-            let v = v.unref();
-            let Value::Resource(r) = &v else {
-                return None;
-            };
-            let h = handle_of(r)?;
-            let fd = h
-                .try_borrow_mut()
-                .ok()
-                .and_then(|mut s| s.cast_fd(CastAs::FdForSelect));
-            Some(SelEntry {
-                key: k.clone(),
-                value: v.clone(),
-                fd,
-            })
-        })
-        .collect()
+/// `stream_array_to_fd_set`: the select descriptor of every stream in the
+/// array (`PHP_STREAM_AS_FD_FOR_SELECT`, which may run userspace
+/// `stream_cast`).
+fn select_entries(vm: &mut Vm, arr: &PhpArray) -> PResult<Vec<SelEntry>> {
+    let mut out = Vec::new();
+    for (k, v) in arr.iter() {
+        let v = v.unref();
+        let Value::Resource(r) = &v else {
+            continue;
+        };
+        let Some(h) = handle_of(r) else {
+            continue;
+        };
+        let fd = match h.try_borrow_mut() {
+            Ok(mut s) => s.cast(vm, CastAs::FdForSelect, true)?,
+            Err(_) => None,
+        };
+        out.push(SelEntry {
+            key: k.clone(),
+            value: v.clone(),
+            fd,
+        });
+    }
+    Ok(out)
 }
 
 fn stream_select(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
@@ -491,10 +496,13 @@ fn stream_select(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
             _ => None,
         })
         .collect();
-    let sets: Vec<Vec<SelEntry>> = arrays
-        .iter()
-        .map(|a| a.as_ref().map(select_entries).unwrap_or_default())
-        .collect();
+    let mut sets: Vec<Vec<SelEntry>> = Vec::with_capacity(3);
+    for a in &arrays {
+        sets.push(match a {
+            Some(a) => select_entries(vm, a)?,
+            None => Vec::new(),
+        });
+    }
     let have_sets = sets.iter().any(|s| s.iter().any(|e| e.fd.is_some()));
     if !have_sets {
         return Err(vm.throw_value_error("No stream arrays were passed"));
@@ -1060,7 +1068,7 @@ fn stream_supports_lock(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
 
 fn stream_isatty(vm: &mut Vm, args: &mut Args) -> PResult<Value> {
     let res = stream_param(vm, args, 0)?;
-    let fd = with_stream(vm, &res, |_vm, s| Ok(s.cast_fd(CastAs::FdForSelect)))?.flatten();
+    let fd = with_stream(vm, &res, |vm, s| s.cast(vm, CastAs::FdForSelect, false))?.flatten();
     Ok(Value::Bool(fd.is_some_and(sys::sys_isatty)))
 }
 
