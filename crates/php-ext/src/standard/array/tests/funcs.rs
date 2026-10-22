@@ -705,9 +705,9 @@ fn array_map_argument_numbers_bug77931() {
 fn array_sum_overflows_to_float_bug65304() {
     let mut t = vm();
     let r = t.call("array_sum", vec![php("[PHP_INT_MAX, 1]")]).unwrap();
-    assert!(matches!(r, Value::Float(f) if f == 9.223372036854775808e18));
+    assert!(matches!(r, Value::Float(f) if f == i64::MAX as f64 + 1.0));
     let r = t
         .call("array_product", vec![php("[PHP_INT_MAX, 2]")])
         .unwrap();
-    assert!(matches!(r, Value::Float(f) if f == 1.8446744073709552e19));
+    assert!(matches!(r, Value::Float(f) if f == (i64::MAX as f64) * 2.0));
 }

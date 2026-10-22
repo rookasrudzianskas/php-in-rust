@@ -795,7 +795,7 @@ fn single_array_arguments_are_returned_unchanged() {
         "array_intersect_key",
         "array_intersect_assoc",
     ] {
-        assert_eq!(run(&mut t, f, args(&[a.clone()])), "['a' => 42]", "{f}");
+        assert_eq!(run(&mut t, f, vec![a.clone()]), "['a' => 42]", "{f}");
     }
     for f in [
         "array_diff_ukey",
