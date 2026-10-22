@@ -603,6 +603,37 @@ impl Stream {
             return Ok(false);
         }
         let old_eof = self.st.eof;
+        let r = self.fill_read_buffer_inner(vm, size)?;
+        if old_eof != self.st.eof {
+            self.notify_completed(vm)?;
+        }
+        Ok(r)
+    }
+
+    /// `php_stream_notify_completed` on the stream's context.
+    fn notify_completed(&self, vm: &mut Vm) -> PResult<()> {
+        let Some(ctx) = &self.st.context else {
+            return Ok(());
+        };
+        let Some(c) = super::context::of(ctx) else {
+            return Ok(());
+        };
+        let notifier = c.borrow().notifier.clone();
+        if let Some(cb) = notifier {
+            let args = vec![
+                Value::Int(8),
+                Value::Int(0),
+                Value::Null,
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(0),
+            ];
+            vm.call(&cb, args)?;
+        }
+        Ok(())
+    }
+
+    fn fill_read_buffer_inner(&mut self, vm: &mut Vm, size: usize) -> PResult<bool> {
         if !self.readfilters.is_empty() {
             let to_read_now = size.min(self.chunk_size);
             let mut chunk_buf = vec![0u8; self.chunk_size];
@@ -656,7 +687,6 @@ impl Stream {
                     break;
                 }
             }
-            let _ = old_eof;
             Ok(true)
         } else {
             if self.writepos - self.readpos < size {
