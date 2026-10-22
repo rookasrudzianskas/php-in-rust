@@ -940,6 +940,15 @@ fn inherit_interface_properties(vm: &mut Vm, ce: &mut ClassEntry, iface: &ClassR
 /// class's own hooked properties, after inheritance.
 fn verify_own_hooked_properties(vm: &mut Vm, ce: &mut ClassEntry, def: &ClassDef, data: &ClassData) -> PResult<()> {
     let cname = display_class_name(&def.name);
+    // foreach over objects with hooked properties (zend_hooked_object_get_iterator).
+    if def.kind == ClassKindIr::Class && ce.properties.values().any(|p| prop_hooks(p).is_some()) {
+        if ce.handlers.get_iterator.is_none() {
+            ce.handlers.get_iterator = Some(super::objects::hooked_get_iterator);
+        }
+        if ce.handlers.get_properties_for.is_none() {
+            ce.handlers.get_properties_for = Some(super::objects::hooked_properties_for);
+        }
+    }
     for p in &def.props {
         let Some(info) = ce.properties.get(&p.name).cloned() else { continue };
         if !info.declaring_class.eq_ignore_ascii_case(&def.name) {
@@ -1043,6 +1052,29 @@ fn props_have_unresolved_types(vm: &Vm, def: &ClassDef) -> bool {
             .is_some_and(|pc| pc.properties.get(&p.name).is_some_and(|pp| pp.ty.is_some()));
         (ty_unknown && (!p.hooks.is_empty() || parent_typed)) || set_unknown
     })
+}
+
+/// Hooks of a trait property imported into `class` are copies scoped to the
+/// using class (`zend_do_traits_property_binding`).
+fn rebind_trait_hooks(info: &mut PropertyInfo, class: &PhpStr) {
+    let Some(h) = prop_hooks(info).cloned() else { return };
+    let rebind = |f: &Option<Rc<Function>>| -> Option<Rc<Function>> {
+        let f = f.as_ref()?;
+        match super::user_fn(f) {
+            Some(u) => {
+                let mut g = make_function_from(u.fork(), f.name.clone(), f.flags, Some(class.clone()));
+                g.attributes = f.attributes.clone();
+                Some(Rc::new(g))
+            }
+            None => Some(f.clone()),
+        }
+    };
+    let new = HookSet {
+        get: rebind(&h.get),
+        set: rebind(&h.set),
+        virtual_: h.virtual_,
+    };
+    info.hooks = Some(Rc::new(new));
 }
 
 /// Abstract hooks of the class's properties, for the abstract-class check
@@ -2042,7 +2074,9 @@ fn link_class_inner(
         if let Some(h) = prop_hooks(info) {
             for f in h.get.iter().chain(h.set.iter()) {
                 if let Some(u) = super::user_fn(f) {
-                    let _ = u.scope.set(Rc::downgrade(&rc));
+                    if f.scope.as_ref().is_some_and(|s| s.eq_ignore_ascii_case(&rc.name)) {
+                        let _ = u.scope.set(Rc::downgrade(&rc));
+                    }
                 }
             }
         }
@@ -3235,6 +3269,7 @@ fn apply_traits(
             }
             let mut ni = info.clone();
             ni.declaring_class = def.name.clone();
+            rebind_trait_hooks(&mut ni, &def.name);
             let default_expr = if info.is_static() {
                 tdata.and_then(|d| d.static_inits.iter().find(|(s, ..)| *s == info.slot).map(|x| x.1.clone()))
             } else {
