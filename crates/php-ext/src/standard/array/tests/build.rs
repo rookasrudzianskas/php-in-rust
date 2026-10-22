@@ -818,3 +818,12 @@ fn array_pop_shift_on_self_referencing_arrays() {
     assert_eq!(show(&r), "[]");
     assert_eq!(show(&var.get()), "[]");
 }
+
+#[test]
+fn array_fill_allows_appending_bug72116() {
+    let mut t = vm();
+    let r = t.call("array_fill", vec![i(0), i(1), s("..")]).unwrap();
+    let Value::Array(mut r) = r else { unreachable!() };
+    std::rc::Rc::make_mut(&mut r).append(s("a")).unwrap();
+    assert_eq!(show(&Value::Array(r)), "['..', 'a']");
+}

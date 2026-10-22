@@ -505,3 +505,21 @@ fn bool_returning_callbacks_are_deprecated_once() {
         "{out}"
     );
 }
+
+#[test]
+fn array_diff_uassoc_bug42838() {
+    let mut t = vm();
+    let a = "['a' => 'green', 'b' => 'Brown', 'c' => 'blue', 0 => 'red']";
+    assert_eq!(
+        run(&mut t, "array_diff_uassoc", args(&[php(a), php(a), s("t_cmp")])),
+        "[]"
+    );
+    assert_eq!(
+        run(&mut t, "array_diff_ukey", args(&[php(a), php(a), s("t_cmp")])),
+        "[]"
+    );
+    assert_eq!(
+        run(&mut t, "array_intersect_uassoc", args(&[php(a), php(a), s("t_cmp")])),
+        "['a' => 'green', 'b' => 'Brown', 'c' => 'blue', 0 => 'red']"
+    );
+}

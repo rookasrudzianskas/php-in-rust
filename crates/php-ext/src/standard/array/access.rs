@@ -287,12 +287,11 @@ fn fetch_prop(vm: &mut Vm, data: &Value, key: &ColumnKey) -> PResult<Option<Valu
     }
 }
 
-/// `array_set_zval_key`.
+/// `array_set_zval_key`: array offset conversion with its diagnostics (null
+/// becomes `""` with a deprecation, fractional floats are deprecated, resources
+/// warn, arrays and objects are a TypeError).
 fn set_zval_key(vm: &mut Vm, out: &mut PhpArray, key: &Value, val: Value) -> PResult<()> {
-    let k = match key {
-        Value::Null => ArrayKey::Str(PhpStr::new()),
-        other => vm.to_array_key(other, php_runtime::value::convert::OffsetKind::Write)?,
-    };
+    let k = vm.to_array_key(key, php_runtime::value::convert::OffsetKind::Write)?;
     out.insert(k, val);
     Ok(())
 }

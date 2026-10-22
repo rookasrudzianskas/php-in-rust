@@ -439,12 +439,83 @@ fn array_column_phpt() {
 
 #[test]
 fn array_column_index_key_conversions() {
-    // array_column_variant.phpt style: the index value is used as an array key.
+    // The index value is converted like an array offset.
     let mut t = vm();
     let rows = "[['k' => true, 'v' => 'a'], ['k' => null, 'v' => 'b'], ['k' => 2.0, 'v' => 'c'], ['k' => '7', 'v' => 'd']]";
+    t.output();
     assert_eq!(
         run(&mut t, "array_column", vec![php(rows), s("v"), s("k")]),
         "[1 => 'a', '' => 'b', 2 => 'c', 7 => 'd']"
+    );
+    assert_eq!(
+        t.output(),
+        "\nDeprecated: Using null as an array offset is deprecated, use an empty string instead in /t.php on line 3\n"
+    );
+}
+
+#[test]
+fn array_column_null_and_illegal_index_values_bug68553() {
+    let mut t = vm();
+    // Increase the resource id to keep it apart from the other keys.
+    for _ in 0..100 {
+        php_runtime::ResRef::new("stream", Box::new(()));
+    }
+    let res = php_runtime::ResRef::new("stream", Box::new(()));
+    let id = res.id();
+    let mut rows = PhpArray::new();
+    for k in [i(10), i(20), Value::Bool(true), Value::Bool(false), Value::Resource(res), i(-5), Value::Float(7.38), Value::Null, Value::Null] {
+        let mut row = PhpArray::new();
+        row.insert("a".into(), k);
+        rows.append(Value::array(row)).unwrap();
+    }
+    t.output();
+    let r = t
+        .call("array_column", vec![Value::array(rows), Value::Null, s("a")])
+        .unwrap();
+    let Value::Array(a) = &r else { unreachable!() };
+    let keys: Vec<String> = a.keys().map(|k| k.to_php_str().to_string()).collect();
+    assert_eq!(keys, ["10", "20", "1", "0", &id.to_string(), "-5", "7", ""]);
+    let out = t.output();
+    assert!(out.contains(&format!("Warning: Resource ID#{id} used as offset, casting to integer ({id})")));
+    assert!(out.contains("Deprecated: Implicit conversion from float 7.38 to int loses precision"));
+    assert_eq!(
+        out.matches("Deprecated: Using null as an array offset is deprecated, use an empty string instead").count(),
+        2
+    );
+
+    let o = Value::Object(t.vm.cast_to_object(&Value::Null).unwrap());
+    let mut row = PhpArray::new();
+    row.insert("a".into(), o);
+    assert_eq!(
+        run_err(&mut t, "array_column", vec![Value::array(PhpArray::from_values(vec![Value::array(row)])), Value::Null, s("a")]),
+        "TypeError: Cannot access offset of type stdClass on array"
+    );
+    assert_eq!(
+        run_err(&mut t, "array_column", vec![php("[['a' => []]]"), Value::Null, s("a")]),
+        "TypeError: Cannot access offset of type array on array"
+    );
+}
+
+#[test]
+fn array_column_keeps_values_matching_null_bug72031() {
+    // Rows that are objects: properties whose value is null/false/'' count.
+    let mut t = vm();
+    let mut ce = php_runtime::class::ClassEntry::new("myObj", 0);
+    ce.declare_property(php_runtime::class::PropertyInfo::new(
+        "prop",
+        "myObj",
+        php_runtime::class::member_flags::PUBLIC,
+    ));
+    let ce = std::rc::Rc::new(ce);
+    let mut rows = Vec::new();
+    for v in [i(-1), i(0), Value::Null, Value::Bool(true), Value::Bool(false), s("abc"), s("")] {
+        let o = php_runtime::ObjRef::new(ce.clone());
+        o.set_prop(b"prop", v);
+        rows.push(Value::Object(o));
+    }
+    assert_eq!(
+        run(&mut t, "array_column", vec![Value::array(PhpArray::from_values(rows)), s("prop")]),
+        "[-1, 0, null, true, false, 'abc', '']"
     );
 }
 
@@ -620,4 +691,18 @@ fn every_array_function_is_registered() {
             "{name} belongs to another module"
         );
     }
+}
+
+#[test]
+fn array_values_resets_the_next_free_index() {
+    // bug69166.phpt / bug75433.phpt
+    let mut t = vm();
+    let mut a = PhpArray::from_values(vec![i(1), i(2), i(3)]);
+    a.remove(&2.into());
+    let r = t.call("array_values", vec![Value::array(a)]).unwrap();
+    let Value::Array(mut r) = r else { unreachable!() };
+    std::rc::Rc::make_mut(&mut r).append(i(4)).unwrap();
+    assert_eq!(show(&Value::Array(r)), "[1, 2, 4]");
+    // bug75653.phpt: array_values() of an empty array.
+    assert_eq!(run(&mut t, "array_values", vec![php("[]")]), "[]");
 }

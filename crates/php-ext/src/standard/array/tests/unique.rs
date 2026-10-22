@@ -212,3 +212,21 @@ fn array_unique_keeps_the_next_free_index() {
     std::rc::Rc::make_mut(&mut a).append(i(7)).unwrap();
     assert_eq!(show(&Value::Array(a)), "[0 => 1, 2 => 2, 3 => 7]");
 }
+
+#[test]
+fn array_unique_keeps_the_first_occurrence_bug79868() {
+    let mut t = vm();
+    assert_eq!(
+        run(&mut t, "array_unique", vec![php("['b', 'a', 'b']"), i(REGULAR)]),
+        "['b', 'a']"
+    );
+    // The surviving element is always the earliest one, whatever the sort did.
+    assert_eq!(
+        run(
+            &mut t,
+            "array_unique",
+            vec![php("[3, 1, 3, 2, 1, 2, 3, 0, 0, 5, 4, 5, 4, 1, 2, 3, 3, 3]"), i(REGULAR)]
+        ),
+        "[0 => 3, 1 => 1, 3 => 2, 7 => 0, 9 => 5, 10 => 4]"
+    );
+}

@@ -295,3 +295,113 @@ fn array_replace_recursive_detects_recursion() {
     let r = t.call("array_replace_recursive", vec![array3, var.get()]);
     assert_eq!(thrown(r), ("Error".into(), "Recursion detected".into()));
 }
+
+#[test]
+fn array_merge_recursive_next_free_index_bugs() {
+    let mut t = vm();
+    // bug76505.phpt
+    assert_eq!(
+        run(
+            &mut t,
+            "array_merge_recursive",
+            vec![php("['k' => [2 => 100, 98 => 200]]"), php("['k' => [64 => 300]]")]
+        ),
+        "['k' => [2 => 100, 98 => 200, 99 => 300]]"
+    );
+    // bug70808.phpt: the next index of the first array's sub-array is kept
+    // after an element was unset.
+    let mut inner = PhpArray::from_values(vec![i(0), i(1)]);
+    inner.remove(&1.into());
+    let mut top = PhpArray::new();
+    top.insert("key".into(), Value::array(inner));
+    assert_eq!(
+        run(&mut t, "array_merge_recursive", vec![Value::array(top), php("['key' => [2]]")]),
+        "['key' => [0 => 0, 2 => 2]]"
+    );
+}
+
+#[test]
+fn replace_and_merge_do_not_leak_references() {
+    let mut t = vm();
+    // bug72622.phpt: array_walk() leaves a refcount-1 reference in the array.
+    let (_, walked) = call_ref(&mut t, "array_walk", php("['foo' => 'bar']"), vec![s("t_zero")]);
+    match &walked {
+        Value::Array(a) => assert!(matches!(a.get_str(b"foo"), Some(Value::Ref(_)))),
+        _ => unreachable!(),
+    }
+    let r = t
+        .call("array_replace_recursive", vec![php("['foo' => 'foo']"), walked.clone()])
+        .unwrap();
+    match &r {
+        Value::Array(a) => assert!(matches!(a.get_str(b"foo"), Some(Value::String(_)))),
+        _ => unreachable!(),
+    }
+    // bug79930.phpt: array_merge_recursive() with such an array.
+    let m = t
+        .call("array_merge_recursive", vec![php("['foo' => 'a']"), walked])
+        .unwrap();
+    assert_eq!(show(&m), "['foo' => ['a', 'bar']]");
+}
+
+#[test]
+fn array_merge_recursive_bug24198_and_bug42177() {
+    let mut t = vm();
+    // bug24198.phpt: merging an array with itself is not a recursion.
+    let c = "['a' => 'aa', 'b' => 'bb']";
+    assert_eq!(
+        run(&mut t, "array_merge_recursive", vec![php(c), php(c)]),
+        "['a' => ['aa', 'aa'], 'b' => ['bb', 'bb']]"
+    );
+
+    // bug42177.phpt: $a1 = []; $a2 = ['key1' => &$a1];
+    // $a1 = array_merge_recursive($a1, $a2); then once more.
+    let a1 = PhpRef::new(Value::empty_array());
+    let mut a2 = PhpArray::new();
+    a2.insert("key1".into(), Value::Ref(a1.clone()));
+    let a2 = Value::array(a2);
+    let first = t
+        .call("array_merge_recursive", vec![a1.get(), a2.clone()])
+        .unwrap();
+    a1.set(first);
+    let second = t.call("array_merge_recursive", vec![a1.get(), a2]);
+    assert_eq!(thrown(second), ("Error".into(), "Recursion detected".into()));
+
+    // Plain values in both arrays (the first two blocks of bug42177.phpt).
+    assert_eq!(
+        run(
+            &mut t,
+            "array_merge_recursive",
+            vec![php("['key1' => 1, 'key3' => 2]"), php("[]")]
+        ),
+        "['key1' => 1, 'key3' => 2]"
+    );
+}
+
+#[test]
+fn array_merge_recursive_does_not_modify_its_arguments() {
+    // bug20381.phpt / bug48854.phpt
+    let mut t = vm();
+    let a = php("['a1' => 1, 'a2' => [1, 2, 3], 'a3' => ['a' => [10, 20, 30], 'b' => 'b']]");
+    let b = php("['a1' => 2, 'a2' => [3, 4, 5], 'a3' => ['c' => 'cc', 'a' => [10, 40]]]");
+    let before = (show(&a), show(&b));
+    let merged = run(&mut t, "array_merge_recursive", vec![a.clone(), b.clone()]);
+    assert_eq!(
+        merged,
+        "['a1' => [1, 2], 'a2' => [1, 2, 3, 3, 4, 5], 'a3' => ['a' => [10, 20, 30, 10, 40], 'b' => 'b', 'c' => 'cc']]"
+    );
+    assert_eq!((show(&a), show(&b)), before);
+
+    let array1 = php("['friends' => 5, 'children' => ['dogs' => 0]]");
+    let array2 = php("['friends' => 10, 'children' => ['cats' => 5]]");
+    let before = (show(&array1), show(&array2));
+    assert_eq!(
+        run(&mut t, "array_merge_recursive", vec![array1.clone(), array2.clone()]),
+        "['friends' => [5, 10], 'children' => ['dogs' => 0, 'cats' => 5]]"
+    );
+    assert_eq!((show(&array1), show(&array2)), before);
+
+    // array_replace_recursive likewise.
+    let before = show(&array1);
+    run(&mut t, "array_replace_recursive", vec![array1.clone(), array2]);
+    assert_eq!(show(&array1), before);
+}
