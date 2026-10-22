@@ -133,15 +133,10 @@ fn closure_debug_info(vm: &mut Vm, obj: &ObjRef) -> PhpArray {
         t.insert_str("file", Value::String(u.code.file.clone()));
         t.insert_str("line", Value::Int(u.code.start_line as i64));
     }
-    if let Some(u) = user {
+    if user.is_some() {
         let mut statics = PhpArray::new();
-        for b in &u.code.uses {
-            let v = c.bound.iter().find(|(s, _)| *s == b.inner).map(|(_, v)| v.clone()).unwrap_or(Value::Null);
-            let v = match v {
-                Value::Ref(r) if r.refcount() == 1 => r.get(),
-                v => v,
-            };
-            statics.insert(ArrayKey::Str(b.name.clone()), v);
+        for (name, v) in super::closure::closure_static_vars(&c) {
+            statics.insert(ArrayKey::Str(name), v);
         }
         if !statics.is_empty() {
             t.insert_str("static", Value::array(statics));

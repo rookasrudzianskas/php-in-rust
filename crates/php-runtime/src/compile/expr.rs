@@ -891,10 +891,7 @@ impl Lowerer<'_> {
                     out.push(Arg::Spread(self.expr(e)?));
                 }
                 ast::Arg::Named { name, value } => {
-                    if names.contains(&name.as_bytes()) {
-                        self.line = value.line;
-                        return self.error(format!("Duplicate named parameter ${name}"));
-                    }
+                    // Duplicates are a runtime error ("overwrites previous argument").
                     names.push(name.as_bytes());
                     has_named = true;
                     out.push(Arg::Named(pstr(name), self.arg_expr(value)?));
@@ -906,9 +903,6 @@ impl Lowerer<'_> {
                     out.push(Arg::Pos(Expr::Pfa(Box::new(PfaExpr::PipeArg(pipe.unwrap())))));
                 }
                 ast::Arg::NamedPlaceholder(name) if pipe.is_some() => {
-                    if names.contains(&name.as_bytes()) {
-                        return self.error(format!("Duplicate named parameter ${name}"));
-                    }
                     names.push(name.as_bytes());
                     has_named = true;
                     out.push(Arg::Named(pstr(name), Expr::Pfa(Box::new(PfaExpr::PipeArg(pipe.unwrap())))));
@@ -988,10 +982,17 @@ impl Lowerer<'_> {
                     line,
                 })));
             }
-            if lc.as_bytes() == b"assert" && is_fq_builtin && !args.is_callable_convert() {
+            // "assert" is special even when unqualified in a namespace.
+            if lc.as_bytes() == b"assert" && !args.is_callable_convert() {
                 let mut text = b"assert(".to_vec();
-                if let Some(ast::Arg::Positional(e)) = args.args.first() {
-                    text.extend_from_slice(&php_syntax::export_expr_bytes(e));
+                match args.args.first() {
+                    Some(ast::Arg::Positional(e)) => text.extend_from_slice(&php_syntax::export_expr_bytes(e)),
+                    Some(ast::Arg::Named { name, value }) => {
+                        text.extend_from_slice(name.as_bytes());
+                        text.extend_from_slice(b": ");
+                        text.extend_from_slice(&php_syntax::export_expr_bytes(value));
+                    }
+                    _ => {}
                 }
                 text.push(b')');
                 if matches!(self.vm.ini_get("zend.assertions").as_deref(), Some(b"-1")) {
@@ -1114,10 +1115,6 @@ impl Lowerer<'_> {
                     return self.error("Cannot combine partial application and unpacking");
                 }
                 ast::Arg::Named { name, value } => {
-                    if names.contains(&name.as_bytes()) {
-                        self.line = value.line;
-                        return self.error(format!("Duplicate named parameter ${name}"));
-                    }
                     names.push(name.as_bytes());
                     uses_named = true;
                     if variadic {
@@ -1126,9 +1123,6 @@ impl Lowerer<'_> {
                     args.push(PartialArg::Named(pstr(name), self.arg_expr(value)?));
                 }
                 ast::Arg::NamedPlaceholder(name) => {
-                    if names.contains(&name.as_bytes()) {
-                        return self.error(format!("Duplicate named parameter ${name}"));
-                    }
                     names.push(name.as_bytes());
                     uses_named = true;
                     if variadic {

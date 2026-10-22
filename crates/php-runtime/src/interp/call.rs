@@ -272,19 +272,11 @@ pub fn eval_call(vm: &mut Vm, cx: &Ctx, c: &CallExpr) -> PResult<Value> {
             let callee = eval(vm, cx, e)?;
             vm.current_line = c.line;
             let target = resolve_callable_for_call(vm, cx, &callee)?;
-            let b = eval_args(vm, cx, &c.args, Some(&target.func))?;
+            let by_ref_func = if target.magic_name.is_some() { None } else { Some(&target.func) };
+            let b = eval_args(vm, cx, &c.args, by_ref_func)?;
             vm.current_line = c.line;
             let caller = caller_of(vm, cx);
-            invoke(
-                vm,
-                &target.func,
-                b,
-                target.this,
-                target.called,
-                target.closure.as_ref(),
-                &caller,
-                true,
-            )
+            call_target(vm, target, b, &caller, true)
         }
     }
 }
@@ -469,12 +461,13 @@ pub(crate) fn resolve_callable_for_call(vm: &mut Vm, cx: &Ctx, callee: &Value) -
         }
         Value::Object(o) => {
             if let Some(c) = super::closure::closure_data(o) {
+                let magic_name = c.magic_name.clone();
                 return Ok(Target {
                     func: c.func.clone(),
                     this: c.this.clone(),
                     called: c.called.clone(),
                     closure: Some(c),
-                    magic_name: None,
+                    magic_name,
                 });
             }
             match o.class().find_method(b"__invoke").cloned() {
@@ -531,7 +524,12 @@ pub fn invoke(
 ) -> PResult<Value> {
     match &func.kind {
         FunctionKind::Native(_) => {
-            if dynamic && super::pfa::forbids_dynamic_calls(func) {
+            if dynamic && super::pfa::forbids_dynamic_calls(func) && {
+                // ZPP runs first: an arity error wins.
+                let sig = func.signature();
+                let n = b.positional.len();
+                b.named.is_empty() && n >= sig.required && (n <= sig.num_args() || sig.variadic().is_some())
+            } {
                 // `zend_forbid_dynamic_call`.
                 return Err(vm.throw_error("Error", format!("Cannot call {}() dynamically", func.name)));
             }
@@ -603,6 +601,7 @@ pub fn call_user(
     let mut variadic: Option<PhpArray> = code.params.last().filter(|p| p.variadic).map(|_| PhpArray::new());
     let mut extra = Vec::new();
     let mut num_args = positional.len();
+    let num_positional = num_args;
     {
         let mut vars = env.vars.borrow_mut();
         for (i, v) in positional.into_iter().enumerate() {
@@ -621,7 +620,7 @@ pub fn call_user(
         match code.params.iter().position(|p| !p.variadic && p.name == name) {
             Some(i) => {
                 let slot = code.params[i].slot as usize;
-                let taken = !env.vars.borrow()[slot].is_undef() || i < num_args.min(nparams);
+                let taken = !env.vars.borrow()[slot].is_undef() || i < num_positional.min(nparams);
                 if taken {
                     return Err(vm.throw_error(
                         "Error",
@@ -1408,6 +1407,14 @@ pub fn eval_new(vm: &mut Vm, cx: &Ctx, n: &NewExpr) -> PResult<Value> {
         vm.current_line = n.line;
         let caller = caller_of(vm, cx);
         invoke(vm, &ctor, b, Some(obj.clone()), Some(class.clone()), None, &caller, false)?;
+    } else if !n.args.args.is_empty() {
+        // A dummy call of `zend_pass_function`: arguments are evaluated and
+        // named ones are unknown.
+        let b = eval_args(vm, cx, &n.args, None)?;
+        vm.current_line = n.line;
+        if let Some((name, _)) = b.named.first() {
+            return Err(vm.throw_error("Error", format!("Unknown named parameter ${name}")));
+        }
     }
     Ok(Value::Object(obj))
 }

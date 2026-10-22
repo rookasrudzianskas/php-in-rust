@@ -483,6 +483,79 @@ pub fn register(r: &mut Registry<'_>) {
     r.class(ce);
 }
 
+fn collect_statics<'a>(block: &'a [Stmt], out: &mut Vec<&'a StaticVarDecl>) {
+    for s in block {
+        match &s.kind {
+            StmtKind::Static(decls) => out.extend(decls.iter()),
+            StmtKind::If(arms, els) => {
+                for (_, b) in arms {
+                    collect_statics(b, out);
+                }
+                if let Some(b) = els {
+                    collect_statics(b, out);
+                }
+            }
+            StmtKind::While(_, b) | StmtKind::DoWhile(b, _) | StmtKind::Block(b) | StmtKind::Ticks(_, b) => {
+                collect_statics(b, out)
+            }
+            StmtKind::For(f) => collect_statics(&f.body, out),
+            StmtKind::Foreach(f) => collect_statics(&f.body, out),
+            StmtKind::Switch(sw) => {
+                for c in &sw.cases {
+                    collect_statics(&c.body, out);
+                }
+            }
+            StmtKind::Try(t) => {
+                collect_statics(&t.body, out);
+                for c in &t.catches {
+                    collect_statics(&c.body, out);
+                }
+                if let Some(f) = &t.finally {
+                    collect_statics(f, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The closure's `static_variables` table as shown by `var_dump()`: bound
+/// (`use`) variables, then `static` variables in declaration order (their
+/// current value, the literal initializer, or `null`).
+pub fn closure_static_vars(c: &ClosureData) -> Vec<(PhpStr, Value)> {
+    let Some(u) = user_fn(&c.func) else { return Vec::new() };
+    let mut out = Vec::new();
+    for b in &u.code.uses {
+        let v = c.bound.iter().find(|(s, _)| *s == b.inner).map(|(_, v)| v.clone()).unwrap_or(Value::Null);
+        out.push((b.name.clone(), v));
+    }
+    let mut decls = Vec::new();
+    collect_statics(&u.code.body, &mut decls);
+    decls.sort_by_key(|d| d.index);
+    decls.dedup_by_key(|d| d.index);
+    let statics = u.statics.borrow();
+    for d in decls {
+        let v = match statics.get(d.index as usize).cloned().flatten() {
+            Some(r) => Value::Ref(r),
+            None => match &d.init {
+                Some(Expr::Lit(v)) => v.clone(),
+                _ => Value::Null,
+            },
+        };
+        out.push((d.name.clone(), v));
+    }
+    // `Z_ISREF_P(var) && Z_REFCOUNT_P(var) == 1`: unshared references are
+    // shown as plain values (our copy holds one extra count).
+    for (_, v) in out.iter_mut() {
+        if let Value::Ref(r) = v {
+            if r.refcount() <= 2 {
+                *v = r.get();
+            }
+        }
+    }
+    out
+}
+
 /// Makes a reference wrapper (used by bound by-ref variables).
 #[allow(dead_code)]
 pub(crate) fn ref_of(v: Value) -> PhpRef {

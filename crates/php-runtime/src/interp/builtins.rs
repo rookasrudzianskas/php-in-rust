@@ -1081,10 +1081,16 @@ pub fn eval_assert(vm: &mut Vm, cx: &Ctx, args: &ArgList, text: &PhpStr, line: u
     let b = call::eval_args(vm, cx, args, f.as_ref())?;
     vm.current_line = line;
     let mut pos = b.positional;
-    if pos.len() == 1 && b.named.is_empty() {
-        pos.push(Value::String(text.clone()));
+    let mut named = b.named;
+    // zend_compile_assert: a single argument gets the exported source as
+    // its description (named when the argument was named).
+    if args.args.len() == 1 {
+        match &args.args[0] {
+            Arg::Pos(_) => pos.push(Value::String(text.clone())),
+            Arg::Named(..) => named.push((PhpStr::from("description"), Value::String(text.clone()))),
+            Arg::Spread(_) => {}
+        }
     }
-    let named = b.named;
     match f {
         Some(f) => vm.invoke_native(
             &f,

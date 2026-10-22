@@ -314,24 +314,19 @@ fn is_method_callable(
                 call_via_handler = true;
                 retval = true;
             } else {
-                // zend_std_get_method: only __call can provide it here.
+                // zend_std_get_method (visibility from the frame's scope;
+                // inaccessible or missing methods go through __call).
                 let obj = fcc.object.clone().unwrap();
                 let oc = obj.class().clone();
-                if let Some(m) = oc.methods.get(&lm).cloned() {
-                    if strict_class && !m.scope.as_ref().and_then(|s| vm.find_class(s)).is_some_and(|s| org.instance_of(&s)) {
-                        // released
-                    } else {
-                        fcc.func = Some(m);
-                        retval = true;
-                    }
-                } else if oc.magic.call.is_some() {
-                    let call = oc.magic.call.clone().unwrap();
-                    let ok = !strict_class || call.scope.as_ref().and_then(|s| vm.find_class(s)).is_some_and(|s| org.instance_of(&s));
+                if oc.methods.contains_key(&lm) || oc.magic.call.is_some() {
+                    let t = super::call::method_target(vm, frame.scope().as_ref(), &obj, &mname)?;
+                    let ok = !strict_class
+                        || t.func.scope.as_ref().and_then(|s| vm.find_class(s)).is_some_and(|s| org.instance_of(&s));
                     if ok {
-                        fcc.func = Some(call);
-                        fcc.magic = Some(mname.clone());
+                        call_via_handler = t.magic_name.is_some();
+                        fcc.func = Some(t.func);
+                        fcc.magic = t.magic_name;
                         retval = true;
-                        call_via_handler = true;
                     }
                 }
             }
@@ -520,6 +515,7 @@ pub fn is_callable_ex(vm: &mut Vm, v: &Value, suppress: bool) -> PResult<Result<
         }
         Value::Object(o) => {
             if let Some(c) = super::closure::closure_data(o) {
+                let magic_name = c.magic_name.clone();
                 return Ok(Ok(CallableInfo {
                     name,
                     target: Target {
@@ -527,7 +523,7 @@ pub fn is_callable_ex(vm: &mut Vm, v: &Value, suppress: bool) -> PResult<Result<
                         this: c.this.clone(),
                         called: c.called.clone(),
                         closure: Some(c),
-                        magic_name: None,
+                        magic_name,
                     },
                 }));
             }

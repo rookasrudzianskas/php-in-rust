@@ -528,16 +528,24 @@ impl Lowerer<'_> {
         for g in groups {
             for a in g {
                 self.line = a.line;
-                let mut args = Vec::new();
+                let mut args: Vec<(Option<PhpStr>, Expr)> = Vec::new();
                 if let Some(al) = &a.args {
+                    let mut uses_named = false;
                     for arg in &al.args {
                         match arg {
                             ast::Arg::Positional(e) => {
+                                if uses_named {
+                                    return self.error("Cannot use positional argument after named argument");
+                                }
                                 self.check_const_expr(e)?;
                                 let v = self.const_lower(e)?;
                                 args.push((None, v));
                             }
                             ast::Arg::Named { name, value } => {
+                                uses_named = true;
+                                if args.iter().any(|(n, _)| n.as_ref().is_some_and(|n| n.as_bytes() == name.as_bytes())) {
+                                    return self.error(format!("Duplicate named parameter ${name}"));
+                                }
                                 self.check_const_expr(value)?;
                                 let v = self.const_lower(value)?;
                                 args.push((Some(pstr(name)), v));
