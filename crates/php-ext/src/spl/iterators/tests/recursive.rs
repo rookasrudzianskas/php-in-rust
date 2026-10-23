@@ -1415,14 +1415,12 @@ fn call_get_children_of_leaf() {
     assert_eq!(crate::spl::testutil::array_of(&cur).len(), 3);
     vm.call_method(&it, b"next", vec![]).unwrap();
     assert_eq!(int(&vm.call_method(&it, b"current", vec![]).unwrap()), 7);
-    // php-src parses the argument with ZPP "A" and reports "must be of type
-    // array, int given"; the runtime derives the message from the stub type
-    // `array|object` (a known difference of ArrayIterator::__construct()).
+    // php-src parses the argument with ZPP "A": "must be of type array".
     assert_eq!(
         thrown(vm.call_method(&it, b"callGetChildren", vec![])),
         (
             "TypeError".into(),
-            "ArrayIterator::__construct(): Argument #1 ($array) must be of type object|array, int given"
+            "ArrayIterator::__construct(): Argument #1 ($array) must be of type array, int given"
                 .into()
         )
     );

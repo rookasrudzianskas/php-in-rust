@@ -264,5 +264,9 @@ pub fn register(r: &mut Registry<'_>) {
     ce.handlers.create_object = Some(create);
     ce.handlers.clone_obj = Some(clone_forbidden);
     ce.handlers.get_iterator = Some(ii_get_iterator);
-    r.class(ce);
+    // A Zend class: owned by Core whichever module registers it first.
+    ce.flags |= class_flags::INTERNAL;
+    ce.module = Some("Core");
+    ce.link_magic_methods();
+    r.vm.register_class(Rc::new(ce));
 }

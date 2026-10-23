@@ -572,6 +572,11 @@ mod tests {
             call(&mut t, "doubleval", vec![Value::str("2.5")]),
             Value::Float(2.5),
         );
+        // #[\Deprecated(message: "use floatval() instead", since: "8.6")]
+        assert_eq!(
+            t.output(),
+            "\nDeprecated: Function doubleval() is deprecated since 8.6, use floatval() instead in /t.php on line 3\n"
+        );
 
         assert!(!b(&mut t, "boolval", Value::Int(0)));
         assert!(b(&mut t, "boolval", Value::Int(42)));
