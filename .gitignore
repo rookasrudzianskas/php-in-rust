@@ -12,3 +12,4 @@
 /tests/phpt/**/*.stdin
 /.toolchain/
 /tests/phpt/**/debug_*_container_*.txt
+/.worktrees/
