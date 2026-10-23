@@ -60,6 +60,9 @@ pub struct Frame {
     /// Arguments as passed (named ones carry their name).
     pub args: Vec<(Option<PhpStr>, Value)>,
     pub is_internal: bool,
+    /// Variable scope of a userland frame (or of the includer for
+    /// `include`/`eval` frames); backtraces read live argument values from it.
+    pub env: Option<Rc<crate::interp::Env>>,
 }
 
 impl Frame {
@@ -83,6 +86,7 @@ impl Frame {
             args: args.into_iter().map(|v| (None, v)).collect(),
             is_internal: false,
             function: Some(function),
+            env: None,
         }
     }
 }
@@ -383,6 +387,108 @@ pub struct Vm {
     /// Arrays currently being compared (recursion detection).
     pub(crate) compare_guard: Vec<usize>,
     ext_data: HashMap<TypeId, Box<dyn Any>>,
+    /// Interpreter state (scopes, included files, shutdown functions, autoloaders).
+    pub interp: crate::interp::State,
+    /// Engine → extension callbacks.
+    pub hooks: Hooks,
+    /// Set while user code executes `include`/`require`(`_once`)/`eval`
+    /// (`opline->opcode == ZEND_INCLUDE_OR_EVAL`): `php_verror` then names
+    /// that construct as the error origin while `frames.len()` equals the
+    /// recorded depth (not inside user code the opener calls back into).
+    pub include_or_eval: Option<ActiveInclude>,
+    output_hooks_ran: bool,
+}
+
+/// An `include`/`require` whose file is being opened (see
+/// [`Vm::include_or_eval`]).
+#[derive(Clone, Debug)]
+pub struct ActiveInclude {
+    /// `include`, `include_once`, `require` or `require_once`.
+    pub op: &'static str,
+    /// `frames.len()` of the code executing the construct.
+    pub depth: usize,
+    /// The operand (shown with `error_include_args`).
+    pub filename: PhpStr,
+    /// Location of the construct.
+    pub file: PhpStr,
+    pub line: u32,
+}
+
+/// `interface_gets_implemented`: called with (interface, class) when a class
+/// implementing the interface is linked.
+pub type InterfaceHook = fn(&mut Vm, &ClassRef, &ClassRef) -> PResult<()>;
+/// A hook with no arguments (statement boundaries, shutdown, first output).
+pub type VmHook = fn(&mut Vm) -> PResult<()>;
+/// Autoloader: tries to declare `class_name` (no leading `\`).
+pub type AutoloadHook = fn(&mut Vm, &[u8]) -> PResult<()>;
+/// Opens a file for `include`/`require`: `(path, use_include_path)` gives
+/// `Some((resolved path, contents))`, or `None` after emitting php-src's
+/// "include(x): Failed to open stream: ..." warning.
+pub type IncludeOpenerHook = fn(&mut Vm, &[u8], bool) -> PResult<Option<(PhpStr, Vec<u8>)>>;
+
+/// Callbacks extensions register (during `register()`) to react to engine
+/// events; php-runtime cannot depend on php-ext.
+#[derive(Default, Clone)]
+pub struct Hooks {
+    /// `(lowercase interface name, hook)`, e.g. `("serializable", ...)`.
+    pub interface_implemented: Vec<(PhpStr, InterfaceHook)>,
+    /// Class lookup misses (`spl_autoload_call`). When unset, the engine
+    /// calls the callables in `vm.interp.autoload_functions`.
+    pub autoload: Option<AutoloadHook>,
+    /// Run between statements, next to the destructor queue drain.
+    pub statement_boundary: Vec<VmHook>,
+    /// Run at request shutdown after shutdown functions, destructors and the
+    /// output flush, in registration order.
+    pub request_shutdown: Vec<VmHook>,
+    /// File loading for `include`/`require` through the stream layer.
+    pub include_opener: Option<IncludeOpenerHook>,
+    /// Run once, before the first byte of output reaches the SAPI.
+    pub output_started: Vec<VmHook>,
+}
+
+impl Hooks {
+    /// Registers an `interface_gets_implemented` callback for `interface`.
+    pub fn on_interface_implemented(&mut self, interface: &str, hook: InterfaceHook) {
+        self.interface_implemented
+            .push((PhpStr::from(interface.to_ascii_lowercase()), hook));
+    }
+
+    pub fn on_statement_boundary(&mut self, hook: VmHook) {
+        self.statement_boundary.push(hook);
+    }
+
+    pub fn on_request_shutdown(&mut self, hook: VmHook) {
+        self.request_shutdown.push(hook);
+    }
+
+    pub fn on_output_started(&mut self, hook: VmHook) {
+        self.output_started.push(hook);
+    }
+}
+
+impl Vm {
+    /// Runs the statement-boundary hooks.
+    #[inline]
+    pub fn run_statement_hooks(&mut self) -> PResult<()> {
+        let n = self.hooks.statement_boundary.len();
+        for i in 0..n {
+            let h = self.hooks.statement_boundary[i];
+            h(self)?;
+        }
+        Ok(())
+    }
+
+    /// Runs the first-output hooks (once).
+    pub(crate) fn output_starting(&mut self) {
+        if self.output_hooks_ran {
+            return;
+        }
+        self.output_hooks_ran = true;
+        let hooks = self.hooks.output_started.clone();
+        for h in hooks {
+            let _ = h(self);
+        }
+    }
 }
 
 impl Default for Vm {
@@ -418,6 +524,10 @@ impl Vm {
             modules: Vec::new(),
             compare_guard: Vec::new(),
             ext_data: HashMap::new(),
+            interp: crate::interp::State::default(),
+            hooks: Hooks::default(),
+            include_or_eval: None,
+            output_hooks_ran: false,
         };
         vm.register_module("Core", crate::builtins::register_core);
         // sapi/cli HARDCODED_INI and INI_DEFAULT values.
@@ -522,10 +632,10 @@ impl Vm {
         };
         let (value, flags, msg, cname) = (c.value.clone(), c.flags, c.deprecation, c.name.clone());
         if flags & const_flags::DEPRECATED != 0 {
-            let m = match msg {
-                Some(m) => format!("Constant {cname} is deprecated, {m}"),
-                None => format!("Constant {cname} is deprecated"),
-            };
+            let m = format!(
+                "Constant {cname} is deprecated{}",
+                crate::class::deprecation_suffix_text(msg.unwrap_or(""))
+            );
             self.engine_deprecated(m)?;
         }
         Ok(Some(value))
@@ -565,6 +675,16 @@ impl Vm {
                 ),
             )),
             crate::class::ConstValue::Unevaluated(expr) => {
+                // Enum cases with a known backing value are created here, so
+                // they work without an interpreter and stay lazy.
+                if let Some(init) = expr.downcast_ref::<crate::enums::EnumCaseInit>() {
+                    if init.expr.is_none() {
+                        let obj = crate::enums::new_case_object(&ce, init, None);
+                        let v = Value::Object(obj);
+                        *c.value.borrow_mut() = crate::class::ConstValue::Value(v.clone());
+                        return Ok(Some(v));
+                    }
+                }
                 *c.value.borrow_mut() = crate::class::ConstValue::Evaluating;
                 let host = self.host.clone();
                 match host.eval_class_constant(self, &ce, &expr) {
@@ -663,6 +783,7 @@ impl Vm {
             b"error_prepend_string" => self.errors.prepend = v,
             b"error_append_string" => self.errors.append = v,
             b"implicit_flush" => self.output.implicit_flush = ini::parse_bool(&s),
+            b"memory_limit" => crate::alloc::set_limit(ini::atol_quantity(&s)),
             _ => {}
         }
     }
@@ -712,10 +833,36 @@ impl Vm {
         limit: usize,
     ) -> PhpArray {
         let mut out = PhpArray::new();
-        for f in self.frames.iter().rev().skip(skip_last) {
+        // zend_fetch_debug_backtrace emits an `include` pseudo-frame for user
+        // code whose current opline is ZEND_INCLUDE_OR_EVAL.
+        let include = self
+            .include_or_eval
+            .as_ref()
+            .filter(|inc| inc.depth < self.frames.len());
+        let total = self.frames.len();
+        let mut entries: Vec<Option<&Frame>> = Vec::with_capacity(total + 1);
+        for idx in (0..total).rev() {
+            if include.is_some_and(|inc| inc.depth == idx + 1) {
+                entries.push(None);
+            }
+            entries.push(Some(&self.frames[idx]));
+        }
+        if include.is_some_and(|inc| inc.depth == 0) {
+            entries.push(None);
+        }
+        for entry in entries.into_iter().skip(skip_last) {
             if limit > 0 && out.len() >= limit {
                 break;
             }
+            let Some(f) = entry else {
+                let inc = include.expect("pseudo-frame without include");
+                let mut e = PhpArray::new();
+                e.insert_str("file", inc.file.clone());
+                e.insert_str("line", inc.line as i64);
+                e.insert_str("function", inc.op);
+                let _ = out.append(e);
+                continue;
+            };
             let mut e = PhpArray::new();
             if let Some((file, line)) = &f.call_site {
                 e.insert_str("file", file.clone());
@@ -733,13 +880,26 @@ impl Vm {
             }
             if !ignore_args {
                 let mut args = PhpArray::new();
-                for (name, v) in &f.args {
+                let live;
+                let fargs: &[(Option<PhpStr>, Value)] = match &f.env {
+                    // Userland frames show the current values of their parameters.
+                    Some(env) if f.function.is_some() && !f.is_internal => {
+                        let mut a = env.trace_args(f.function.as_deref());
+                        if let Some(func) = &f.function {
+                            crate::interp::call::redact_sensitive_args(self, func, &mut a);
+                        }
+                        live = a;
+                        &live
+                    }
+                    _ => &f.args,
+                };
+                for (name, v) in fargs {
                     match name {
                         Some(n) => {
-                            args.insert(crate::value::ArrayKey::Str(n.clone()), v.clone());
+                            args.insert(crate::value::ArrayKey::Str(n.clone()), v.unref());
                         }
                         None => {
-                            let _ = args.append(v.clone());
+                            let _ = args.append(v.unref());
                         }
                     }
                 }
@@ -779,11 +939,30 @@ impl Vm {
 
     /// Creates an instance (`object_init_ex`): the class's `create_object`
     /// handler or a plain object with default properties.
+    ///
+    /// The constructor is not called; constant-expression property defaults
+    /// of userland classes are evaluated (`object_init_ex` semantics), so this
+    /// is what `unserialize()` and `newInstanceWithoutConstructor()` use.
     pub fn instantiate(&mut self, class: &ClassRef) -> PResult<ObjRef> {
-        match class.handlers.create_object {
-            Some(f) => f(self, class),
-            None => Ok(ObjRef::new(class.clone())),
-        }
+        crate::interp::objects::instantiate(self, class)
+    }
+
+    /// The class scope of the innermost userland frame (`zend_get_executed_scope`),
+    /// for visibility checks made by built-in functions.
+    pub fn calling_scope(&mut self) -> Option<ClassRef> {
+        crate::interp::call::calling_scope(self)
+    }
+
+    /// Throws php-src's "Maximum call stack size" Error when the native stack
+    /// is nearly exhausted (for recursive built-ins).
+    pub fn check_stack(&mut self) -> PResult<()> {
+        crate::interp::check_stack(self)
+    }
+
+    /// `zend_update_class_constants`: evaluates the class's constant
+    /// expressions (constants, property defaults, static properties).
+    pub fn update_class_constants(&mut self, class: &ClassRef) -> PResult<()> {
+        crate::interp::decl::update_class_constants(self, class)
     }
 
     /// `cast_object` dispatch: the class handler, else the standard handler

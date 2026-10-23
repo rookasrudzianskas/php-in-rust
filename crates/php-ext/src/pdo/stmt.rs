@@ -2053,5 +2053,7 @@ pub fn register(r: &mut Registry) {
     ce.handlers.create_object = Some(create_stmt);
     ce.handlers.clone_obj = Some(clone_forbidden);
     ce.handlers.write_property = Some(prop_write);
+    // pdo_stmt_iter_get: foreach runs the statement iterator natively.
+    ce.handlers.get_iterator = Some(super::iterator::get_iterator);
     r.class(ce);
 }

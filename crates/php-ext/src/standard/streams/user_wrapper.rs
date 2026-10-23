@@ -1445,6 +1445,7 @@ mod tests {
             call_site: Some(site),
             args: Vec::new(),
             is_internal: true,
+            env: None,
         });
         let r = f(vm);
         vm.pop_frame();

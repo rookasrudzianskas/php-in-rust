@@ -40,6 +40,11 @@ pub mod class_flags {
     pub const NO_DYNAMIC_INSTANTIATION: u32 = 1 << 10;
     /// Constants have been evaluated.
     pub const CONSTANTS_UPDATED: u32 = 1 << 11;
+    /// Dynamic properties are an Error (`ZEND_ACC_NO_DYNAMIC_PROPERTIES`):
+    /// "Cannot create dynamic property X::$y".
+    pub const NO_DYNAMIC_PROPERTIES: u32 = 1 << 12;
+    /// A user class whose inheritance has been resolved (`ZEND_ACC_LINKED`).
+    pub const LINKED: u32 = 1 << 13;
 }
 
 /// Member flags (visibility etc.) shared by methods, properties and constants.
@@ -63,6 +68,10 @@ pub mod member_flags {
     pub const PROMOTED: u32 = 1 << 12;
     /// Enum case constant.
     pub const ENUM_CASE: u32 = 1 << 13;
+    /// A redeclared property/method shadowing a parent's private member (`ZEND_ACC_CHANGED`).
+    pub const CHANGED: u32 = 1 << 14;
+    /// `#[\Override]`.
+    pub const OVERRIDE: u32 = 1 << 15;
 }
 
 /// Function flags (`ZEND_ACC_*` subset relevant to functions).
@@ -111,6 +120,45 @@ pub struct Function {
 
 /// Methods are functions with a scope and visibility flags.
 pub type Method = Function;
+
+/// `#[\Deprecated(message: ..., since: ...)]` of a built-in function, stored in
+/// [`Function::attributes`] by [`crate::Registry::deprecated_function`].
+#[derive(Clone, Debug)]
+pub struct DeprecationNote {
+    pub since: &'static str,
+    pub message: &'static str,
+}
+
+impl DeprecationNote {
+    /// The message suffix (`get_deprecation_suffix_from_attribute`):
+    /// `" since 8.1"`, `", use X instead"`, `" since 8.1, use X instead"`.
+    pub fn suffix(&self) -> String {
+        let mut s = String::new();
+        if !self.since.is_empty() {
+            s.push_str(" since ");
+            s.push_str(self.since);
+        }
+        if !self.message.is_empty() {
+            s.push_str(", ");
+            s.push_str(self.message);
+        }
+        s
+    }
+}
+
+/// Turns a stub-style deprecation description (`"since 8.4, the error level
+/// was removed"` or just a message) into the suffix php-src appends after
+/// "is deprecated".
+pub fn deprecation_suffix_text(desc: &str) -> String {
+    let d = desc.trim();
+    if d.is_empty() {
+        String::new()
+    } else if let Some(rest) = d.strip_prefix("since ") {
+        format!(" since {rest}")
+    } else {
+        format!(", {d}")
+    }
+}
 
 impl Function {
     /// A native function; the name comes from its stub signature.
@@ -183,6 +231,35 @@ impl Function {
 
     pub fn visibility(&self) -> u32 {
         self.flags & member_flags::PPP_MASK
+    }
+
+    /// Marks a built-in function or method `#[\Deprecated(since, message)]`
+    /// (pass `""` for an absent argument): calls then emit
+    /// "Method C::m() is deprecated since X.Y, message" before the handler
+    /// runs, as `zend_deprecated_function` does.
+    pub fn deprecated(mut self, since: &'static str, message: &'static str) -> Function {
+        self.flags |= fn_flags::DEPRECATED;
+        self.attributes.push(Rc::new(DeprecationNote { since, message }));
+        self
+    }
+
+    /// The deprecation note of a built-in function, if any.
+    pub fn deprecation_note(&self) -> Option<&DeprecationNote> {
+        self.attributes
+            .iter()
+            .find_map(|a| a.downcast_ref::<DeprecationNote>())
+    }
+
+    /// `zend_deprecated_function` message: "Function f() is deprecated since 8.1".
+    pub fn deprecation_message(&self) -> String {
+        let suffix = self
+            .deprecation_note()
+            .map(DeprecationNote::suffix)
+            .unwrap_or_default();
+        match &self.scope {
+            Some(c) => format!("Method {c}::{}() is deprecated{suffix}", self.name),
+            None => format!("Function {}() is deprecated{suffix}", self.name),
+        }
     }
 
     /// `Class::method` or `function` as used in error messages
@@ -359,6 +436,100 @@ pub type WritePropertyFn = fn(&mut Vm, &ObjRef, &PhpStr, Value) -> PResult<bool>
 pub type GetIteratorFn = fn(&mut Vm, &ObjRef, bool) -> PResult<Rc<dyn Any>>;
 pub type DtorFn = fn(&mut Vm, &ObjRef) -> PResult<()>;
 pub type GetClosureFn = fn(&mut Vm, &ObjRef) -> PResult<Option<Value>>;
+/// `has_property`: `Ok(None)` selects the standard behaviour; the bool is `check_empty`.
+pub type HasPropertyFn = fn(&mut Vm, &ObjRef, &PhpStr, bool) -> PResult<Option<bool>>;
+/// `unset_property`: returns `true` when handled.
+pub type UnsetPropertyFn = fn(&mut Vm, &ObjRef, &PhpStr) -> PResult<bool>;
+
+/// What `has_property` checks (`ZEND_PROPERTY_ISSET`, `ZEND_PROPERTY_NOT_EMPTY`,
+/// `ZEND_PROPERTY_EXISTS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropertyCheck {
+    /// `isset()`: exists and is not `null`.
+    Isset,
+    /// `!empty()`: exists and is truthy.
+    NotEmpty,
+    /// `property_exists()`: exists (even when `null`).
+    Exists,
+}
+
+/// `has_property` with the check mode: `Ok(None)` selects the standard behaviour.
+pub type HasPropertyModeFn = fn(&mut Vm, &ObjRef, &PhpStr, PropertyCheck) -> PResult<Option<bool>>;
+
+/// Result of a `get_property_ptr_ptr` handler.
+#[derive(Clone)]
+pub enum PropertyPtr {
+    /// Use the standard behaviour (`zend_std_get_property_ptr_ptr`).
+    Std,
+    /// No direct pointer (php-src's `NULL`): the engine falls back to
+    /// `read_property` (writes into the result are temporaries) and, for
+    /// compound assignments, `write_property`.
+    Null,
+    /// A direct reference to the property value.
+    Ref(PhpRef),
+}
+
+/// `get_property_ptr_ptr`: called for write fetches (`$o->p[] = ..`,
+/// `$o->p->q = ..`, `&$o->p`, `$o->p =& $r`). An `Err` (for example
+/// "Cannot modify readonly property") aborts the operation.
+pub type GetPropertyPtrFn = fn(&mut Vm, &ObjRef, &PhpStr) -> PResult<PropertyPtr>;
+/// `get_method` + call: `Ok(None)` selects the standard method lookup.
+pub type CallMethodFn = fn(&mut Vm, &ObjRef, &PhpStr, &[Value]) -> PResult<Option<Value>>;
+
+/// `zend_object_iterator_funcs`: the iterator an internal class's
+/// [`ObjectHandlers::get_iterator`] returns, as `Rc<dyn ObjectIterator>`
+/// stored in the handler's `Rc<dyn Any>` (see
+/// [`crate::interp::internal_iterator::iterator_any`]). Implementors keep
+/// their position in `Cell`s so the iterator can be shared and re-entered
+/// from PHP code. `foreach` drives it directly and `InternalIterator`
+/// wraps it for `IteratorAggregate::getIterator()`.
+pub trait ObjectIterator {
+    /// `funcs->valid`.
+    fn valid(&self, vm: &mut Vm) -> PResult<bool>;
+    /// `funcs->get_current_data`; `Ok(None)` is a `NULL` result (`foreach`
+    /// stops, `InternalIterator::current()` returns `null`).
+    fn current(&self, vm: &mut Vm) -> PResult<Option<Value>>;
+    /// `funcs->get_current_key`; `Ok(None)` when the iterator has no key
+    /// function (the iteration index is used instead).
+    fn key(&self, vm: &mut Vm) -> PResult<Option<Value>>;
+    /// `funcs->move_forward`.
+    fn move_forward(&self, vm: &mut Vm) -> PResult<()>;
+    /// `funcs->rewind` (only called when [`ObjectIterator::can_rewind`]).
+    fn rewind(&self, vm: &mut Vm) -> PResult<()>;
+    /// Whether `funcs->rewind` is set.
+    fn can_rewind(&self) -> bool {
+        true
+    }
+}
+
+/// The older, `&mut self` iterator interface; a get_iterator handler may
+/// return it as `Rc<RefCell<Box<dyn InternalIterator>>>` inside the
+/// `Rc<dyn Any>`. It is adapted to [`ObjectIterator`].
+pub trait InternalIterator {
+    fn rewind(&mut self, vm: &mut Vm) -> PResult<()>;
+    fn valid(&mut self, vm: &mut Vm) -> PResult<bool>;
+    fn current(&mut self, vm: &mut Vm) -> PResult<Value>;
+    fn key(&mut self, vm: &mut Vm) -> PResult<Value>;
+    fn next(&mut self, vm: &mut Vm) -> PResult<()>;
+}
+
+impl ObjectIterator for std::cell::RefCell<Box<dyn InternalIterator>> {
+    fn valid(&self, vm: &mut Vm) -> PResult<bool> {
+        self.borrow_mut().valid(vm)
+    }
+    fn current(&self, vm: &mut Vm) -> PResult<Option<Value>> {
+        self.borrow_mut().current(vm).map(Some)
+    }
+    fn key(&self, vm: &mut Vm) -> PResult<Option<Value>> {
+        self.borrow_mut().key(vm).map(Some)
+    }
+    fn move_forward(&self, vm: &mut Vm) -> PResult<()> {
+        self.borrow_mut().next(vm)
+    }
+    fn rewind(&self, vm: &mut Vm) -> PResult<()> {
+        self.borrow_mut().rewind(vm)
+    }
+}
 
 /// Fetch mode for `read_dimension` (`BP_VAR_R`, `BP_VAR_IS`, `BP_VAR_W`, `BP_VAR_RW`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -392,6 +563,13 @@ pub struct ObjectHandlers {
     /// Internal destructor, run in addition to (before) a userland `__destruct`.
     pub dtor_obj: Option<DtorFn>,
     pub get_closure: Option<GetClosureFn>,
+    pub has_property: Option<HasPropertyFn>,
+    pub unset_property: Option<UnsetPropertyFn>,
+    /// `has_property` with the check mode; takes precedence over `has_property`.
+    pub has_property_mode: Option<HasPropertyModeFn>,
+    pub get_property_ptr_ptr: Option<GetPropertyPtrFn>,
+    /// Intercepts `$obj->method(...)` calls (e.g. `__PHP_Incomplete_Class`).
+    pub call_method: Option<CallMethodFn>,
 }
 
 /// Cached magic methods (`ce->constructor`, `ce->__get`, ...), filled by

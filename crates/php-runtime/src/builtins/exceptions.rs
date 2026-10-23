@@ -299,6 +299,22 @@ pub fn register(r: &mut Registry<'_>) {
         .expect("Stringable registered first");
     let mut throwable = ClassEntry::new("Throwable", class_flags::INTERFACE);
     throwable.interfaces.push(stringable.clone());
+    throwable.methods = stringable.methods.clone();
+    for nf in [
+        &GET_MESSAGE,
+        &GET_CODE,
+        &GET_FILE,
+        &GET_LINE,
+        &GET_TRACE,
+        &GET_PREVIOUS,
+        &GET_TRACE_AS_STRING,
+    ] {
+        throwable.add_method(Function::native_method(
+            nf,
+            "Throwable",
+            member_flags::PUBLIC | member_flags::ABSTRACT,
+        ));
+    }
     let throwable = r.class(throwable);
 
     let exception = r.class(base_class("Exception", &throwable, &stringable, false));

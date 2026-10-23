@@ -2,6 +2,7 @@
 //!
 //! Based on CPAN's "Text-Metaphone-1.96" by Michael G Schwern.
 
+#[cfg(test)]
 use php_runtime::class::fn_flags;
 use php_runtime::{Args, NativeFunction, PResult, PhpStr, Registry, Value, Vm};
 
@@ -380,7 +381,7 @@ pub static METAPHONE: NativeFunction = NativeFunction {
 
 pub fn register(r: &mut Registry) {
     // #[\Deprecated(since: '8.6', message: 'use a userland phonetic matching library instead')]
-    r.function_with_flags(&METAPHONE, fn_flags::DEPRECATED);
+    r.deprecated_function(&METAPHONE, "8.6", "use a userland phonetic matching library instead");
 }
 
 #[cfg(test)]

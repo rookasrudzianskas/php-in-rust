@@ -231,6 +231,10 @@ impl Vm {
     pub fn echo(&mut self, data: &[u8]) -> PResult<()> {
         if !self.output.activated {
             if !self.output.disabled && !data.is_empty() {
+                if !self.output.sent {
+                    self.output.sent = true;
+                    self.output_starting();
+                }
                 self.output.sink.write(data);
             }
             return Ok(());
@@ -258,8 +262,11 @@ impl Vm {
 
     /// Writes directly to the sink, bypassing buffers (`PHPWRITE_H`).
     pub fn write_unbuffered(&mut self, data: &[u8]) {
+        if !self.output.sent {
+            self.output.sent = true;
+            self.output_starting();
+        }
         self.output.sink.write(data);
-        self.output.sent = true;
     }
 
     /// `flush()`: flushes the sink.
@@ -335,6 +342,10 @@ impl Vm {
         }
         if let Some(out) = ctx.out {
             if !out.is_empty() && !self.output.disabled && !matches!(pending, Some(Flow::Fatal)) {
+                if !self.output.sent {
+                    self.output.sent = true;
+                    self.output_starting();
+                }
                 self.output.sink.write(&out);
                 if self.output.implicit_flush {
                     self.output.sink.flush();

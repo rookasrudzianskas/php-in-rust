@@ -1846,6 +1846,7 @@ fn array_as_props_respects_visibility() {
         call_site: None,
         args: Vec::new(),
         is_internal: false,
+        env: None,
     });
     assert!(read_prop(&mut t, &c, "x").is_none());
     t.vm.pop_frame();

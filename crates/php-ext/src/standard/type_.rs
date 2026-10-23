@@ -4,7 +4,6 @@
 //! and lives with the interpreter; `array_is_list()` is declared with the
 //! array.c functions in the stub and is ported there.
 
-use php_runtime::class::fn_flags;
 use php_runtime::value::numeric::is_numeric_str;
 use php_runtime::{Args, NativeFunction, PResult, PhpStr, Registry, Value, Vm};
 
@@ -356,9 +355,12 @@ pub fn register(r: &mut Registry) {
         &IS_ITERABLE,
         &IS_COUNTABLE,
     ]);
-    for nf in [&DOUBLEVAL, &IS_INTEGER, &IS_LONG, &IS_DOUBLE] {
-        r.function_with_flags(nf, fn_flags::DEPRECATED);
-    }
+    // #[\Deprecated(since: "8.6", message: "use X() instead")]: the
+    // runtime emits the deprecation before the call.
+    r.deprecated_function(&DOUBLEVAL, "8.6", "use floatval() instead");
+    r.deprecated_function(&IS_INTEGER, "8.6", "use is_int() instead");
+    r.deprecated_function(&IS_LONG, "8.6", "use is_int() instead");
+    r.deprecated_function(&IS_DOUBLE, "8.6", "use is_float() instead");
 }
 
 #[cfg(test)]
@@ -569,6 +571,11 @@ mod tests {
         same(
             call(&mut t, "doubleval", vec![Value::str("2.5")]),
             Value::Float(2.5),
+        );
+        // #[\Deprecated(message: "use floatval() instead", since: "8.6")]
+        assert_eq!(
+            t.output(),
+            "\nDeprecated: Function doubleval() is deprecated since 8.6, use floatval() instead in /t.php on line 3\n"
         );
 
         assert!(!b(&mut t, "boolval", Value::Int(0)));

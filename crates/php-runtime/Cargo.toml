@@ -9,3 +9,4 @@ rust-version.workspace = true
 [dependencies]
 php-syntax.workspace = true
 hashbrown = { version = "0.15", default-features = false, features = ["inline-more"] }
+corosensei = "0.3"

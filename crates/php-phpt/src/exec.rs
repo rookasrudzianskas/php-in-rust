@@ -424,12 +424,14 @@ mod tests {
 
     #[test]
     fn timeout_kills_the_child_promptly() {
+        // The timeout leaves the shell time to print even on a loaded machine;
+        // the kill must still come long before the 30 s sleep ends.
         let mut spec = sh("echo started; sleep 30");
-        spec.timeout = Duration::from_millis(300);
+        spec.timeout = Duration::from_secs(2);
         let t = Instant::now();
         let out = run(&spec);
         assert!(out.timed_out);
-        assert!(t.elapsed() < Duration::from_secs(8), "{:?}", t.elapsed());
+        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
         assert_eq!(out.data, b"started\n");
     }
 
